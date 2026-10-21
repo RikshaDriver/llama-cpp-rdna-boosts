@@ -26,7 +26,7 @@ top of `WORKLOG.md` is the newest record.
 | **65** | IQ4_NL field (MTP) + `--host-experts pool` decode collapses | memory | parked (maintainer 2026-10-15; the "after r67" condition is long past — never picked up, still parked) |
 | **70** | harden the expert-cache re-arm / wide-aux growth against a starved arena | robustness | open |
 | **78** | DFlash2 `-sm tensor`: the real Meta distributed `TOP_K` fix | correctness | open, scoping (`wip/dflash-meta-split-impl/`) |
-| **79** | RDNA3_0 verify-band fusions: no multi-device measurement, and gfx1101/gfx1102 untested | platform validation | open (shipped default-on in r95; needs a 2+ card gfx1100 box) |
+| **79** | RDNA3_0 verify-band fusions: no multi-device measurement, and gfx1101/gfx1102 untested | platform validation | open (shipped default-on in r95).  The 2-card gfx1100 box is now available — `ssh fingon` (2× gfx1100, r104 applied): a `-sm layer`/`-sm tensor` MTP run there covers the multi-device arm; gfx1101/gfx1102 still have no hardware |
 | **80** | meta split-state cache: 30+ lookups per node per re-allocation | performance | parked (`archive/work/issue-184-meta-r80r82/RESOLUTION.md` `§` headroom) |
 
 Accepted limitations that are deliberately **not** fixed are listed at the end — do not re-report them.
