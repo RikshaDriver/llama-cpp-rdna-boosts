@@ -70,9 +70,18 @@ in CI.  The model-level gates are manual:
 3. **Prefill logits** — `scripts/gate-prefill-logits.sh`: mean KLD <= 0.005 and same-top-p >= 98 % against
    a recorded known-good base.  **Required for any change to a prefill kernel** (GDN/SSM chunked, FA,
    MMQ/MMVF/MMB, MoE prefill) or to a default-on approximate path.  Protocol:
-   [`benchmarks/prefill-logit-methodology.md`](benchmarks/prefill-logit-methodology.md).  A **kernel-family
-   switch** (a new tile/WMMA head cap) is decided against the equivalent switch already shipped, not against
-   the absolute limit — `GREEDY-PURITY.md` §46; today's one such arm is block 05's RDNA3_0 head-512 rows.
+   [`benchmarks/prefill-logit-methodology.md`](benchmarks/prefill-logit-methodology.md).
+   A **kernel-family switch** (a new tile/WMMA head cap, e.g. block 05's RDNA3_0 head-512 rows) uses the
+   script's `--family-switch` mode, which judges the same absolute limits **at a point inside the gate's
+   calibrated domain** and always prints a same-kernel reordering control measured on the spot:
+   `--record --ab "<feature-off env>" --family-switch --model <head-256/512 model> --corpus
+   prompts/fa-family-switch-gemma4-26B-A4B.txt --ctx 2048 --chunks 10`, then the same command without
+   `--record`.  The mode refuses a point whose base PPL is above `--family-max-ppl` (default 10): at a
+   point the model is not confident about, *every* reordering measures far outside the limits (a benign
+   `-ub 512` vs `-ub 256` same-kernel change measures 0.105 / 85.0 %, so such a point cannot decide the
+   question — `GREEDY-PURITY.md` §46, `archive/work/fa-rdna3-head512-purity/RESOLUTION.md`).
+   The `FA_DBG_NMSE` op-level accuracy reference (`test-backend-ops` error magnitude vs the CPU backend at
+   the model's own prefill shape) is the second, deterministic leg of a family-switch judgement.
 4. **Per-block build** — `scripts/gate-per-block-build.sh` on a clean `all` build per commit (bisection and
    review walk the blocks individually, so every block must build on its own).  Use `--changed-from` to
    rebuild only the blocks a release changed.
@@ -92,7 +101,7 @@ on the tip.
 | 02 | `tests/test-speculative-adaptive`, `tests/test-arg-parser`; `llama-server --spec-type draft-mtp-adaptive` smoke | pass |
 | 03 | `test-backend-ops -o GATED_DELTA_NET`; `test-recurrent-state-depth`, `test-recurrent-state-rollback` | per-arm FAIL/PASS set unchanged from the recorded baseline (the counts differ per box — never gate on zero) |
 | 04 | `test-backend-ops` bf16-KV FA cases + a bf16-cache model run | pass; coherence identical to f16 |
-| 05 | `test-backend-ops -o FLASH_ATTN_EXT` (full matrix); width probe; prefill-logit gate | 6391/6391 on the r92 tree; probe PASS; KLD <= 0.005 — except the RDNA3_0 head-512 row set, which is calibrated against the shipped head-256 switch instead (`GREEDY-PURITY.md` §46) |
+| 05 | `test-backend-ops -o FLASH_ATTN_EXT` (full matrix); width probe; prefill-logit gate | 6389/6389 on the r102 tree (gfx1100); probe PASS; KLD <= 0.005 for within-family changes, and the RDNA3_0 head-512 row set passes the absolute limit in `--family-switch` mode (0.001778 / 98.967 % at a base-PPL-2.65 point) — `GREEDY-PURITY.md` §46 |
 | 06 | `test-backend-ops -o MUL_MAT` (MMQ cases) + prefill A/B | pass; prefill not slower at depth |
 | 07 | `test-backend-ops -o MUL_MAT`/`MUL_MAT_ID` (K-quant cases); `llama-perplexity` before/after | pass; **PPL must be unchanged** (it is a numerics change, not a quality change) |
 | 08 | `test-backend-ops -o MUL_MAT_ID`; MoE decode + `llama-batched-bench -npl 1,4,8`; width probe on a MoE model | pass; one hash across the band; verify widths not slower than stock-relative |

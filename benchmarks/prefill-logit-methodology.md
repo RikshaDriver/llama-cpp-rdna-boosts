@@ -125,6 +125,42 @@ can "fail".  `Qwen3.8-27B-Q8_0` (0.000000 / 99.994 %) and `Qwen3.8-Flash-Next-IQ
 100.000 %, 2 GPU) are clean on the same box and are the models to gate on.  A noisy self-KLD is a
 *measurement* result, not a gate result — do not tune a threshold to it.
 
+## Family switches: judge at a calibrated point, against a same-kernel control
+
+A **kernel-family switch** (a tile -> WMMA flash-attention row set, a new head cap) does not share a
+reduction order with the kernel it replaces, so its divergence *is* the tuning and cannot be driven to
+zero by any row parameter. The gate's absolute limits therefore need two extra guards, implemented as
+`scripts/gate-prefill-logits.sh --family-switch`:
+
+1. **The point must be one the model is confident about** (base PPL inside the calibrated domain; the
+   gate was pinned at base PPL 5.93).  At a point it finds hard, *every* reordering measures far
+   outside the limits, so the number says nothing about the candidate.  Measured on gfx1100 with
+   gemma-4-26B-A4B-QAT (2026-10-21, `archive/work/fa-rdna3-head512-purity/`):
+
+   | point (gemma-4-26B-A4B QAT, f16 K/V) | base PPL | same-kernel control `-ub 512` vs `-ub 256` |
+   |---|---:|---|
+   | wikitext-2, `-c 512 --chunks 40` (the default point) | 607 | **0.104989 / 85.000 %** |
+   | the model's own in-domain text, `-c 512 --chunks 30` | 13.7 | 0.036654 / 93.660 % |
+   | the same at `-c 2048 --chunks 10` (`prompts/fa-family-switch-gemma4-26B-A4B.txt`) | **2.65** | 0.013962 / 97.221 % |
+
+   A benign ubatch change is 21x the KLD limit at the wikitext point.  The model is a *reasoning* model,
+   so raw wikitext is 45x outside its confident range; that is why block 05's head-512 rows "failed"
+   there (0.0462 / 90.42 %) and pass at the in-domain point (0.00178 / 98.97 %).
+
+2. **The control must be measured on the spot.**  The same kernel at a different ubatch is the floor of
+   what a reordering costs at that point; a candidate no worse than it carries no evidence of a defect.
+   The mode records the control base next to the fallback base (same arm, `--control-ub`, default 256)
+   and always prints it.  The absolute limits stay authoritative whenever they are met.
+
+`--record --family-switch --ab "<feature-off env>"` records both bases and refuses a point whose base PPL
+is above `--family-max-ppl` (default 10).  The **op-level accuracy reference** is the second leg, and it
+is deterministic: with `FA_DBG_NMSE=1` `test-backend-ops -o FLASH_ATTN_EXT` prints the NMSE already
+computed against the CPU backend for every case, so the two families can be compared on the model's own
+prefill shape (`hsk=hsv=512, nr23=[8,1], kv=32768, nb=512`).  On gfx1100 the head-512 WMMA rows and the
+tile kernel are within a factor 1.3 of each other there (f16 5.99e-5 vs 5.71e-5, q8_0 2.30e-5 vs
+1.64e-5, threshold 5e-4), i.e. neither is an accuracy regression; at smaller query widths WMMA is 1.1-2.8x
+closer to the CPU reference.
+
 ## Scope: when the gate is required
 
 Run it before a release (and after any change to `patches/`) whenever the block set touches:

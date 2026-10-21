@@ -105,7 +105,7 @@ numbers are **stable** — dozens of docs cite them — so they are never renumb
 | **§43** | one split holds one consumer of a staged expert table | fix (r96) |
 | **§44** | a per-start hipBLASLt solution pick is not a code defect; pin `ROCBLAS_USE_HIPBLASLT=0` before comparing starts | doctrine |
 | **§45** | a split the op cannot serve locally must be rejected, never approximated — and "locally" means no device straddles the reduction | fix (r101) |
-| **§46** | a tile→WMMA family switch is calibrated against the switches already shipped, not against the absolute limit | accepted deviation (r102, TODO #81) |
+| **§46** | a tile→WMMA family switch is judged at a calibrated point (base PPL in the gate's domain) against a same-kernel ubatch control; the r102 head-512 rows pass there | doctrine (r102, TODO #81 closed 2026-10-21) |
 
 ---
 
@@ -988,43 +988,59 @@ Where: `archive/work/fix-gemma-4/RESOLUTION.md`; measurements
 
 ---
 
-## 46. A tile→WMMA family switch is calibrated against the switches already shipped, not against the absolute limit
+## 46. A tile→WMMA family switch is judged at a calibrated point, against a same-kernel control
 
 **Claim.** The prefill-logit gate's absolute limits (mean KLD `<= 0.005`, same-top-p `>= 98 %`) decide a
-change *inside* a kernel family: a new quant type, a precision change, an approximate path.  They cannot
-decide a **kernel-family switch** such as the r5/r99 FA head caps or the r102 RDNA3_0 head-512 rows,
-because the two families do not share a reduction order and the divergence is therefore not a defect to be
-driven to zero: the order *is* the tuning.  For a family switch the decidable criterion is **no worse than
-the equivalent switch the delivery already ships**, measured at the same model/corpus point.
+change *inside* a kernel family: a quant type, a precision change, an approximate path.  A **kernel-family
+switch** (the r5/r99 FA head caps, the r102 RDNA3_0 head-512 rows) does not share a reduction order with
+the kernel it replaces, so its divergence is the tuning, not a defect.  Two guards make it decidable:
 
-**The measurement.**  `scripts/gate-prefill-logits.sh` gives the base arm and the candidate arm.  For a
-family switch, run it twice against one base file: once with the candidate disabled (the fallback arm the
-shipped set already uses) and once with the candidate enabled, and require the candidate to be no worse on
-mean KLD and same-top-p, plus PPL within its error bar and the op oracle green
-(`test-backend-ops -o FLASH_ATTN_EXT`).
+1. **The point must be one the model is confident about** (base PPL inside the gate's calibrated domain,
+   ~6).  At a point it finds hard, *every* reordering is far outside the limits, so the number says
+   nothing about the candidate.  This was the whole of the r102 "failure" (`TODO.md` #81, closed
+   2026-10-21); the model there is a reasoning model on raw wikitext, 45x outside its confident range.
+2. **A same-kernel control measured on the spot** — the same kernel at a different ubatch — so the
+   candidate is compared with the floor of what a reordering costs there, not only with an absolute
+   number.
 
-**Numbers (r102, gfx1100, gemma-4-26B-A4B QAT UD-Q4_K_XL, wikitext-2, 40 x 512, f16 K/V — the gate's own
-protocol; the point has base PPL 604, so it is far outside the gate's calibrated domain, against 5.93 for
-the 27B Q8_0 it was pinned on).**
+**The measurement (gfx1100, gemma-4-26B-A4B-QAT UD-Q4_K_XL, f16 K/V, one base file per point, one base
+per arm.)**
 
-| change | mean KLD | same top p |
-|---|---|---|
-| **candidate: head-512 WMMA vs tile (this switch)** | **0.0293** | **92.59 %** |
-| reference: head-256 WMMA vs fully tile (**shipped default-on for gfx1100 since r5**) | 0.0441 | 90.63 % |
-| reference: benign ubatch change, same kernel (tile `-ub 512` vs `-ub 256`) | ~0.12 per chunk | 84.5 % |
-| reference: issue #113 BF16 chunked GDN on gfx1100 | 0.62 | — |
+| point | base PPL | same-kernel control (`-ub 512` vs `-ub 256`) | head-256 rows vs fully tile | head-512 rows, marginal (vs the delivery without them) |
+|---|---:|---|---|---|
+| wikitext-2 `-c 512 --chunks 40` (the default gate point) | 607 | **0.104989 / 85.000 %** | 0.044055 / 90.627 % | 0.029285 / 92.588 % |
+| in-domain text `-c 512 --chunks 30` | 13.7 | 0.036654 / 93.660 % | 0.022562 / 96.000 % | 0.011303 / 97.451 % |
+| in-domain text `-c 2048 --chunks 10` (`prompts/fa-family-switch-gemma4-26B-A4B.txt`) | **2.65** | 0.013962 / 97.221 % | 0.005994 / 98.324 % | **0.001778 / 98.967 %** |
 
-PPL agrees it is rounding-level: f16 K/V 604.06 (tile) vs 607.20 (WMMA); q8_0 K/V 617.85 vs 620.59.  That
-is +0.5 % with a +/-5 % error bar, in the same direction on both cache types, at a PPL where nothing is
-resolvable.  The op oracle is clean (`FLASH_ATTN_EXT` 6391/6391 on gfx1100, including the head-512 shapes).
+So the head-512 rows **pass the absolute limits at a calibrated point** (0.00178 / 98.967 %, 2.8x inside
+the KLD limit and 8x better than the same-kernel control), and at every point they are more faithful than
+the head-256 rows shipped default-on since r5 — which are the bigger *total* contributor only because
+there are 25 of those layers against 5.
 
-**Why the absolute limit cannot be met here.**  Making the WMMA rows reproduce the tile kernel's rounding
-would mean reproducing its threads, its VKQ combine order and its online-softmax rescaling interval, i.e.
-giving up the occupancy win that the rows exist for.  Every tile→WMMA cap the set already ships (head 240
-RDNA3_5, head 256 RDNA3_0, head 576 RDNA4) has the same property; measuring one of them against the tile
-kernel produces the 0.0441 above.
+**No row parameter moves the number** (all measured against the same bases, gfx1100, deployable binary):
+an fp32 PV accumulator (`T_C_VKQ`; the one structural difference from the tile kernel's fp32 accumulator)
+gave 0.030489 marginal at the wikitext point and cost **-32 %** throughput; `nbatch_fa` 64 gave 0.030865
+at -19 %; `nbatch_fa` 128 (+`Q_in_reg=true`, the tile kernel's strip length) gave 0.029081 at -14 %;
+`Q_in_reg=true` alone is **bit-identical** (KLD to every printed digit) at **-29 %** — the win really is
+the spills and it has no accuracy effect.  The divergence is the reduction order; attribution table and
+per-variant records: `archive/work/fa-rdna3-head512-purity/`.
 
-**Status.**  Accepted as a documented deviation (r102, PR #199).  It is not a license for within-family
-changes: those still meet 0.005 / 98 %.  Closing the gap, or replacing this criterion with an accuracy
-reference (an op-level f64/CPU oracle instead of a KLD against a sibling kernel), is `TODO.md` #81 and
-`wip/fa-rdna3-head512-purity/`.
+**The op-level accuracy reference is the second, deterministic leg.**  `FA_DBG_NMSE=1 test-backend-ops -o
+FLASH_ATTN_EXT` prints the NMSE each case already computes against the CPU backend, so the two families can
+be compared on the model's own prefill shape (`hsk=hsv=512, nr23=[8,1], kv=32768, nb=512`): f16 5.99e-5
+(WMMA) vs 5.71e-5 (tile), q8_0 2.30e-5 vs 1.64e-5, threshold 5e-4 — within a factor 1.3, neither an
+accuracy regression; at nb=24/64 WMMA is 1.1-2.8x *closer* to the CPU reference.  (`FA_DBG_SEED=1` pins the
+random input so the two arms are comparable; without it the test data is redrawn per run and NMSE moves by
+up to 13x.)
+
+**Rule.** For a family switch run `scripts/gate-prefill-logits.sh --family-switch` (protocol:
+`benchmarks/prefill-logit-methodology.md`): it refuses a point whose base PPL is above `--family-max-ppl`
+(default 10), records a control base with the fallback arm at `--control-ub` (default 256), always prints
+the control, and passes on the absolute limits or on "no worse than the control".  Record the op-level
+NMSE pair too.  This is not a license for within-family changes: those still meet 0.005 / 98 % at the
+default point.
+
+**Historical correction.**  The r102 numbers that motivated this campaign were the *marginal* pair measured
+against the delivery without the 512 rows (`0.0293 / 92.59 %`), while the fully-tile absolute pair is
+`0.0462 / 90.42 %` — and the delivery's own head-256 rows already cost `0.0441 / 90.63 %` against fully
+tile.  The `WORKLOG` 261021.004 line labels the marginal pair "head-512 WMMA vs tile".

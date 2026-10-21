@@ -1,6 +1,7 @@
-# wip/fa-rdna3-head512-purity — why does the gfx1100 head-512 WMMA FA row set move the prefill logits?
+# archive/work/fa-rdna3-head512-purity — why does the gfx1100 head-512 WMMA FA row set move the prefill logits?
 
-**Status: OPEN (seeded 2026-10-21, r102).**  Promoted default-on with a documented deviation, not closed.
+**Status: CLOSED 2026-10-21 — resolved as "the point was the problem"; see [`RESOLUTION.md`](RESOLUTION.md).**
+The rows pass the absolute limits at a calibrated point (`0.001778 / 98.967 %`).  Kept as the historical brief.
 This campaign exists to either (a) find a row set that meets the prefill-logit gate's absolute limits
 (mean KLD `<= 0.005`, same-top-p `>= 98 %`), or (b) show the divergence is inherent to a tile→WMMA family
 switch and replace the criterion with a real accuracy reference.  Candidate (b) is a legitimate result and

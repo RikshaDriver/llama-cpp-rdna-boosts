@@ -1,5 +1,77 @@
 # WORKLOG - dated delivery records
 
+## 261021.007 (r103) -- head-512 FA purity campaign closed (the point, not the rows) + three folded fixes
+
+**Release `v12-097cf33d9-r103`**, 12 blocks, fork point `097cf33d9`, tip `283b8b8ac`, tree
+`7b45c00088a75d6f7331a63613a336c5537c3c7a`.  Two block amendments (05, 10), no new block:
+`scripts/validate-set.sh` strict 12/12 from a fresh tarball (tree matches), `scripts/gate-per-block-build.sh
+--changed-from r102-tip` **3/3** (blocks 05, 10, 11).  *(Renumbered from the 261021.005 this session first
+used: the gfx1201 box closed TODO #75 and seeded `wip/hipblaslt-bypass/` under 261021.005/.006 the same day,
+and TODO #82 is theirs — the bf16 item below is #83.)*
+
+### The campaign: `TODO` #81 closed, no FA row change (`GREEDY-PURITY.md` §46 rewritten)
+
+The r102 ledger's `0.0293 / 92.59 %` for the gfx1100 head-512 rows is the **marginal** pair (default vs the
+delivery *without* the 512 rows).  Against **fully tile** the same build measures `0.046179 / 90.422 %`, and
+the head-256 rows shipped since r5 already measure `0.044055 / 90.627 %` there.  More importantly the
+*wikitext point itself* cannot decide a family switch: a pure same-kernel ubatch change (fully tile,
+`-ub 512` vs `-ub 256`) measures **0.104989 / 85.000 %** — 21x the KLD limit — because gemma-4-26B-A4B is a
+*reasoning* model and raw wikitext is 45x outside its confident range (base PPL 607).  At an in-domain point
+(the model's own greedy continuations, now shipped as `prompts/fa-family-switch-gemma4-26B-A4B.txt`, base PPL
+**2.65**) the same unmodified rows measure **0.001778 / 98.967 %** against the feature-off arm, with the
+same-kernel control at `0.012049 / 97.333 %`.  Per switch, strictly (`--candidate-env`): head-512 **PASS**,
+head-256 alone `0.005994 / 98.324 %` (top-p passes, KLD 20 % over), whole set `0.006150 / 98.227 %`.  PPL
+parity 2.6515 vs 2.6530; throughput untouched (+34.3 % over the feature-off arm: pp2048 @ d32768 2570.07 vs
+1913.30 t/s; tg128 127.37 vs 127.19); `FLASH_ATTN_EXT` 6389/6389.
+
+Nothing in the kernel moves that number: fp32 PV accumulator (`T_C_VKQ`) 0.030489 marginal at **-32 %**
+(below the tile arm); `nbatch_fa` 64 / 128 +-6 % at -19 / -14 %; `Q_in_reg=true` **bit-identical** at -29 %
+(the win really is the VGPR spills); `nthreads=256` not instantiable; the two head-256 prefill levers
+(`nbatch_fa`, `nbatch_K2/V2`) are bit-identical for a mechanical reason (a rescale by exactly 1.0 is exact,
+and splitting the K loop does not reorder the fp32 mma accumulation).  The op-level oracle (CPU reference,
+deterministic inputs, the model's own prefill shape kv=32768 nb=512 GQA 8 — the two cases are now in
+`tests/test-backend-ops.cpp`) puts the families within a factor 1.3 of each other, both ~10x under threshold.
+Record: `archive/work/fa-rdna3-head512-purity/` (`RESOLUTION.md`, `MEASUREMENTS-2026-10-21.md`, every
+experimental arm as a patch under `variants/`).
+
+### The delivery changes (why r103 exists)
+
+1. **gemma-4 bf16 K/V prefill no longer aborts (block 10, `rope.cu`).**  TODO #83.  `rope.cu` instantiated
+   float/f16 destinations for the NORMAL and NEOX modes but not **bf16**, and since r101 the iSWA `k_cur`/
+   `v_cur` reorder lets the ROPE -> VIEW -> SET_ROWS fusion fire for Gemma's K, so `-ctk bf16 -ctv bf16`
+   prefill died at `rope.cu:672` (`ggml_cuda_op_rope_impl<true>`).  Reproduced here on r102 first.  The four
+   missing instantiations were added; the fused kernel stores with a single `ggml_cuda_cast<D>`, exactly like
+   the `SET_ROWS` it replaces, so it must round identically — verified: **KLD -0.000000 / same-top-p
+   100.000 %** against the `GGML_CUDA_DISABLE_ROPE_SET_ROWS=1` arm at bf16 K/V, and it is *faster* than the
+   workaround (pp512 5136.70 vs 4973.06 t/s).
+2. **FA test instrument (block 10, `tests/test-backend-ops.cpp`).**  `LLAMA_TEST_OP_NMSE=1` prints the error
+   magnitude every case already computes (not just pass/fail) and `LLAMA_TEST_SEED=<n>` pins the random
+   input, so two kernel arms or two builds are comparable element by element — without the seed the data is
+   redrawn per run and an NMSE moves by up to 13x, which is how the first "WMMA is more accurate" reading in
+   this campaign was produced and then refuted.  Plus the two head-512 prefill-shape cases (kv 32768, nb 512,
+   GQA 8, f16 and q8_0) the criterion reads.  Determinism verified (identical NMSE across runs).
+3. **Latent `VKQ_C` sizing fix (block 05, `fattn-mma-f16.cuh`).**  The RDNA3 `VKQ_C` array was sized for the
+   fp16 C tile's 32-column span, so an **fp32** C tile at `DV % 32 == 0` indexes out of bounds (the head-80/112
+   fp32 rows escape it only because their DV is not a multiple of 32).  Unreachable in the delivery (every
+   instantiated row is fp16 C, for which the expression is unchanged), found while trying the fp32
+   accumulator; landed so the road to one is not a trap.
+
+**Gates on the r103 tree** (gfx1100, `ROCBLAS_USE_HIPBLASLT=0`, one job at a time): `FLASH_ATTN_EXT`
+6389/6389 · `ROPE`/`SET_ROWS` green · bf16 K/V prefill runs (5136.70 t/s pp512) and is bit-identical to the
+unfused chain · prefill-logit **family-switch mode 0.001778 / 98.967 % (PASS)**, control 0.012049 / 97.333 % ·
+default (wikitext) mode 0.046179 / 90.422 % (FAIL — the pre-existing head-256 calibration, unchanged) ·
+pp2048 @ d32768 2570.07 t/s, tg128 @ d32768 127.37 t/s.  **Not re-validated on gfx1201/gfx1151 by this
+session** (no such card on `fingon`): the rope change is dtype-only and inert unless a bf16 rope destination
+is fused (which on those boxes is the same fusion, so it is a strict improvement), the test change is
+test-only, and the VKQ_C expression is unchanged for every fp16 row.  The maintainer's other boxes should run
+their usual gates.
+
+**Docs:** `GREEDY-PURITY.md` §46 rewritten (calibrated point + same-kernel control; historical correction of
+the `0.0293` label), `benchmarks/prefill-logit-methodology.md` (family-switch protocol + the
+point-sensitivity table), `MANIFESTS.md` (gate 3 + the block-05 verification row), `patches/README.md`
+(blocks 05/10), `ENVIRONMENT.md` (the kill-switch note), `prompts/README.md` (+ the new corpus file),
+`wip/CAMPAIGNS.md` (closure note), `TODO.md` (#81 closed, #83 opened and closed).
+
 ## 261021.006 (docs) -- `wip/hipblaslt-bypass`: P0 inventory + P1 VRAM answer; the driver is correctness; arm B refuted
 
 **Docs only: no patch, no `release.json` change, no tree change; `scripts/validate-set.sh` is unaffected.**
@@ -126,7 +198,6 @@ native skinny-F32 GEMM; requantize the F32 weights), the gates for any candidate
 **Docs.**  `TODO.md` loses #75 (row + body) and gains #82 (row + scoping body); `wip/CAMPAIGNS.md` gains the
 campaign row; `GREEDY-PURITY.md` §44 gains the second call site and the Linux cost measurement; `README.md`'s
 issue-#67 section notes that the GDN call site reproduces on 35B-A3B too.
-
 ## 261021.004 (r102) -- PR #199 (gfx1100 head-512 WMMA FA rows) and PR #200 (GDN / attention-gate decode fusions) promoted
 
 Two contributor PRs folded as **two block amendments** (no new block): **v12-097cf33d9-r102**, 12 blocks,

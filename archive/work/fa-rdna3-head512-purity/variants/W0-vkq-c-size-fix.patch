@@ -1,0 +1,73 @@
+diff --git a/ggml/src/ggml-cuda/fattn-mma-f16.cuh b/ggml/src/ggml-cuda/fattn-mma-f16.cuh
+index 8b1d56275..963919272 100644
+--- a/ggml/src/ggml-cuda/fattn-mma-f16.cuh
++++ b/ggml/src/ggml-cuda/fattn-mma-f16.cuh
+@@ -1797,7 +1797,13 @@ static __device__ __forceinline__ void flash_attn_ext_f16_process_tile(
+ #if defined(TURING_MMA_AVAILABLE)
+     T_C_VKQ VKQ_C[cols_per_warp == 8 ? DV/T_C_VKQ::I : DV/(2*T_C_VKQ::J)];
+ #elif defined(AMD_WMMA_AVAILABLE) && defined(RDNA3)
+-    T_C_VKQ VKQ_C[DV % 32 != 0       ? DV/T_C_VKQ::J : DV/(2*T_C_VKQ::J)];
++    // An fp32 C tile spans T_C_VKQ::J output columns, an fp16 one spans 2*T_C_VKQ::J (two wmma ops,
++    // one per half).  Keying the size on DV % 32 only works for the fp32 rows whose DV is not a
++    // multiple of 32 (head 80/112); a fp32 tile at DV % 32 == 0 needs the DV/T_C_VKQ::J size, which is
++    // also the bound the fp32 rescale and combine loops use.  Identical to the old expression for
++    // every fp16 row, so no shipped kernel changes.  (wip/fa-rdna3-head512-purity.)
++    T_C_VKQ VKQ_C[std::is_same_v<decltype(T_C_VKQ::x), float[T_C_VKQ::ne]> ? DV/T_C_VKQ::J :
++                  (DV % 32 != 0 ? DV/T_C_VKQ::J : DV/(2*T_C_VKQ::J))];
+ #elif defined(AMD_MFMA_AVAILABLE)
+     T_C_VKQ VKQ_C[                                     DV/T_C_VKQ::J];
+ #elif defined(AMD_WMMA_AVAILABLE)
+diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
+index 0f00ff8e1..18cd3e354 100644
+--- a/tests/test-backend-ops.cpp
++++ b/tests/test-backend-ops.cpp
+@@ -63,7 +63,8 @@ static void init_tensor_uniform(ggml_tensor * tensor, float min = -1.0f, float m
+         static const size_t n_threads = std::max<size_t>(1, std::min<size_t>(nels/1024, std::min<size_t>(4, N_THREADS/2)));
+ 
+         auto init_thread = [&](size_t start, size_t end) {
+-            thread_local std::default_random_engine gen(std::random_device{}());
++            // WIP (wip/fa-rdna3-head512-purity): deterministic data so two kernel arms can be diffed.
++            thread_local std::default_random_engine gen(getenv("FA_DBG_SEED") ? 1234u : std::random_device{}());
+             std::uniform_real_distribution<float> distribution(min, max);
+             for (size_t i = start; i < end; i++) {
+                 data[i] = distribution(gen);
+@@ -1536,10 +1537,17 @@ struct test_case {
+             }
+ 
+             if (getenv("GDN_DBG_SAVE") != nullptr && (int64_t) f1.size() > 100000) {
++                printf("[DUMP] %s %s n=%zu\n", ggml_op_desc(t1), t1->name, f1.size());
+                 FILE * ff = fopen("/tmp/gdn_dev.bin", "wb");
+                 if (ff) { fwrite(f1.data(), sizeof(float), f1.size(), ff); fclose(ff); }
+             }
+             double err = ud->tc->err(f1.data(), f2.data(), f1.size());
++            // WIP (wip/fa-rdna3-head512-purity): report the error magnitude of every case, not just
++            // pass/fail, so a kernel-family switch can be judged against the CPU reference.
++            if (getenv("FA_DBG_NMSE") != nullptr) {
++                printf("[NMSE] %-22s %s err=%.9g max=%.9g\n", ggml_op_desc(t1), ud->tc->vars().c_str(),
++                       err, ud->tc->max_err(ud->backend1));
++            }
+             if (err > ud->tc->max_err(ud->backend1)) {
+                 printf("[%s] ERR = %.9f > %.9f ", ggml_op_desc(t1), err, ud->tc->max_err(ud->backend1));
+                 // GDN bf16 debug: dump the first mismatches with indices + a diff histogram
+@@ -9513,8 +9521,9 @@ struct test_generic_op : public test_case {
+     void initialize_tensors(ggml_context * ctx) override {
+         ggml_tensor * out = ggml_get_tensor(ctx, "out");
+ 
++        // WIP (wip/fa-rdna3-head512-purity): a fixed seed so two arms can be diffed against each other.
+         std::random_device rd;
+-        std::default_random_engine rng(rd());
++        std::default_random_engine rng(getenv("FA_DBG_SEED") ? std::default_random_engine::result_type(42) : rd());
+ 
+         for (size_t i = 0; i < sources.size() && i < GGML_MAX_SRC; i++) {
+             ggml_tensor * t = out->src[i];
+@@ -12186,6 +12195,10 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+     // sparse mask with large batch size
+     test_cases.emplace_back(new test_flash_attn_ext(512, 512, 1, { 8, 1}, 4096, 64, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16, {0, 1, 2, 3}, true, false,  512));
+     test_cases.emplace_back(new test_flash_attn_ext(512, 512, 1, { 8, 1}, 4096, 64, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16, {0, 1, 2, 3}, true, false, 2048));
++    // WIP (wip/fa-rdna3-head512-purity): the *prefill* shape of gemma-4-26B-A4B's global layers
++    // (head 512, GQA 8, 32k KV, 512 queries per ubatch), the shape the head-512 rows are for.
++    test_cases.emplace_back(new test_flash_attn_ext(512, 512, 2, { 8, 1}, 32768, 512, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16, {0, 1, 2, 3}, true, false, 2048));
++    test_cases.emplace_back(new test_flash_attn_ext(512, 512, 2, { 8, 1}, 32768, 512, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0, {0, 1, 2, 3}, true, false, 2048));
+     test_cases.emplace_back(new test_flash_attn_ext(576, 512, 1, {16, 1}, 4096, 64, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16, {0, 1, 2, 3}, true, true,   512));
+     test_cases.emplace_back(new test_flash_attn_ext(576, 512, 1, {16, 1}, 4096, 64, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16, {0, 1, 2, 3}, true, true,  2048));
+     test_cases.emplace_back(new test_flash_attn_ext(256, 256, 1, { 8, 1}, 4096, 64, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16, {0, 1, 2, 3}, true, false,  512));

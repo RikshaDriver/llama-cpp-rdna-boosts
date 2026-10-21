@@ -1,0 +1,82 @@
+diff --git a/ggml/src/ggml-cuda/fattn-mma-f16.cuh b/ggml/src/ggml-cuda/fattn-mma-f16.cuh
+index 8b1d56275..789d827ec 100644
+--- a/ggml/src/ggml-cuda/fattn-mma-f16.cuh
++++ b/ggml/src/ggml-cuda/fattn-mma-f16.cuh
+@@ -1675,6 +1675,19 @@ template<int ncols> struct mma_tile_sizes<112, ncols> {
+     using T_B_VKQ = tile<16,  8, half2, DATA_LAYOUT_I_MAJOR_MIRRORED>; // column-major
+     using T_C_VKQ = tile<16, 16, float, DATA_LAYOUT_I_MAJOR>;          // column-major
+ };
++// WIP EXPERIMENT (wip/fa-rdna3-head512-purity): fp32 PV accumulator for head 512.
++// The generic row accumulates VKQ in fp16 (T_C_VKQ = tile<16,16,half2>) and rescales that fp16
++// accumulator once per nbatch_fa block; the tile kernel accumulates VKQ in fp32.  This uses the
++// same fp32 C tile / 16-wide VKQ A tile the head-80/112 rows already use, so it is a live code path.
++// Register footprint is unchanged: tile<16,16,float> is 8 f32 = 8 regs, tile<16,16,half2> is 8 half2.
++template<int ncols> struct mma_tile_sizes<512, ncols> {
++    using T_A_KQ  = tile<16,  8, half2, DATA_LAYOUT_I_MAJOR_MIRRORED>; // row-major
++    using T_B_KQ  = tile<16,  8, half2, DATA_LAYOUT_I_MAJOR_MIRRORED>; // column-major
++    using T_C_KQ  = tile<16, 16, float, DATA_LAYOUT_I_MAJOR>;          // column-major
++    using T_A_VKQ = tile<16,  8, half2, DATA_LAYOUT_I_MAJOR_MIRRORED>; // row-major
++    using T_B_VKQ = tile<16,  8, half2, DATA_LAYOUT_I_MAJOR_MIRRORED>; // column-major
++    using T_C_VKQ = tile<16, 16, float, DATA_LAYOUT_I_MAJOR>;          // column-major
++};
+ #else
+ template<int DKQ, int ncols> struct mma_tile_sizes {
+     using T_A_KQ  = tile<16,  8, half2, DATA_LAYOUT_I_MAJOR>;           // row-major
+@@ -1797,7 +1810,12 @@ static __device__ __forceinline__ void flash_attn_ext_f16_process_tile(
+ #if defined(TURING_MMA_AVAILABLE)
+     T_C_VKQ VKQ_C[cols_per_warp == 8 ? DV/T_C_VKQ::I : DV/(2*T_C_VKQ::J)];
+ #elif defined(AMD_WMMA_AVAILABLE) && defined(RDNA3)
+-    T_C_VKQ VKQ_C[DV % 32 != 0       ? DV/T_C_VKQ::J : DV/(2*T_C_VKQ::J)];
++    // An fp32 C tile spans T_C_VKQ::J output columns, an fp16 one spans 2*T_C_VKQ::J (two wmma ops,
++    // one per half).  Keying the size on DV % 32 only works for the fp32 rows whose DV is not a
++    // multiple of 32 (head 80/112); a fp32 tile at DV % 32 == 0 needs the DV/T_C_VKQ::J size, which is
++    // also the bound the fp32 rescale and combine loops use.  (WIP wip/fa-rdna3-head512-purity.)
++    T_C_VKQ VKQ_C[std::is_same_v<decltype(T_C_VKQ::x), float[T_C_VKQ::ne]> ? DV/T_C_VKQ::J :
++                  (DV % 32 != 0 ? DV/T_C_VKQ::J : DV/(2*T_C_VKQ::J))];
+ #elif defined(AMD_MFMA_AVAILABLE)
+     T_C_VKQ VKQ_C[                                     DV/T_C_VKQ::J];
+ #elif defined(AMD_WMMA_AVAILABLE)
+diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
+index 0f00ff8e1..eb944a850 100644
+--- a/tests/test-backend-ops.cpp
++++ b/tests/test-backend-ops.cpp
+@@ -1536,10 +1536,17 @@ struct test_case {
+             }
+ 
+             if (getenv("GDN_DBG_SAVE") != nullptr && (int64_t) f1.size() > 100000) {
++                printf("[DUMP] %s %s n=%zu\n", ggml_op_desc(t1), t1->name, f1.size());
+                 FILE * ff = fopen("/tmp/gdn_dev.bin", "wb");
+                 if (ff) { fwrite(f1.data(), sizeof(float), f1.size(), ff); fclose(ff); }
+             }
+             double err = ud->tc->err(f1.data(), f2.data(), f1.size());
++            // WIP (wip/fa-rdna3-head512-purity): report the error magnitude of every case, not just
++            // pass/fail, so a kernel-family switch can be judged against the CPU reference.
++            if (getenv("FA_DBG_NMSE") != nullptr) {
++                printf("[NMSE] %-22s %s err=%.9g max=%.9g\n", ggml_op_desc(t1), ud->tc->vars().c_str(),
++                       err, ud->tc->max_err(ud->backend1));
++            }
+             if (err > ud->tc->max_err(ud->backend1)) {
+                 printf("[%s] ERR = %.9f > %.9f ", ggml_op_desc(t1), err, ud->tc->max_err(ud->backend1));
+                 // GDN bf16 debug: dump the first mismatches with indices + a diff histogram
+@@ -9513,8 +9520,9 @@ struct test_generic_op : public test_case {
+     void initialize_tensors(ggml_context * ctx) override {
+         ggml_tensor * out = ggml_get_tensor(ctx, "out");
+ 
++        // WIP (wip/fa-rdna3-head512-purity): a fixed seed so two arms can be diffed against each other.
+         std::random_device rd;
+-        std::default_random_engine rng(rd());
++        std::default_random_engine rng(getenv("FA_DBG_SEED") ? std::default_random_engine::result_type(42) : rd());
+ 
+         for (size_t i = 0; i < sources.size() && i < GGML_MAX_SRC; i++) {
+             ggml_tensor * t = out->src[i];
+@@ -12186,6 +12194,10 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+     // sparse mask with large batch size
+     test_cases.emplace_back(new test_flash_attn_ext(512, 512, 1, { 8, 1}, 4096, 64, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16, {0, 1, 2, 3}, true, false,  512));
+     test_cases.emplace_back(new test_flash_attn_ext(512, 512, 1, { 8, 1}, 4096, 64, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16, {0, 1, 2, 3}, true, false, 2048));
++    // WIP (wip/fa-rdna3-head512-purity): the *prefill* shape of gemma-4-26B-A4B's global layers
++    // (head 512, GQA 8, 32k KV, 512 queries per ubatch), the shape the head-512 rows are for.
++    test_cases.emplace_back(new test_flash_attn_ext(512, 512, 2, { 8, 1}, 32768, 512, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16, {0, 1, 2, 3}, true, false, 2048));
++    test_cases.emplace_back(new test_flash_attn_ext(512, 512, 2, { 8, 1}, 32768, 512, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0, {0, 1, 2, 3}, true, false, 2048));
+     test_cases.emplace_back(new test_flash_attn_ext(576, 512, 1, {16, 1}, 4096, 64, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16, {0, 1, 2, 3}, true, true,   512));
+     test_cases.emplace_back(new test_flash_attn_ext(576, 512, 1, {16, 1}, 4096, 64, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16, {0, 1, 2, 3}, true, true,  2048));
+     test_cases.emplace_back(new test_flash_attn_ext(256, 256, 1, { 8, 1}, 4096, 64, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16, {0, 1, 2, 3}, true, false,  512));

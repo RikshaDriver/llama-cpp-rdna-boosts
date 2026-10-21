@@ -268,8 +268,10 @@ back to the tile kernel), `GGML_CUDA_FA_ALL_QUANTS` (build), `GGML_CUDA_OP_TIMIN
 **Purity.**  One arm across `W = 1..8` is the contract; the guarantee is per KV type
 (`GREEDY-PURITY.md` §§11-14, 36).  **Any change to an FA kernel or the derived mask must pass
 `scripts/gate-prefill-logits.sh`** — decode-side coherence and MTP are blind to a uniform prefill shift.
-The single documented exception is the r102 RDNA3_0 head-512 row set (§46), which is calibrated against the
-family switches already shipped rather than against the absolute limit.
+A **family switch** (the r102 RDNA3_0 head-512 row set, §46) is judged with
+`scripts/gate-prefill-logits.sh --family-switch`: it passes the same absolute limits at a point inside the
+gate's calibrated domain (0.001778 / 98.967 % at base PPL 2.65) and is reported against a same-kernel
+ubatch control measured on the spot.
 
 **Upstream candidates.**  `fa-kv-split-width` (block 00), `fa-decode-verify-kernel-family`,
 `fa-512-rdna-head-cap`, `attn-k-null-mask-guard` — see [`../upstream/`](../upstream/README.md).

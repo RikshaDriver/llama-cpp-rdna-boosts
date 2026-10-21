@@ -30,6 +30,17 @@ is the signature of a stub, not of a campaign.
 | [`ngram-mod-host-experts/`](ngram-mod-host-experts/README.md) | `ngram-mod` + `draft-mtp-adaptive` roughly halves decode when the MoE experts are host-resident (`-ncmoe`/`-cmoe`, expert cache active); plain `draft-mtp-adaptive` restores the expected rate | **OPEN (seeded 2026-10-14), scoping + measurement** |
 | [`moe-cache-coverage/`](moe-cache-coverage/README.md) | **how much of the routing distribution the arena can hold and how well admission uses it** (renamed from `moe-arena-defrag` 2026-10-17).  P0 (heat-map correctness) shipped in r80; next is the offline routing-trace replayer, then a per-layer capacity quota | **OPEN (renamed + retargeted 2026-10-17)** — the defrag premise was refuted by measurement: the arena is ~100 % allocated in slots (0.51 % truncation) and eviction churn is 3.0 % of reaches, so compaction wins ≤ 0.5 % of bytes.  The same review found the **MoE heat map doubling per flush** (fixed in r80) and showed the Strata hit-rate gap is accounting + arena size, not fragmentation (equal basis: 91.9 % vs 90.6 %).  Plan: P1 offline routing-trace replayer, P2 per-layer capacity quota (0.3-0.5 pts on a clean map, the only strictly-in-arena win), P3 metric parity; arena size handed to `archive/work/slab-transient-absorption/`.  See [`FINDINGS-2026-10-17-coverage-vs-defrag.md`](moe-cache-coverage/FINDINGS-2026-10-17-coverage-vs-defrag.md) |
 
+**Closed (2026-10-21).**  `fa-rdna3-head512-purity` (the r102 gfx1100 head-512 WMMA FA purity question,
+`TODO` #81) closed with a *measurement* result: at a point inside the prefill-logit gate's calibrated domain
+the promoted rows measure mean KLD **0.001778 / same-top-p 98.967 %** (inside the absolute limits) and are
+8x more faithful than a same-kernel ubatch control, while at the wikitext point even that control measures
+0.105 / 85.0 % — the point, not the kernel, was the problem.  No row parameter, accumulator precision or
+block size moves the number (an fp32 PV accumulator costs -32 % for nothing; `Q_in_reg=true` is
+bit-identical at -29 %).  The gate gained a `--family-switch` mode (calibrated point + same-kernel control +
+the `FA_DBG_NMSE` op-level accuracy reference); `patches/` and `release.json` are unchanged.  Record:
+`archive/work/fa-rdna3-head512-purity/` (`RESOLUTION.md`, `MEASUREMENTS-2026-10-21.md`); see
+`WORKLOG.md` 261021.005.
+
 **Promoted (r99, 2026-10-20).**  PR #198 (`@slavap`, `rdna2-fa-followups-todo71-72`) was promoted into
 **block 05**: one shared tile K/V type selection (the instantiation and the F16 scratch sizing can no longer
 disagree, TODO 71) and an RDNA2-gated checked tail for the last unchecked tile (TODO 72).  Folded rather

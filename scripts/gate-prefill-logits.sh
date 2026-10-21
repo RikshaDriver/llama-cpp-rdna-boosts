@@ -22,6 +22,31 @@
 #                    arm against it.  This is the check that catches issue #113:
 #                    --ab "GGML_CUDA_GDN_CHUNKED_BF16=0" on a build whose default
 #                    is the bf16 kernel.
+#   --family-switch  judge a *kernel-family* switch (a different reduction order,
+#                    e.g. tile -> WMMA FA rows) rather than a change inside one
+#                    family.  See "FAMILY-SWITCH MODE" below: the point must be
+#                    in the gate's calibrated domain and the result is reported
+#                    against a same-kernel reordering control measured on the
+#                    spot, not only against the absolute limits.
+#
+# FAMILY-SWITCH MODE (--family-switch):
+#   The absolute limits decide a change *inside* a kernel family (a quant type, a
+#   precision, an approximate path).  A family switch does not share a reduction
+#   order with the kernel it replaces, so its divergence is the tuning, not a
+#   defect -- but on a point the model is not confident about, EVERY reordering
+#   (including a benign ubatch change) measures far outside the limits, so such a
+#   point cannot decide the question at all (GREEDY-PURITY.md §46: a same-kernel
+#   -ub 512 vs -ub 256 change measures 0.105 KLD / 85.0 % top-p at the wikitext
+#   point and 0.0140 / 97.2 % at a confident one).  This mode therefore:
+#     * refuses a point whose base PPL is outside the calibrated domain
+#       (--family-max-ppl, default 10; the gate was pinned at base PPL 5.93);
+#     * records, next to the fallback base, a CONTROL base built with the same
+#       fallback arm at a different ubatch (--control-ub, default 256);
+#     * measures the candidate and the control and prints both;
+#     * PASSES if the candidate meets the absolute limits, or if it is no worse
+#       than the control on both metrics (the §46 calibration).
+#   Usage:  --record --ab "<fallback env>" --family-switch ...  (records both bases)
+#           --family-switch ...                                  (compares)
 #
 # Usage:
 #   ./gate-prefill-logits.sh [options]
@@ -47,6 +72,11 @@
 #   --threads N       THREADS        default 8
 #   --max-kld F       MAX_KLD        default 0.005   (fail if mean KLD > F)
 #   --min-top-p F     MIN_TOPP       default 98.0    (fail if same-top-p < F)
+#   --family-switch   FAMILY_SWITCH  default 0       (see FAMILY-SWITCH MODE)
+#   --family-max-ppl F FAMILY_MAX_PPL default 10     (refuse a family-switch point
+#                                    whose base PPL is above this)
+#   --control-ub N    CONTROL_UB     default 256     (ubatch of the control base;
+#                                    must differ from the default ubatch)
 #   --device N        DEVICE         HIP_VISIBLE_DEVICES (default 0; single card)
 #   --timeout N       TIMEOUT        per-run seconds (default 1800)
 #   --keep            KEEP=1         keep the per-run logs
@@ -74,6 +104,9 @@ FA="${FA:-on}"
 THREADS="${THREADS:-8}"
 MAX_KLD="${MAX_KLD:-0.005}"
 MIN_TOPP="${MIN_TOPP:-98.0}"
+FAMILY_SWITCH="${FAMILY_SWITCH:-0}"
+FAMILY_MAX_PPL="${FAMILY_MAX_PPL:-10}"
+CONTROL_UB="${CONTROL_UB:-256}"
 DEVICE="${DEVICE:-0}"
 TIMEOUT="${TIMEOUT:-1800}"
 KEEP="${KEEP:-0}"
@@ -83,14 +116,15 @@ RECORD=0
 RECORD_ENV=""
 BASE="${BASE:-}"
 MODEL="${MODEL:-}"
+MODEL_GIVEN=0
 
-usage() { sed -n '2,57p' "$0"; exit "${1:-0}"; }
+usage() { sed -n '2,85p' "$0"; exit "${1:-0}"; }
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --base)                 BASE="$2"; shift 2 ;;
         --base-dir)             BASE_DIR="$2"; shift 2 ;;
-        --model)                MODEL="$2"; shift 2 ;;
+        --model)                MODEL="$2"; MODEL_GIVEN=1; shift 2 ;;
         --corpus)               CORPUS="$2"; shift 2 ;;
         --ppl)                  LLAMA_PPL="$2"; shift 2 ;;
         --ctx)                  CTX="$2"; shift 2 ;;
@@ -101,6 +135,9 @@ while [ $# -gt 0 ]; do
         --threads)              THREADS="$2"; shift 2 ;;
         --max-kld)              MAX_KLD="$2"; shift 2 ;;
         --min-top-p)            MIN_TOPP="$2"; shift 2 ;;
+        --family-switch)        FAMILY_SWITCH=1; shift ;;
+        --family-max-ppl)       FAMILY_MAX_PPL="$2"; shift 2 ;;
+        --control-ub)           CONTROL_UB="$2"; shift 2 ;;
         --device)               DEVICE="$2"; shift 2 ;;
         --timeout)              TIMEOUT="$2"; shift 2 ;;
         --keep)                 KEEP=1; shift ;;
@@ -160,14 +197,24 @@ resolve_model() {
     die "no auto model found (set MODEL); biggest single card = ${gib} GiB"
 }
 resolve_model
+[ "$FAMILY_SWITCH" -eq 1 ] && [ "$MODEL_GIVEN" -eq 0 ] && die "family-switch mode needs an explicit --model
+       the auto-chosen model has no head-256/512 attention, so it cannot exercise the
+       rows the switch is about; use e.g.
+         --model /llm/models/Gemma4/26B-A4B-QAT/gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf"
 [ -f "$MODEL" ] || die "model not found: $MODEL"
 
 MODEL_STEM="$(basename "$MODEL" .gguf)"
 if [ -z "$BASE" ]; then
     mkdir -p "$BASE_DIR" || die "cannot create base dir: $BASE_DIR"
-    BASE="$BASE_DIR/prefill-logit-${ARCH}-${MODEL_STEM}${UB:+-ub${UB}}.kld"
+    # A family-switch judgement uses its own in-domain corpus/context, so it gets its own
+    # base name; the default (wikitext, 512-token chunk) base is a different point.
+    fs_tag=""
+    [ "$FAMILY_SWITCH" -eq 1 ] && fs_tag="-familyswitch"
+    BASE="$BASE_DIR/prefill-logit-${ARCH}-${MODEL_STEM}${fs_tag}${UB:+-ub${UB}}.kld"
 fi
 META="$BASE.meta"
+CONTROL_BASE="${BASE%.kld}-control-ub${CONTROL_UB}.kld"
+CONTROL_META="$CONTROL_BASE.meta"
 
 CORPUS_SHA="$(sha256sum "$CORPUS" | awk '{print $1}')"
 
@@ -189,6 +236,7 @@ echo "    corpus=$CORPUS  (sha256=${CORPUS_SHA:0:16}...)"
 echo "    arch=$ARCH  device=$DEVICE  ctx=$CTX chunks=$CHUNKS fa=$FA ngl=$NGL threads=$THREADS"
 echo "    base=$BASE"
 echo "    thresholds: mean KLD <= $MAX_KLD, same-top-p >= ${MIN_TOPP}%"
+[ "$FAMILY_SWITCH" -eq 1 ] && echo "    mode=family-switch (control ubatch=$CONTROL_UB, max point PPL=$FAMILY_MAX_PPL)"
 [ "$RECORD" -eq 1 ] && echo "    mode=record${RECORD_ENV:+ (base arm: $RECORD_ENV)}"
 [ -n "$RECORD_ENV" ] && echo "    --ab: base arm = '$RECORD_ENV', candidate arm = default"
 echo "    logs=$LOGDIR"
@@ -293,6 +341,43 @@ if [ "$RECORD" -eq 1 ]; then
     } > "$META"
     echo "    base PPL=$b_ppl build=${b_ref:-?} sha256=${b_sha:-<skipped>}"
     echo "    wrote $META"
+
+    if [ "$FAMILY_SWITCH" -eq 1 ]; then
+        if ge "$b_ppl" "$FAMILY_MAX_PPL"; then
+            fail "family-switch point is out of the gate's calibrated domain: base PPL $b_ppl > $FAMILY_MAX_PPL
+       a family switch cannot be decided at a point where the model is not confident
+       (at such a point even a benign same-kernel ubatch change is far outside the limits);
+       pass --corpus with in-domain text, or --family-max-ppl to override deliberately."
+        fi
+        ctl_log="$LOGDIR/control-record.log"
+        echo "==> recording the same-kernel control base (arm '${RECORD_ENV:-<default>}', -ub $CONTROL_UB)"
+        if ! ( UB="$CONTROL_UB"; run_ppl "$RECORD_ENV" "$ctl_log" --kl-divergence-base "$CONTROL_BASE" ); then
+            echo "--- tail of $ctl_log ---" >&2; tail -20 "$ctl_log" >&2
+            fail "control base recording run failed"
+        fi
+        [ -f "$CONTROL_BASE" ] || fail "control base file was not written: $CONTROL_BASE"
+        c_ppl="$(final_ppl "$ctl_log")"
+        c_sha=""
+        [ "${SKIP_BASE_HASH:-0}" != "1" ] && c_sha="$(sha256sum "$CONTROL_BASE" | awk '{print $1}')"
+        {
+            echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "host=$(hostname)"
+            echo "arch=$ARCH"
+            echo "build=$b_ref"
+            echo "model=$MODEL"
+            echo "corpus=$CORPUS"
+            echo "corpus_sha256=$CORPUS_SHA"
+            echo "ctx=$CTX"
+            echo "chunks=$CHUNKS"
+            echo "ngl=$NGL"
+            echo "fa=$FA"
+            echo "ub=$CONTROL_UB"
+            echo "arm=${RECORD_ENV:-<default>}"
+            echo "base_ppl=$c_ppl"
+            echo "base_sha256=$c_sha"
+        } > "$CONTROL_META"
+        echo "    control base PPL=$c_ppl (same kernel, -ub $CONTROL_UB); wrote $CONTROL_META"
+    fi
     # If we recorded with an extra env arm, comparing the default against it is
     # the whole point; if we recorded the default, the compare is a self-test.
 fi
@@ -332,6 +417,46 @@ if ! le "$KLD" "$MAX_KLD"; then
 fi
 if ! ge "$TOPP" "$MIN_TOPP"; then
     echo "FAIL: same top p $TOPP % < $MIN_TOPP %" >&2; rc=1
+fi
+
+if [ "$FAMILY_SWITCH" -eq 1 ]; then
+    # The absolute limits decide a within-family change.  A family switch is judged
+    # against a *same-kernel reordering* measured on the spot: at any point the model
+    # finds hard, that control is the floor of what any reordering costs, so a
+    # candidate that is no worse than it carries no evidence of a defect.  Both are
+    # always printed; the absolute limits stay authoritative when they are met.
+    base_arm="$(base_meta_field arm)"
+    [ "$base_arm" = "<default>" ] && base_arm=""
+    if [ ! -f "$CONTROL_BASE" ]; then
+        fail "family-switch control base not found: $CONTROL_BASE
+       record it first: $0 --record --family-switch --ab \"<fallback env>\" ..."
+    fi
+    point_ppl="$(base_meta_field base_ppl)"
+    family_rc=0
+    if [ -n "$point_ppl" ] && ge "$point_ppl" "$FAMILY_MAX_PPL"; then
+        echo "FAIL: family-switch point is out of the calibrated domain: base PPL $point_ppl > $FAMILY_MAX_PPL" >&2
+        family_rc=1
+    fi
+    ctl_log2="$LOGDIR/control-compare.log"
+    echo
+    echo "==> control: same kernel (arm '${base_arm:-<default>}'), ${CTX}-token chunks vs -ub $CONTROL_UB"
+    if ! run_ppl "$base_arm" "$ctl_log2" --kl-divergence-base "$CONTROL_BASE" --kl-divergence; then
+        echo "--- tail of $ctl_log2 ---" >&2; tail -20 "$ctl_log2" >&2
+        fail "control comparison run failed"
+    fi
+    C_KLD="$(mean_kld "$ctl_log2")"
+    C_TOPP="$(same_topp "$ctl_log2")"
+    [ -n "$C_KLD" ] && [ -n "$C_TOPP" ] || fail "could not parse the control result"
+    echo "    control (same-kernel reordering): mean KLD = $C_KLD   same top p = $C_TOPP %"
+    if [ "$rc" -ne 0 ]; then
+        # Absolute limits missed: the switch may still be no worse than the control.
+        if le "$KLD" "$C_KLD" && ge "$TOPP" "$C_TOPP"; then
+            echo "    NOTE: absolute limits missed, but the candidate is no worse than the" 
+            echo "          same-kernel reordering control on both metrics (GREEDY-PURITY.md §46)."
+            rc=0
+        fi
+    fi
+    rc=$(( rc | family_rc ))
 fi
 
 echo

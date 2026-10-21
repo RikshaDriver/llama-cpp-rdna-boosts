@@ -1,0 +1,28 @@
+diff --git a/ggml/src/ggml-cuda/fattn-mma-f16.cuh b/ggml/src/ggml-cuda/fattn-mma-f16.cuh
+index 8b1d56275..5d82ca288 100644
+--- a/ggml/src/ggml-cuda/fattn-mma-f16.cuh
++++ b/ggml/src/ggml-cuda/fattn-mma-f16.cuh
+@@ -200,7 +200,7 @@ static constexpr __host__ __device__ fattn_mma_config ggml_cuda_fattn_mma_get_co
+     // > 256, see ggml_cuda_flash_attn_ext_mma_f16_switch_ncols1; the 64-column row is kept consistent.)
+     if (!is_rdna3_5 && !is_rdna4 && DKQ == 512 && DV == 512) {
+         if (ncols == 16) { return fattn_mma_config(128, 1, 64, 64, 64, 64, 1, false); }
+-        if (ncols == 32) { return fattn_mma_config(128, 1, 32, 64, 64, 64, 1, false); }
++        if (ncols == 32) { return fattn_mma_config(256, 1, 32, 64, 64, 64, 1, false); }
+         if (ncols == 64) { return fattn_mma_config(128, 1, 32, 64, 64, 64, 1, false); }
+     }
+     GGML_CUDA_FATTN_MMA_CONFIG_CASE(512, 512,  8, 128, 3,  64,  96,  64, 128, 1, true);
+@@ -1797,7 +1797,13 @@ static __device__ __forceinline__ void flash_attn_ext_f16_process_tile(
+ #if defined(TURING_MMA_AVAILABLE)
+     T_C_VKQ VKQ_C[cols_per_warp == 8 ? DV/T_C_VKQ::I : DV/(2*T_C_VKQ::J)];
+ #elif defined(AMD_WMMA_AVAILABLE) && defined(RDNA3)
+-    T_C_VKQ VKQ_C[DV % 32 != 0       ? DV/T_C_VKQ::J : DV/(2*T_C_VKQ::J)];
++    // An fp32 C tile spans T_C_VKQ::J output columns, an fp16 one spans 2*T_C_VKQ::J (two wmma ops,
++    // one per half).  Keying the size on DV % 32 only works for the fp32 rows whose DV is not a
++    // multiple of 32 (head 80/112); a fp32 tile at DV % 32 == 0 needs the DV/T_C_VKQ::J size, which is
++    // also the bound the fp32 rescale and combine loops use.  Identical to the old expression for
++    // every fp16 row, so no shipped kernel changes.  (wip/fa-rdna3-head512-purity.)
++    T_C_VKQ VKQ_C[std::is_same_v<decltype(T_C_VKQ::x), float[T_C_VKQ::ne]> ? DV/T_C_VKQ::J :
++                  (DV % 32 != 0 ? DV/T_C_VKQ::J : DV/(2*T_C_VKQ::J))];
+ #elif defined(AMD_MFMA_AVAILABLE)
+     T_C_VKQ VKQ_C[                                     DV/T_C_VKQ::J];
+ #elif defined(AMD_WMMA_AVAILABLE)
