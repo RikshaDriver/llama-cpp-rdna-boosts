@@ -1,4 +1,4 @@
-From 32eec9854fc1a4df225fa077b9708d05824ee628 Mon Sep 17 00:00:00 2001
+From 0fb3c8c15f65fb5f77cf70163cbda4c50512e6e7 Mon Sep 17 00:00:00 2001
 From: Stew Forster <ci@rdna-boosts.invalid>
 Date: Wed, 21 Oct 2026 10:40:32 -0500
 Subject: [PATCH 10/11] rdna-boosts: block 10: qwen4exp (model,
@@ -239,7 +239,7 @@ reproduce).  No GPU faults.
  ggml/src/ggml-cuda/ple-conv.cu                |   27 +-
  ggml/src/ggml-cuda/ple-conv.cuh               |    1 +
  ggml/src/ggml-cuda/quantize.cuh               |   13 +-
- ggml/src/ggml-cuda/rope.cu                    |  205 +-
+ ggml/src/ggml-cuda/rope.cu                    |  225 +-
  ggml/src/ggml-cuda/rope.cuh                   |    3 +-
  ggml/src/ggml-cuda/set-rows.cu                |   15 +-
  ggml/src/ggml-cuda/set-rows.cuh               |   19 +
@@ -271,12 +271,12 @@ reproduce).  No GPU faults.
  src/models/models.h                           |   62 +-
  src/models/qwen4exp.cpp                       | 2295 ++++++-
  tests/CMakeLists.txt                          |    1 +
- tests/test-backend-ops.cpp                    |  380 +-
+ tests/test-backend-ops.cpp                    |  406 +-
  tests/test-lazy-reader.cpp                    |  264 +
  tests/test-llama-archs.cpp                    |   12 +-
  tests/test-logits-width-probe.cpp             |   44 +-
  tools/server/server-context.cpp               |   30 +-
- 110 files changed, 23152 insertions(+), 5158 deletions(-)
+ 110 files changed, 23196 insertions(+), 5160 deletions(-)
  create mode 100644 ggml/src/ggml-cuda/fattn-qsa.cu
  create mode 100644 ggml/src/ggml-cuda/fattn-qsa.cuh
  create mode 100644 ggml/src/ggml-cuda/fattn-qsa3.cu
@@ -25145,7 +25145,7 @@ index 819d1927e..76e09ee49 100644
  
  static_assert((4*CUDA_QUANTIZE_BLOCK_SIZE_MMQ) % QK8_1_MMQ == 0, "Quantization chunks must contain complete Q8_1 MMQ blocks.");
 diff --git a/ggml/src/ggml-cuda/rope.cu b/ggml/src/ggml-cuda/rope.cu
-index 20c2c3d4d..2264045d4 100644
+index 20c2c3d4d..17aa774d8 100644
 --- a/ggml/src/ggml-cuda/rope.cu
 +++ b/ggml/src/ggml-cuda/rope.cu
 @@ -1,7 +1,20 @@
@@ -25169,7 +25169,41 @@ index 20c2c3d4d..2264045d4 100644
  
  struct rope_corr_dims {
      float v[2];
-@@ -733,9 +746,26 @@ void ggml_cuda_op_rope_fused(ggml_backend_cuda_context & ctx, ggml_tensor * rope
+@@ -655,6 +668,16 @@ void ggml_cuda_op_rope_impl(ggml_backend_cuda_context & ctx,
+                                                 s03, s1, s2, s3, n_dims, n_offs, nr, pos, freq_scale, freq_base,
+                                                 ext_factor, attn_factor, corr_dims, freq_factors, row_indices,
+                                                 set_rows_stride, inplace, stream);
++        } else if (src0->type == GGML_TYPE_F32 && dst_type == GGML_TYPE_BF16) {
++            rope_neox_cuda<forward, float, nv_bfloat16>((const float *) src0_d, (nv_bfloat16 *) dst_d, ne00, ne01, ne02, s01,
++                                                        s02, s03, s1, s2, s3, n_dims, n_offs, nr, pos, freq_scale, freq_base,
++                                                        ext_factor, attn_factor, corr_dims, freq_factors, row_indices,
++                                                        set_rows_stride, inplace, stream);
++        } else if (src0->type == GGML_TYPE_F16 && dst_type == GGML_TYPE_BF16) {
++            rope_neox_cuda<forward, half, nv_bfloat16>((const half *) src0_d, (nv_bfloat16 *) dst_d, ne00, ne01, ne02, s01,
++                                                       s02, s03, s1, s2, s3, n_dims, n_offs, nr, pos, freq_scale, freq_base,
++                                                       ext_factor, attn_factor, corr_dims, freq_factors, row_indices,
++                                                       set_rows_stride, inplace, stream);
+         } else {
+             GGML_ABORT("fatal error");
+         }
+@@ -715,6 +738,16 @@ void ggml_cuda_op_rope_impl(ggml_backend_cuda_context & ctx,
+                                                 s03, s1, s2, s3, n_dims, n_offs, nr, pos, freq_scale, freq_base,
+                                                 ext_factor, attn_factor, corr_dims, freq_factors, row_indices,
+                                                 set_rows_stride, inplace, stream);
++        } else if (src0->type == GGML_TYPE_F32 && dst_type == GGML_TYPE_BF16) {
++            rope_norm_cuda<forward, float, nv_bfloat16>((const float *) src0_d, (nv_bfloat16 *) dst_d, ne00, ne01, ne02, s01,
++                                                        s02, s03, s1, s2, s3, n_dims, n_offs, nr, pos, freq_scale, freq_base,
++                                                        ext_factor, attn_factor, corr_dims, freq_factors, row_indices,
++                                                        set_rows_stride, inplace, stream);
++        } else if (src0->type == GGML_TYPE_F16 && dst_type == GGML_TYPE_BF16) {
++            rope_norm_cuda<forward, half, nv_bfloat16>((const half *) src0_d, (nv_bfloat16 *) dst_d, ne00, ne01, ne02, s01,
++                                                       s02, s03, s1, s2, s3, n_dims, n_offs, nr, pos, freq_scale, freq_base,
++                                                       ext_factor, attn_factor, corr_dims, freq_factors, row_indices,
++                                                       set_rows_stride, inplace, stream);
+         } else {
+             GGML_ABORT("fatal error");
+         }
+@@ -733,9 +766,26 @@ void ggml_cuda_op_rope_fused(ggml_backend_cuda_context & ctx, ggml_tensor * rope
      ggml_cuda_op_rope_impl<true>(ctx, rope, set_rows);
  }
  
@@ -25197,7 +25231,7 @@ index 20c2c3d4d..2264045d4 100644
  static __global__ void rms_norm_mul_rope_f32(
          const float * x, D * dst, const int ncols, const int nchannels, const int nsamples,
          const int64_t s01, const int64_t s02, const int64_t s03,
-@@ -750,12 +780,15 @@ static __global__ void rms_norm_mul_rope_f32(
+@@ -750,12 +800,15 @@ static __global__ void rms_norm_mul_rope_f32(
          const rope_corr_dims corr_dims, const float theta_scale,
          const float * freq_factors,
          const int64_t * row_indices, const int set_rows_stride,
@@ -25214,7 +25248,7 @@ index 20c2c3d4d..2264045d4 100644
  
      ggml_cuda_pdl_sync();
  
-@@ -769,6 +802,15 @@ static __global__ void rms_norm_mul_rope_f32(
+@@ -769,6 +822,15 @@ static __global__ void rms_norm_mul_rope_f32(
              const uint32_t mul_sample  = fastmodulo(sample,  mul_nsamples_packed);
              const float * mulc = mul + mul_sample*mul_s03 + mul_channel*mul_s02 + mul_row*mul_s01;
  
@@ -25230,7 +25264,7 @@ index 20c2c3d4d..2264045d4 100644
              float tmp = 0.0f;
  
              for (int col = tid; col < ncols; col += block_size) {
-@@ -786,10 +828,18 @@ static __global__ void rms_norm_mul_rope_f32(
+@@ -786,10 +848,18 @@ static __global__ void rms_norm_mul_rope_f32(
              }
              D * dstc = dst + idst;
  
@@ -25250,7 +25284,7 @@ index 20c2c3d4d..2264045d4 100644
                      ix0 = i0/2;
                      ix1 = i0/2 + n_dims/2;
                  } else {
-@@ -801,20 +851,72 @@ static __global__ void rms_norm_mul_rope_f32(
+@@ -801,20 +871,72 @@ static __global__ void rms_norm_mul_rope_f32(
                  const float x1 = scale * xc[ix1] * mulc[fastmodulo(ix1, mul_ncols_packed)];
  
                  if (i0 >= n_dims) {
@@ -25328,7 +25362,7 @@ index 20c2c3d4d..2264045d4 100644
              }
  
              if constexpr (block_size > WARP_SIZE) {
-@@ -841,7 +943,8 @@ static void rms_norm_mul_rope_cuda(
+@@ -841,7 +963,8 @@ static void rms_norm_mul_rope_cuda(
          const rope_corr_dims corr_dims,
          const float * freq_factors,
          const int64_t * row_indices, const int set_rows_stride,
@@ -25338,7 +25372,7 @@ index 20c2c3d4d..2264045d4 100644
      GGML_ASSERT(ncols % 2 == 0);
  
      const dim3 blocks_num(nrows, MIN(nchannels, UINT16_MAX), MIN(nsamples, UINT16_MAX));
-@@ -853,6 +956,41 @@ static void rms_norm_mul_rope_cuda(
+@@ -853,6 +976,41 @@ static void rms_norm_mul_rope_cuda(
      const uint3 mul_nchannels_packed = init_fastdiv_values(mul_nchannels);
      const uint3 mul_nsamples_packed  = init_fastdiv_values(mul_nsamples);
  
@@ -25380,7 +25414,7 @@ index 20c2c3d4d..2264045d4 100644
      if (ncols < 1024) {
          const dim3 block_dims(256, 1, 1);
          const ggml_cuda_kernel_launch_params launch_params = {blocks_num, block_dims, 32*sizeof(float), stream};
-@@ -861,13 +999,13 @@ static void rms_norm_mul_rope_cuda(
+@@ -861,13 +1019,13 @@ static void rms_norm_mul_rope_cuda(
                  x, dst, ncols, nchannels, nsamples, s01, s02, s03, s1, s2, s3, eps, mul, mul_s01, mul_s02, mul_s03,
                  mul_ncols_packed, mul_nrows_packed, mul_nchannels_packed, mul_nsamples_packed,
                  n_dims, pos, freq_scale, ext_factor, attn_factor, corr_dims, theta_scale,
@@ -25396,7 +25430,7 @@ index 20c2c3d4d..2264045d4 100644
          }
      } else {
          const dim3 block_dims(1024, 1, 1);
-@@ -877,19 +1015,20 @@ static void rms_norm_mul_rope_cuda(
+@@ -877,19 +1035,20 @@ static void rms_norm_mul_rope_cuda(
                  x, dst, ncols, nchannels, nsamples, s01, s02, s03, s1, s2, s3, eps, mul, mul_s01, mul_s02, mul_s03,
                  mul_ncols_packed, mul_nrows_packed, mul_nchannels_packed, mul_nsamples_packed,
                  n_dims, pos, freq_scale, ext_factor, attn_factor, corr_dims, theta_scale,
@@ -25420,7 +25454,7 @@ index 20c2c3d4d..2264045d4 100644
      const ggml_tensor * x = rms_norm->src[0];
      const ggml_tensor * mul_src = mul->src[0] == rms_norm ? mul->src[1] : mul->src[0];
  
-@@ -906,6 +1045,35 @@ void ggml_cuda_op_rms_norm_mul_rope_fused(ggml_backend_cuda_context & ctx,
+@@ -906,6 +1065,35 @@ void ggml_cuda_op_rms_norm_mul_rope_fused(ggml_backend_cuda_context & ctx,
      const int64_t * row_indices     = nullptr;
      int             set_rows_stride = 0;
  
@@ -25456,7 +25490,7 @@ index 20c2c3d4d..2264045d4 100644
      if (set_rows != nullptr) {
          dst_d           = set_rows->data;
          dst_type        = set_rows->type;
-@@ -937,6 +1105,11 @@ void ggml_cuda_op_rms_norm_mul_rope_fused(ggml_backend_cuda_context & ctx,
+@@ -937,6 +1125,11 @@ void ggml_cuda_op_rms_norm_mul_rope_fused(ggml_backend_cuda_context & ctx,
  
      const float * freq_factors = rope->src[2] != nullptr ? (const float *) rope->src[2]->data : nullptr;
  
@@ -25468,7 +25502,7 @@ index 20c2c3d4d..2264045d4 100644
      rope_corr_dims corr_dims;
      ggml_rope_yarn_corr_dims(n_dims, n_ctx_orig, freq_base, beta_fast, beta_slow, corr_dims.v);
  
-@@ -965,14 +1138,14 @@ void ggml_cuda_op_rms_norm_mul_rope_fused(ggml_backend_cuda_context & ctx,
+@@ -965,14 +1158,14 @@ void ggml_cuda_op_rms_norm_mul_rope_fused(ggml_backend_cuda_context & ctx,
              (const float *) mul_src->data, mul_s01, mul_s02, mul_s03,
              mul_src->ne[0], mul_src->ne[1], mul_src->ne[2], mul_src->ne[3],
              n_dims, pos, freq_scale, freq_base, ext_factor, attn_factor, corr_dims,
@@ -32367,10 +32401,39 @@ index 241d3915b..5c85070f6 100644
      set(MODEL_DIR "${CMAKE_CURRENT_BINARY_DIR}/test-models/")
      file(MAKE_DIRECTORY "${MODEL_DIR}")
 diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
-index df66a5e17..0f00ff8e1 100644
+index df66a5e17..3315266c4 100644
 --- a/tests/test-backend-ops.cpp
 +++ b/tests/test-backend-ops.cpp
-@@ -3839,6 +3839,44 @@ struct test_rms_norm_back : public test_case {
+@@ -63,7 +63,13 @@ static void init_tensor_uniform(ggml_tensor * tensor, float min = -1.0f, float m
+         static const size_t n_threads = std::max<size_t>(1, std::min<size_t>(nels/1024, std::min<size_t>(4, N_THREADS/2)));
+ 
+         auto init_thread = [&](size_t start, size_t end) {
+-            thread_local std::default_random_engine gen(std::random_device{}());
++            // LLAMA_TEST_SEED=<n> makes the test data deterministic so two kernel arms (or two
++            // builds) can be compared element by element; unset, every run draws fresh data.
++            static const unsigned test_seed = []() {
++                const char * e = getenv("LLAMA_TEST_SEED");
++                return e != nullptr ? unsigned(strtoul(e, nullptr, 10)) : 0u;
++            }();
++            thread_local std::default_random_engine gen(test_seed != 0 ? test_seed : std::random_device{}());
+             std::uniform_real_distribution<float> distribution(min, max);
+             for (size_t i = start; i < end; i++) {
+                 data[i] = distribution(gen);
+@@ -1540,6 +1546,13 @@ struct test_case {
+                 if (ff) { fwrite(f1.data(), sizeof(float), f1.size(), ff); fclose(ff); }
+             }
+             double err = ud->tc->err(f1.data(), f2.data(), f1.size());
++            // LLAMA_TEST_OP_NMSE=1 prints the error magnitude of every case, not just the failures:
++            // a kernel-family switch has to be judged by how far each arm is from the CPU reference,
++            // which the pass/fail verdict at a fixed threshold cannot express.
++            if (getenv("LLAMA_TEST_OP_NMSE") != nullptr) {
++                printf("[NMSE] %-22s %s err=%.9g max=%.9g\n", ggml_op_desc(t1), ud->tc->vars().c_str(),
++                       err, ud->tc->max_err(ud->backend1));
++            }
+             if (err > ud->tc->max_err(ud->backend1)) {
+                 printf("[%s] ERR = %.9f > %.9f ", ggml_op_desc(t1), err, ud->tc->max_err(ud->backend1));
+                 // GDN bf16 debug: dump the first mismatches with indices + a diff histogram
+@@ -3839,6 +3852,44 @@ struct test_rms_norm_back : public test_case {
  };
  
  // GGML_OP_RMS_NORM + GGML_OP_MUL + GGML_OP_ADD (+ GGML_OP_MUL)
@@ -32415,7 +32478,7 @@ index df66a5e17..0f00ff8e1 100644
  struct test_rms_norm_mul_add : public test_case {
      const ggml_type type;
      const std::array<int64_t, 4> ne;
-@@ -7083,15 +7121,17 @@ struct test_argsort : public test_case {
+@@ -7083,15 +7134,17 @@ struct test_argsort : public test_case {
      const ggml_type type;
      const std::array<int64_t, 4> ne;
      ggml_sort_order order;
@@ -32436,7 +32499,7 @@ index df66a5e17..0f00ff8e1 100644
  
      ggml_tensor * build_graph(ggml_context * ctx) override {
          ggml_tensor * a = ggml_new_tensor(ctx, type, 4, ne.data());
-@@ -7116,11 +7156,13 @@ struct test_argsort : public test_case {
+@@ -7116,11 +7169,13 @@ struct test_argsort : public test_case {
                  std::shuffle(data.begin(), data.end(), rng);
                  ggml_backend_tensor_set(t, data.data(), 0, ne[0]*ne[1]*ne[2]*ne[3] * sizeof(int));
              } else if (t->type == GGML_TYPE_F32) {
@@ -32452,7 +32515,7 @@ index df66a5e17..0f00ff8e1 100644
                      }
                      std::shuffle(data.begin(), data.end(), rng);
                      ggml_backend_tensor_set(t, data.data(), r * t->nb[1], t->ne[0] * sizeof(float));
-@@ -7374,6 +7416,125 @@ struct test_topk_qsa : public test_case {
+@@ -7374,6 +7429,125 @@ struct test_topk_qsa : public test_case {
      }
  };
  
@@ -32578,7 +32641,7 @@ index df66a5e17..0f00ff8e1 100644
  enum MoeGatingFunc {
      GATING_FUNC_SOFTMAX,
      GATING_FUNC_SIGMOID,
-@@ -8649,6 +8810,117 @@ struct test_flash_attn_ext_large_logits : public test_flash_attn_ext {
+@@ -8649,6 +8823,117 @@ struct test_flash_attn_ext_large_logits : public test_flash_attn_ext {
      }
  };
  
@@ -32696,7 +32759,20 @@ index df66a5e17..0f00ff8e1 100644
  // GGML_OP_CROSS_ENTROPY_LOSS
  struct test_cross_entropy_loss : public test_case {
      const ggml_type type;
-@@ -9755,6 +10027,16 @@ static const ggml_type other_types[] = {
+@@ -9242,7 +9527,11 @@ struct test_generic_op : public test_case {
+         ggml_tensor * out = ggml_get_tensor(ctx, "out");
+ 
+         std::random_device rd;
+-        std::default_random_engine rng(rd());
++        static const unsigned test_seed = []() {
++            const char * e = getenv("LLAMA_TEST_SEED");
++            return e != nullptr ? unsigned(strtoul(e, nullptr, 10)) : 0u;
++        }();
++        std::default_random_engine rng(test_seed != 0 ? test_seed : rd());
+ 
+         for (size_t i = 0; i < sources.size() && i < GGML_MAX_SRC; i++) {
+             ggml_tensor * t = out->src[i];
+@@ -9755,6 +10044,16 @@ static const ggml_type other_types[] = {
  // Test cases for evaluation: should try to cover edge cases while using small input sizes to keep the runtime low
  static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
      std::vector<std::unique_ptr<test_case>> test_cases;
@@ -32713,7 +32789,7 @@ index df66a5e17..0f00ff8e1 100644
      std::default_random_engine rng(0);
  
      // unary ops
-@@ -9902,6 +10184,11 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+@@ -9902,6 +10201,11 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
      }
  
      test_cases.emplace_back(new test_get_rows(GGML_TYPE_F32, 1, 8, 2, 1, 1, false));
@@ -32725,7 +32801,7 @@ index df66a5e17..0f00ff8e1 100644
      for (ggml_type type : all_types) {
          for (int b : {1, 7}) {
              for (bool v : {false, true}) {
-@@ -10606,7 +10893,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+@@ -10606,7 +10910,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
      test_cases.emplace_back(new test_l2_norm     (GGML_TYPE_F32, {4, 1, 65536, 1}, 1e-12f, false, false));
      test_cases.emplace_back(new test_rms_norm_mul_add(GGML_TYPE_F32, {4, 1, 65536, 1}, 1e-6f, false, false));
  
@@ -32734,7 +32810,7 @@ index df66a5e17..0f00ff8e1 100644
          test_cases.emplace_back(new test_rms_norm_mul_rope({ 256, 1, 1, 1 }, 1e-6f, false, true, false, GGML_ROPE_TYPE_NORMAL, false, false, set_rows_type));
          test_cases.emplace_back(new test_rms_norm_mul_rope({ 128, 4, 3, 1 }, 1e-6f, false, true, false, GGML_ROPE_TYPE_NORMAL, false, false, set_rows_type));
      }
-@@ -10649,7 +10936,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+@@ -10649,7 +10953,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
      for (auto multi_add : {false, true}) {
          for (auto set_rows : {false, true}) {
              for (auto broadcast : {false, true}) {
@@ -32743,7 +32819,7 @@ index df66a5e17..0f00ff8e1 100644
                      test_cases.emplace_back(new test_rms_norm_mul_rope({768, 1, 1, 1}, 1e-6f, multi_add, set_rows, broadcast, rope));
                      test_cases.emplace_back(new test_rms_norm_mul_rope({768, 3, 1, 1}, 1e-6f, multi_add, set_rows, broadcast, rope));
                      test_cases.emplace_back(new test_rms_norm_mul_rope({768, 3, 5, 1}, 1e-6f, multi_add, set_rows, broadcast, rope));
-@@ -10805,6 +11092,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+@@ -10805,6 +11109,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
      test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, 8192, 1, 5120, {128, 1}, {1, 1}));
      test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, 8192, 512, 5120, {128, 1}, {1, 1}));
      test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, 17408, 512, 5120, {1, 1}, {1, 1})); // q8_0 at ffn shape
@@ -32751,7 +32827,7 @@ index df66a5e17..0f00ff8e1 100644
  
      // Qwen3.6-27B Q6_K prefill shapes (perf tuning targets):
      test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q6_K, GGML_TYPE_F32, 17408, 512, 5120, {1, 1}, {1, 1})); // ffn_up/ffn_gate
-@@ -11519,6 +11807,10 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+@@ -11519,6 +11824,10 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
          test_cases.emplace_back(new test_argsort(GGML_TYPE_F32, {2049, 2, 1, 3}, order));
          test_cases.emplace_back(new test_argsort(GGML_TYPE_F32, {2, 8, 8192, 1}, order)); // bailingmoe2 (group selection)
          test_cases.emplace_back(new test_argsort(GGML_TYPE_F32, {2048, 512, 1, 1}, order)); // test CUDA dispatching to radix sort for nrows > = 1 in graph mode
@@ -32762,7 +32838,7 @@ index df66a5e17..0f00ff8e1 100644
      }
  
      for (int n = 1; n < 5; ++n) {
-@@ -11583,6 +11875,11 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+@@ -11583,6 +11892,11 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
      test_cases.emplace_back(new test_topk_qsa(256,  2048,  4, 2, 2000));
      test_cases.emplace_back(new test_topk_qsa(64,   256,   2, 1, 200));  // small k: unfused fallback
  
@@ -32774,7 +32850,19 @@ index df66a5e17..0f00ff8e1 100644
      // exhaustive top_k tests
      //for (int i = 1; i < 9999; ++i) {
      //    test_cases.emplace_back(new test_top_k(GGML_TYPE_F32, {i, 2, 1, 3}, rand() % i + 1));
-@@ -12088,6 +12385,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+@@ -11889,6 +12203,11 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+     // sparse mask with large batch size
+     test_cases.emplace_back(new test_flash_attn_ext(512, 512, 1, { 8, 1}, 4096, 64, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16, {0, 1, 2, 3}, true, false,  512));
+     test_cases.emplace_back(new test_flash_attn_ext(512, 512, 1, { 8, 1}, 4096, 64, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16, {0, 1, 2, 3}, true, false, 2048));
++    // The prefill shape of gemma-4-26B-A4B's global layers (head 512, GQA 8, 32k KV, 512 queries
++    // per ubatch): the shape the RDNA3_0 head-512 rows exist for, and the op-level accuracy
++    // reference the prefill-logit gate's family-switch mode reads (GREEDY-PURITY.md §46).
++    test_cases.emplace_back(new test_flash_attn_ext(512, 512, 2, { 8, 1}, 32768, 512, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16, {0, 1, 2, 3}, true, false, 2048));
++    test_cases.emplace_back(new test_flash_attn_ext(512, 512, 2, { 8, 1}, 32768, 512, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0, {0, 1, 2, 3}, true, false, 2048));
+     test_cases.emplace_back(new test_flash_attn_ext(576, 512, 1, {16, 1}, 4096, 64, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16, {0, 1, 2, 3}, true, true,   512));
+     test_cases.emplace_back(new test_flash_attn_ext(576, 512, 1, {16, 1}, 4096, 64, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16, {0, 1, 2, 3}, true, true,  2048));
+     test_cases.emplace_back(new test_flash_attn_ext(256, 256, 1, { 8, 1}, 4096, 64, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16, {0, 1, 2, 3}, true, false,  512));
+@@ -12088,6 +12407,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
                      test_cases.emplace_back(new test_topk_moe({160, 4, 1, 1}, 160, with_norm, bias_probs, gate, scale_w));
                      test_cases.emplace_back(new test_topk_moe({256, 22, 1, 1}, 6, with_norm, bias_probs, gate, scale_w)); // Used by DeepSeek-V4
                      test_cases.emplace_back(new test_topk_moe({288, 22, 1, 1}, 8, with_norm, bias_probs, gate, scale_w)); // Used by StepFun 3.7
@@ -32782,7 +32870,7 @@ index df66a5e17..0f00ff8e1 100644
                      // rows at and just past the limit where one block still covers all rows
                      test_cases.emplace_back(new test_topk_moe({32, 8, 1, 1}, 4, with_norm, bias_probs, gate, scale_w));
                      test_cases.emplace_back(new test_topk_moe({32, 8, 1, 1}, 8, with_norm, bias_probs, gate, scale_w));
-@@ -12188,6 +12486,34 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+@@ -12188,6 +12508,34 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
      test_cases.emplace_back(new test_falcon(2));
  #endif
  
@@ -32817,7 +32905,7 @@ index df66a5e17..0f00ff8e1 100644
      // lightning_indexer
      for (int kv : { 256 }) {
          for (int bs : { 1, 512 }) {
-@@ -12207,6 +12533,17 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+@@ -12207,6 +12555,17 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
          }
      }
  
@@ -32835,7 +32923,7 @@ index df66a5e17..0f00ff8e1 100644
      return test_cases;
  }
  #ifdef _MSC_VER
-@@ -12217,6 +12554,25 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+@@ -12217,6 +12576,25 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
  static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
      std::vector<std::unique_ptr<test_case>> test_cases;
  
@@ -32861,7 +32949,7 @@ index df66a5e17..0f00ff8e1 100644
      // SWIGLU at a 27B-class FFN width, fused [gate|up] vs split operands
      // note: same bytes either way, so a backend that indexes them differently shows it here
      for (ggml_type type : {GGML_TYPE_F16, GGML_TYPE_F32, GGML_TYPE_BF16}) {
-@@ -12251,6 +12607,16 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
+@@ -12251,6 +12629,16 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
          test_cases.emplace_back(new test_leaky_relu(GGML_TYPE_F32, { 17408, n_tokens, 1, 1 }, 0.1f));
      }
  
