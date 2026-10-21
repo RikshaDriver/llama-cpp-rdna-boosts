@@ -1,5 +1,36 @@
 # WORKLOG - dated delivery records
 
+## 261021.012 (docs) -- `mmf32` cross-arch validation: RDNA3_5 wins and is a promotion candidate, RDNA3 does not
+
+**Docs only: no patch, no `release.json` change, no default flipped — the RDNA3_5 default awaits a decision.**
+Two boxes, r104 tree (`tree a1317584…` == `release.json`), 35B-A3B Q4_K_M, ROCm 10.1.0, one job at a time:
+`fingon` = **single gfx1100** (the second `rocm-smi` entry is a gfx1036 iGPU — it does *not* provide the
+2-card box `TODO` #79 needs) and `halo` = gfx1151.  Record: `archive/work/hipblaslt-bypass/evidence/p5-cross-arch-validation.txt`.
+
+**Correctness, on all three archs:** `test-backend-ops -o MUL_MAT` **2444/2444**; with
+`LLAMA_TEST_OP_NMSE=1 LLAMA_TEST_SEED=1` the two intercepted cases are **10-12x closer to the CPU reference
+than the rocBLAS path** (6.11e-14 vs 6.5-7.2e-13; threshold 5e-4), the kernel's own NMSE being *identical* on
+gfx1100/gfx1151/gfx1201, and an untaken case bit-identical.  So the kernel is exact on the unvalidated archs
+too.
+
+**Determinism:** `MMF32=1` gives **1 logits class in 12/12** fresh starts on both boxes; each box's *default*
+(the rocBLAS path) did not flip in this config (1 class in 6) — on those boxes the kernel is insurance, not a
+visible fix, which is why throughput decides the default.  The opt-in gate itself is honoured: default → zero
+intercepts on both, engaging only with `=1`.
+
+**Throughput (interleaved `llama-bench`, `-p 512,2048 -n 128 -r 3`, 3 visits).**
+* **gfx1151: +1.0 % pp512 (2225 vs 2203), +1.6 % pp2048 (2227 vs 2192), decode flat**, tight spreads (±5-14).
+  Purity at the shipped confident point (`prompts/kld-corpus-35b-in-domain.txt`, base PPL 1.4345): candidate
+  **0.013016 / 98.673 %** vs same-kernel control **0.019125 / 97.975 %** → no worse on both, PASS with
+  `--allow-control-pass`.
+* **gfx1100: not a win.**  pp2048 (the trustworthy column there; pp512 on that box runs ±345-1016) measures
+  **−1.3 to −2.2 %** across three visits, with one tie.  RDNA3 keeps the kernel **opt-in**.
+
+**Recommendation (not taken):** extend r104's default to **RDNA3_5** — a one-line predicate change in
+`ggml_cuda_mmf32_enabled` — leaving RDNA3 opt-in; if RDNA3 ever needs the kernel for determinism rather than
+speed, the lever is a per-arch tile (`BN`/`ks`).  Cross-posted to `TODO` #82's closure note and
+`wip/CAMPAIGNS.md` is unaffected (the campaign is archived).
+
 ## 261021.011 (r104) -- `mmf32` promoted into block 06: the F32 prefill GEMM is ours, so 35B-A3B/gemma4 prefill is deterministic and 4 % faster
 
 **Release `v12-097cf33d9-r104`**, 12 blocks, fork point `097cf33d9`, tip `f38bfa9dd`.  One block amendment

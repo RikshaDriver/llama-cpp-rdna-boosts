@@ -1,0 +1,79 @@
+# mmf32 cross-arch validation — gfx1100 (RDNA3, `fingon`) and gfx1151 (RDNA3.5, `halo`)
+
+**Why this exists.**  r104 shipped `mmf32` default-on for **RDNA4 only** (`GGML_CUDA_MMF32=1` opt-in on the
+other RDNA families) because only gfx1201 had been measured.  This is the two-box run that decides whether
+that default should be extended.  Both boxes: 35B-A3B Q4_K_M, ROCm 10.1.0, one job at a time, r104 tree
+(`tree a1317584…` == `release.json`).
+
+| box | arch | HIP device | note |
+|---|---|---|---|
+| `soar` (primary) | gfx1201 | 0 | the r104 reference numbers |
+| `fingon` | **gfx1100** | 0 | **single RDNA3** — the second `rocm-smi` entry is a gfx1036 iGPU, not a second card |
+| `halo` | **gfx1151** | 0 | single card |
+
+## Correctness — the op-level leg (deterministic, seeded)
+
+`LLAMA_TEST_OP_NMSE=1 LLAMA_TEST_SEED=1 test-backend-ops -o MUL_MAT`, **2444/2444 on both boxes**; the two
+cases `mmf32` intercepts, against the **CPU reference** (threshold 5e-4):
+
+| case | rocBLAS path | `mmf32` | ratio |
+|---|---:|---:|---|
+| gfx1100 `m=31 n=509 k=2051` | 6.54e-13 | **6.11e-14** | 10.7x closer |
+| gfx1100 `m=32 n=509 k=2112` | 7.24e-13 | **6.14e-14** | 11.8x closer |
+| gfx1151 `m=31 n=509 k=2051` | 6.83e-13 | **6.11e-14** | 11.2x closer |
+| gfx1151 `m=32 n=509 k=2112` | 6.92e-13 | **6.14e-14** | 11.3x closer |
+
+A case the kernel does not take is bit-identical on both (3.56e-08).  The kernel's own NMSE is the *same
+number* on all three archs — it is a plain FMA loop, so its accuracy is machine-independent.
+
+## Determinism — `llama-perplexity -c 512 --chunks 1`, logits-dump hash, fresh process per sample
+
+| box | default (rocBLAS path) | `MMF32=1` |
+|---|---|---|
+| gfx1100 | 1 class in 6 (`aa0b0b6b7583`) | **1 class in 12** (`78778e4d7452`) |
+| gfx1151 | 1 class in 6 (`76a20e44c37b`) | **1 class in 12** (`3f86d992a67f`) |
+
+Neither box's default flipped in this config (unlike gfx1201 → ROCm 10.1.0, where it is 2-3 classes in 8-10
+starts), so on these boxes the kernel is *insurance*, not a visible fix — which is why the throughput column
+decides the default.
+
+Also: the **opt-in gate itself is honoured on both** — with the default environment the kernel logs **zero**
+intercepts on gfx1100 and gfx1151, and engages with `=1`.  Perplexity is unaffected (gfx1100 4.0490 → 4.0515;
+gfx1151 4.0298 → 4.0418).
+
+## Throughput — `llama-bench -p 512,2048 -n 128 -r 3 -fa 1 -ub 512 -b 2048`, interleaved visits
+
+| box | arm | pp512 | pp2048 | tg128 |
+|---|---|---|---|---|
+| gfx1100 (3 visits) | `MMF32=1` | 4737 / 4527 / 3750 (±345…±1016) | 5000 / 4978 / 4976 | 136.7 / 137.3 / 137.2 |
+| gfx1100 | `=0` | 4646 / 4652 / 4622 | 5101 / 5084 / 5102 | 136.5 / 136.8 / 136.8 |
+| gfx1100 (re-run, `-p 2048 -r 5`, quiet box) | `MMF32=1` | — | 4981 / 4969 / 4973 | 137.4 / 137.7 / 137.4 |
+| gfx1100 | `=0` | — | 5092 / 5057 / 4975 | 137.5 / 137.6 / 137.6 |
+| gfx1151 (3 visits) | `MMF32=1` | 2236 / 2211 / 2229 | 2236 / 2227 / 2218 | 62.15 / 62.17 / 62.16 |
+| gfx1151 | `=0` | 2198 / 2198 / 2213 | 2193 / 2200 / 2183 | 62.19 / 62.23 / 62.24 |
+
+* **gfx1100: NOT a win.** pp2048 is the trustworthy column (tight ±40-90, vs ±345-1016 at pp512 on that
+  box): **−1.3 to −2.2 %**, and the third re-run visit was a tie (4975 vs 4973).  Decode flat.  RDNA3 keeps
+  `mmf32` **opt-in**.
+* **gfx1151: a small win.** **pp512 +1.0 %** (2225 vs 2203), **pp2048 +1.6 %** (2227 vs 2192), decode flat
+  (−0.1 %), with tight spreads (±5-14).
+
+## Purity — the r103 `--family-switch` gate at the shipped confident point (gfx1151)
+
+`--corpus prompts/kld-corpus-35b-in-domain.txt --ctx 2048 --chunks 7`, base arm `GGML_CUDA_MMF32=0`
+(the shipped default on that arch), candidate `GGML_CUDA_MMF32=1`: base PPL **1.4345** (inside the gate's
+calibrated domain), candidate **0.013016 / 98.673 %**, same-kernel control **0.019125 / 97.975 %** → no worse
+on both metrics, **PASS** with `--allow-control-pass` (the §46/§47 calibration; the absolute KLD limit is
+missed by the control too, as it is on gfx1201).
+
+## Verdict
+
+| arch | correctness | determinism | prefill | default |
+|---|---|---|---|---|
+| gfx1201 (r104) | 11x better NMSE | 12/12 + 4/4 2-GPU | **+5.2 % / +4.6 %** | **ON** |
+| gfx1151 | 11x better NMSE | 12/12 | **+1.0 % / +1.6 %** | candidate to promote |
+| gfx1100 | 10-12x better NMSE | 12/12 | −1.3…−2.2 % (one tie) | keep opt-in |
+
+Recommendation: extend the r104 default to **RDNA3_5** (a one-line predicate change in
+`ggml_cuda_mmf32_enabled`, an r105 block-06 amendment) and leave **RDNA3** opt-in.  If RDNA3 ever needs the
+kernel for its determinism rather than its speed, the lever is a per-arch tile (`BN`/`ks`), not the gate.
