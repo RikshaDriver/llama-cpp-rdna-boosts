@@ -284,24 +284,48 @@ ubatch control measured on the spot.
 
 ---
 
-## Block 06 — MMB: the bf16-WMMA dequant-weight prefill GEMM
+## Block 06 — MMB and mmf32: the quantized and the F32 prefill GEMM
 
-**What it is.**  A prefill GEMM (`mmb.cu`, ~2.4k lines) that dequantizes weights into bf16 WMMA fragments
-on the fly, with per-arch and per-shape tuning: dense, routed/compact (MoE), GLU, F32-split, tall/narrow,
-tiny-M, IQ3_XXS and HC16 variants, plus a shadow cache.  Adapted from `pwilkin`'s `strix-halo` fork.
+**What it is.**  The prefill-GEMM block: `mmb.cu` (~2.4k lines) dequantizes quantized weights into bf16
+WMMA fragments on the fly (dense, routed/compact MoE, GLU, F32-split, tall/narrow, tiny-M, IQ3_XXS, HC16,
+plus a shadow cache; adapted from `pwilkin`'s `strix-halo` fork), and `mmf32.cu` (**r104**) serves the F32
+shapes `mmb` cannot take.
+
+**`mmf32` (r104).**  A non-quantized (F32) weight with more than 16 token columns cannot take `mmf` — there
+is no F32 MMA form on RDNA (`amd_mfma_available` is CDNA-only, `amd_wmma_available` is f16/bf16) — so it fell
+through `ggml_cuda_mul_mat_cublas()` to rocBLAS, i.e. to hipBLASLt.  That cost twice: hipBLASLt picks its
+solution **per process start** from a heap-ordered container, so the prefill arithmetic (and the logits)
+changed between runs (`GREEDY-PURITY.md` §44: 3 logit classes in 8 starts on 35B-A3B), and the solution the
+heuristic lands on is the *slowest* in the pool for these shapes.  `mmf32` is a plain SIMT tiled GEMM for
+exactly those shapes — 32 output rows per block, a 4×8 thread sub-tile, `BN=256` for `m <= 64` (the GDN
+`ssm_alpha`/`ssm_beta` projections) and 64 above it (the MoE routers), the k range split into contiguous
+chunks summed in increasing z, i.e. a **fixed reduction tree with no atomics**: the same bits on every run by
+construction, and an exact F32 FMA accumulation (no approximation).  Measured on gfx1201: 12/12 fresh starts
+one logits class (6/6 at 2 GPU `-sm tensor`), `+4.2 % pp512 / +4.1 % pp2048` with decode flat, kernel
+0.032 ms vs 0.046 ms for the best hipBLASLt class on `32×512×2048`; `GREEDY-PURITY.md` §47 has the purity
+judgement.
+
+*Scope/limitation:* F32 only, `m <= 256`, `17 <= n <= 65536`, `256 <= k <= 8192`, `ldc == m`; everything else
+keeps the rocBLAS call.  BF16/f16 prefill (Flash-Next) is untouched, so hipBLASLt keeps its large advantage
+there (and its per-start lottery — the BF16 counterpart is not claimed).  A **full-F32 model's FFN GEMMs
+(`m` ≫ 256) stay on rocBLAS**: the kernel would need a different tile to be competitive at wide `m`, and no
+such model is validated.  Default-on for RDNA4, opt-in on RDNA3/RDNA3_5 (`ENVIRONMENT.md` §10.1).
 
 **Contents.**  The `mmb` kernel family and its dispatch (`ggml-cuda.cu`); a per-quant type list
-(`GGML_CUDA_MMB_TYPES`); per-arch RDNA3/RDNA4 tuning knobs; and
+(`GGML_CUDA_MMB_TYPES`); per-arch RDNA3/RDNA4 tuning knobs; `mmf32.cu`/`mmf32.cuh` and its dispatch; and
 `tests/test-logits-width-probe.cpp` — the **width probe** that every purity claim in the delivery is
 measured with.
 
 **Knobs.**  `GGML_CUDA_MMB` (master switch), `_TYPES`, `_DENSE`, `_ROUTED`/`_ROUTED_THRESH`, `_GLU`/`_GLU_THRESH`,
 `_F32SPLIT`(+`_MIN_K`/`_MIN_M`), `_TALL`(+`_MIN_M`), `_TINY_M`/`_TINY_TT`, `_DOWN16`, `_HC16`, `_IQ3XXS`,
-`_RDNA3`, `_CFG`, `_CACHE`/`_SHADOW*`, `_MIN_T`, `_TILE`, `_BF16W`, `_LOG`; `LLAMA_MMB_CVT_LOG`.
-Everything is default-on and documented in `ENVIRONMENT.md` §5.
+`_RDNA3`, `_CFG`, `_CACHE`/`_SHADOW*`, `_MIN_T`, `_TILE`, `_BF16W`, `_LOG`; `LLAMA_MMB_CVT_LOG`;
+`GGML_CUDA_MMF32` (kill switch, `=0`), `GGML_CUDA_MMF32_LOG` (diagnostic).  Everything is default-on and
+documented in `ENVIRONMENT.md` §§10/10.1.
 
-**Purity.**  MMB changes prefill arithmetic, not decode: run the **prefill-logit gate** on any tuning
-change, and the width probe when a fusion/dispatch predicate moves.
+**Purity.**  Both kernels change prefill arithmetic, not decode: run the **prefill-logit gate** on any tuning
+change, and the width probe when a fusion/dispatch predicate moves.  For `mmf32` the gate is the
+*`--family-switch`* mode at a confident point (`prompts/kld-corpus-35b-in-domain.txt`), with the same-kernel
+control as the arbiter — see `GREEDY-PURITY.md` §47.
 
 ---
 

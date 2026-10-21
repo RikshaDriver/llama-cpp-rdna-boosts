@@ -103,7 +103,7 @@ reordering (`-ub 512` vs `-ub 256`), which is the floor a reordering costs *at t
   approximation — so its divergence is the family-switch magnitude by construction.  Shipping it does not add
   error relative to what testers already do (`=0`); it removes the *per-start* variation on top.
 
-**The in-domain point** is a new corpus, `tools/kld-corpus-35b-in-domain.txt` (92 892 B, sha256
+**The in-domain point** is a new corpus, `prompts/kld-corpus-35b-in-domain.txt` (92 892 B, sha256
 `0818e79e012ed7e47b5d047120aa71d84d06048beb3e58921e6b9de77e5f2596`): the model's own greedy answers
 (`-n 4500 --temp 0 --seed 42 --reasoning off --ignore-eos`) to six technical prompts, wrapped in the Qwen
 chat template — the same recipe as r103's `prompts/fa-family-switch-gemma4-26B-A4B.txt`, which is what took

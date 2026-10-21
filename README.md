@@ -12,7 +12,7 @@ whether it is a kill-switch (default-on, set to disable), an opt-in, a tuning va
 
 It ships as **12 patches** (block 00 + blocks 01-11) for a clean llama.cpp checkout at the fork point
 **`097cf33d9`** (upstream master).  Each block is one `git am` commit, and the series is linear (a block
-assumes its predecessors), so the set is applied whole.  The current release is **`v12-097cf33d9-r103`**: the release
+assumes its predecessors), so the set is applied whole.  The current release is **`v12-097cf33d9-r104`**: the release
 identity (fork point, canonical tip/tree, block count and per-artifact sha256) is
 [`release.json`](release.json), and the release note for it -- and for every earlier `rN` -- is the top of
 [`WORKLOG.md`](WORKLOG.md) (newest first; it is the only dated record).  This README describes the set,
@@ -430,7 +430,10 @@ shipped for bisection and for the real defect above.  Full record: [`GREEDY-PURI
 `ssm_alpha`/`ssm_beta` GEMM (`F32 2048x32 x N`): 3 logit classes in 8 fresh starts on ROCm 10.1.0, 1 class in
 8/8 with `ROCBLAS_USE_HIPBLASLT=0`, the class being the TensileLite spine hipBLASLt picked — and there the
 workaround is **free** (+1-3 % prefill, flat decode, ~70 MiB less peak VRAM).  Removing the hipBLASLt dispatch
-rather than pinning it is now a campaign: [`wip/hipblaslt-bypass/`](wip/hipblaslt-bypass/README.md).
+rather than pinning it now ships as **block 06's `mmf32`** (`GREEDY-PURITY.md` §47): deterministic
+(12/12 fresh starts) and +4.2 % prefill on that model.  The campaign record, including the two refuted
+shortcuts and the in-code pin prototype that was *not* shipped, is
+[`archive/work/hipblaslt-bypass/`](archive/work/hipblaslt-bypass/README.md).
 
 ## Concurrent serving with `--kv-unified` is not deterministic (issue #134)
 

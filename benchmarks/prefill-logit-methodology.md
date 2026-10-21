@@ -171,12 +171,12 @@ obligations follow once the cause is known.  Both are now decided policy (mainta
 
 1. **Find the cause before you drop the model.**  35B-A3B's run-to-run prefill variation is not inherent
    rounding: on gfx1201 / ROCm 10.1.0 it is the **hipBLASLt per-process solution choice** on the F32
-   `ssm_alpha`/`ssm_beta` and MoE-router GEMMs (`GREEDY-PURITY.md` §44, `wip/hipblaslt-bypass/`).  Measured
+   `ssm_alpha`/`ssm_beta` and MoE-router GEMMs (`GREEDY-PURITY.md` §44, `archive/work/hipblaslt-bypass/`).  Measured
    at `-c 512 --chunks 8`, 1 GPU: a candidate against a base recorded on the **same unpinned build** gave
    mean KLD **0.007279** / same-top-p **96.618 %**, and the *reference* arm `ROCBLAS_USE_HIPBLASLT=0` gave
    **0.007271** / 96.618 % from that same base — i.e. the gate was reading the lottery, not the candidate,
    and its spread (0.0068-0.0073 here) straddles the 0.005 limit.  Pinning the solution in our own code makes
-   this model's self-KLD exactly **0.000000 / 100.000 %** (`wip/hipblaslt-bypass/evidence/p3-arm-g-pin-implemented.txt`).
+   this model's self-KLD exactly **0.000000 / 100.000 %** (`archive/work/hipblaslt-bypass/evidence/p3-arm-g-pin-implemented.txt`).
 2. **Record the base on the arm that will ship, and treat a deliberate family switch as a new baseline**
    (with `scripts/gate-prefill-logits.sh --family-switch` for the judgement itself: a point the model is
    confident about, and the on-the-spot same-kernel control above as the floor).

@@ -1,10 +1,6 @@
-# wip/hipblaslt-bypass — can the delivery stop calling hipBLASLt entirely?
+# archive/work/hipblaslt-bypass — can the delivery stop calling hipBLASLt entirely?
 
-**Status: OPEN (seeded 2026-10-21, r102; arm G and P3(ii) implemented as prototypes the same day, P3(ii)
-re-measured on r103).**  P0-P3(ii) are measured: **arm G** (pin the hipBLASLt solution, +5.2 % prefill) and
-**P3(ii)** (our own F32 kernel, +4.2 %, no external dependency) both make the F32 path deterministic, and
-P3(ii) is the better *shipping shape* because it removes the per-ROCm index table entirely.  Nothing is in
-`patches/`: what remains is a promotion decision plus P3(i) (BF16 / Flash-Next).
+**Status: CLOSED (promoted 2026-10-21, r104) — see [`RESOLUTION.md`](RESOLUTION.md).**  The F32 GEMMs that reached hipBLASLt are now served by block 06's `mmf32` (deterministic by construction, +4.2 % prefill); the BF16 half (Flash-Next) was deliberately left on hipBLASLt.  This directory is the campaign record: the design space, every measurement, and the two prototypes that did *not* ship (a pinned-solution `hipblasLtMatmul` and the `mmf` cap raise).  Nothing here is part of the delivery.
 
 **Why it exists.**  Three things happened on 2026-10-21:
 
@@ -398,7 +394,7 @@ CSV).  Both take the arm from the environment, so the `=0` control is the same c
 | `tools/experiments/mmf-max-cols-ATTEMPT.patch` | the arm-B attempt (env knob on `mmf.cu`'s 16-column cap); refuted, kept so nobody repeats it |
 | `tools/experiments/hipblaslt-pin-ATTEMPT.patch` | the arm-G prototype (deterministic `hipblasLtMatmul` for the F32 skinny shapes in `ggml_cuda_mul_mat_cublas_impl`, `GGML_CUDA_HIPBLASLT_PIN=1`); works and wins, NOT in `patches/` |
 | `evidence/p4-mmf32-kernel-implemented.txt` | P3(ii) implemented on r103: correctness (NMSE + the r103 test instrument), determinism, throughput, the `--family-switch` purity judgement, the uint16 self-KLD floor, coverage/limits |
-| `tools/kld-corpus-35b-in-domain.txt` | the confident gate point for 35B-A3B (the model's own greedy answers, Qwen chat template; sha256 in the evidence) — the analogue of r103's `prompts/fa-family-switch-gemma4-26B-A4B.txt` |
+| `prompts/kld-corpus-35b-in-domain.txt` | the confident gate point for 35B-A3B (the model's own greedy answers, Qwen chat template; sha256 in the evidence) — the analogue of r103's `prompts/fa-family-switch-gemma4-26B-A4B.txt` |
 | `tools/experiments/mmf32-splitk-WIP.patch` | the P3(ii) prototype (our own F32 SIMT GEMM, split-K, env-gated `GGML_CUDA_MMF32=1`); works and wins, NOT in `patches/` |
 | `tools/experiments/mmf32-standalone/` | the kernel's numerical oracle (16 shapes vs a double reference) and the tile/k-split bench harness |
 | `evidence/p3-arm-g-pin-implemented.txt` | arm G implemented: per-shape solution classes, the 12/12 determinism gate, the interleaved `llama-bench` visits, the KLD matrix and the prefill-base finding |

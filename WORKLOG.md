@@ -1,5 +1,62 @@
 # WORKLOG - dated delivery records
 
+## 261021.011 (r104) -- `mmf32` promoted into block 06: the F32 prefill GEMM is ours, so 35B-A3B/gemma4 prefill is deterministic and 4 % faster
+
+**Release `v12-097cf33d9-r104`**, 12 blocks, fork point `097cf33d9`, tip `f38bfa9dd`.  One block amendment
+(06).  Closes `TODO` #82 and the `hipblaslt-bypass` campaign.
+
+**What shipped.**  A non-quantized (F32) weight with more than 16 token columns could not take `mmf` (there is
+no F32 MMA form on RDNA — `amd_mfma_available` is CDNA-only, `amd_wmma_available` is f16/bf16), so it fell
+through `ggml_cuda_mul_mat_cublas()` to rocBLAS, i.e. to **hipBLASLt**, which picks its solution *per process
+start* from a heap-ordered container.  That is the residual run-to-run nondeterminism of `TODO` #75 (3 logit
+classes in 8 starts on 35B-A3B), and the solution the heuristic lands on is the slowest in the pool.  Block 06
+now owns the path: `mmf32.cu`, a plain SIMT tiled GEMM for exactly those shapes (32 output rows per block, a
+4×8 thread sub-tile, `BN=256`/`64`, the k range split into contiguous chunks summed in increasing z — a fixed
+reduction tree, no atomics, **no approximation**).  F32 only, `m <= 256`, `17 <= n <= 65536`,
+`256 <= k <= 8192`, `ldc == m`; everything else keeps the rocBLAS call.  Default-on for **RDNA4**
+(`GGML_CUDA_MMF32=0` disables; opt-in `=1` on RDNA3/RDNA3_5 until those boxes run the same pair) —
+`ENVIRONMENT.md` §10.1.
+
+**Measured (gfx1201, 35B-A3B Q4_K_M, one GPU unless stated; r103 tree during the campaign, re-run on the
+r104 tree for the release gates).**  Determinism: **one logits class in 12/12** fresh starts
+(`llama-perplexity -c 512 --chunks 1`), **6/6** at 2 GPU `-sm tensor`, `--chunks 8` dumps byte-identical.
+Throughput, 3 interleaved `llama-bench` visits: **pp512 +4.2 %** (5068 vs 4862), **pp2048 +4.1 %** (5013 vs
+4818), tg128 flat; the kernel is 0.032 ms vs 0.046 ms for the best hipBLASLt class on `32×512×2048`.
+Correctness: 16-shape standalone oracle NMSE ~1e-13 (odd `k=2051`, odd `m`/`ldc`, `n<m`, `n>m`, `n=17`);
+`test-backend-ops -o MUL_MAT` 2444/2444, and with r103's `LLAMA_TEST_OP_NMSE`/`LLAMA_TEST_SEED` instrument the
+intercepted cases are **11x closer to the CPU reference than rocBLAS** (6.1e-14 vs 6.9e-13, threshold 5e-4).
+Purity: `--family-switch` at the new confident point (`prompts/kld-corpus-35b-in-domain.txt`, base PPL 1.43)
+gives **0.014646 / 98.045 %** against a same-kernel control of **0.018100 / 97.808 %** — no worse on both
+metrics; at the wikitext point (PPL 5.82) it is 0.005787 / 96.480 % against a control of 0.006017 / 96.588 %
+and `ROCBLAS_USE_HIPBLASLT=0` at 0.005969 / 96.667 %.  `GREEDY-PURITY.md` **§47** is the new rule.
+
+**What was measured and deliberately not shipped.**  Pinning the hipBLASLt solution in our own code
+(a direct `hipblasLtMatmul` with a validated index) is deterministic and +5.2 %/+4.8 %, i.e. ~1 % faster than
+the kernel, but it owes a **per-ROCm-release solution table** (10.1.0: `m <= 64 -> 140219`, else `140232`;
+7.14.1 has only four solutions from `140723`, so it falls back) and a `hipblaslt` link.  The kernel buys
+almost all of the win with none of that obligation, so **the kernel shipped and the pin did not** (maintainer
+decision).  The campaign also refuted `TENSILE_SOLUTION_INDEX` / `HIPBLASLT_TUNING_OVERRIDE_FILE` (arm A) and
+raising `mmf`'s 16-column cap (arm B, a kernel limit).
+
+**A false lead worth keeping.**  The prefill-logit gate's **self-KLD control is not exact**: the base file
+stores **uint16-quantised** log-probs (`scale = (max-min)/65535` over a ≤16-nat window ⇒ step ≈ 2.4e-4 nats),
+so the same arm compared against its own base reads `mean KLD -0.000000` but `same-top-p 99.951 %` *while the
+dumps are byte-identical* — and the stock arm carries the same RMS Δp floor.  Determinism is judged on the
+**dump hash**, not on the self-KLD top-p.  (Found on 35B-A3B; it cost a session's detour.)
+
+**Not done / accepted limitations.**  BF16 prefill (Flash-Next, 2790 hipBLASLt dispatches) is untouched: it
+keeps hipBLASLt's +51 % **and** its own per-start lottery — a BF16 counterpart is a separate job, not a gap
+in this one.  A full-F32 model's FFN GEMMs (`m` ≫ 256) still reach hipBLASLt (recorded in
+`patches/README.md`, block 06).  **Cross-arch:** validated on gfx1201 only; gfx1151/gfx1100 are opt-in until
+the maintainer's boxes run the determinism + bench pair, which is why the default is arch-keyed rather than
+global.
+
+**Docs.**  `patches/README.md` (block 06: MMB **and** mmf32, scope + limitation), `MANIFESTS.md` (a block-06
+verification row), `ENVIRONMENT.md` §10.1, `GREEDY-PURITY.md` §47 (+ index), `prompts/README.md` +
+`prompts/kld-corpus-35b-in-domain.txt` (the confident gate point, with the reproduction recipe),
+`README.md`/`TODO.md` (release id; #82 closed), `wip/CAMPAIGNS.md` (campaign closed), and the campaign record
+moved to `archive/work/hipblaslt-bypass/`.
+
 ## 261021.010 (wip) -- P3(ii): our own F32 GEMM for the hipBLASLt shapes -- deterministic, +4.2 %, no external dependency
 
 **WIP only: no patch, no `release.json` change, no tree change** (prototype in

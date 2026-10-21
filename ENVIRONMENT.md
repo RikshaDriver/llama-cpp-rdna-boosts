@@ -521,6 +521,22 @@ default, and they exist to reproduce measurements from `benchmarks/`.
 `GGML_CUDA_MMB_MARK_LOG`, `LLAMA_MMB_CVT_LOG`, `LLAMA_MMB_F32SPLIT`, `LLAMA_HC_BLK16`,
 `LLAMA_HC_GATEMIX`, `LLAMA_HC_RES16`.
 
+### 10.1 `GGML_CUDA_MMF32` -- the F32 skinny prefill GEMM (block 06)
+
+`mmf32` serves the F32 prefill GEMMs that `mmb` cannot (non-quantized weights, more than 16 token
+columns, `m <= 256`: the GDN `ssm_alpha`/`ssm_beta` projections and the MoE routers).  Taking them out of
+rocBLAS/hipBLASLt is what makes those models' prefill logits reproducible across fresh processes, and it is
+faster there (`GREEDY-PURITY.md` §47).
+
+| variable | default | kind | notes |
+|---|---|---|---|
+| `GGML_CUDA_MMF32` | **on** (RDNA4); unset = off on RDNA3 / RDNA3_5 | kill-switch / opt-in | `=0` disables (the old rocBLAS path).  RDNA4 (gfx1201) is the validated device, so the kernel is default-on and the variable exists to disable it; on the other RDNA families it is **opt-in** (`=1`) until that box has run the same determinism + bench pair — the delivery validates cross-arch admission before flipping a default (§19 addendum). |
+| `GGML_CUDA_MMF32_LOG` | unset | diagnostic | prints the first 16 resolved plans on stderr (`MMF32 m=… n=… k=… tile=… ks=…`).  Does not change what is computed. |
+
+Scope: F32 weights only, `m <= 256`, `17 <= n <= 65536`, `256 <= k <= 8192`, `ldc == m`; every other mul_mat
+keeps the rocBLAS call.  BF16/f16 prefill (Flash-Next) is untouched, and so is its hipBLASLt advantage; a
+full-F32 model's FFN GEMMs (`m >> 256`) stay on rocBLAS (a recorded limitation).
+
 ---
 
 ## 11. Diagnostics and profiling

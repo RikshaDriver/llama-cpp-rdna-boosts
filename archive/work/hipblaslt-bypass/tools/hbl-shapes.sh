@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # hipBLASLt shape inventory -- which GEMMs does a run actually send through hipBLASLt?
 #
-# This is campaign step P0 (wip/hipblaslt-bypass/README.md §4): the (shape, calls) table below IS
+# This is campaign step P0 (archive/work/hipblaslt-bypass/README.md §4): the (shape, calls) table below IS
 # the scope of any "bypass hipBLASLt" work, because ggml-cuda only reaches hipBLASLt through
 # rocBLAS's non-quantized `mul_mat` fallback (ggml_cuda_mul_mat_cublas) for batches wider than the
 # native GEMM cap (mmf.cu: `src1_ncols > 16 -> false`).

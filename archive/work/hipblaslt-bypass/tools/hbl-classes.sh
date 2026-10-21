@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Fresh-process logits-class counter -- the determinism instrument for wip/hipblaslt-bypass.
+# Fresh-process logits-class counter -- the determinism instrument for archive/work/hipblaslt-bypass.
 #
 # WHY: a greedy-text compare can be identical 10/10 across arms while the prefill logits are
 # already in different classes (see ../FINDINGS-2026-10-21-todo-75.md §4).  This counts classes

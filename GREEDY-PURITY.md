@@ -106,6 +106,7 @@ numbers are **stable** — dozens of docs cite them — so they are never renumb
 | **§44** | a per-start hipBLASLt solution pick is not a code defect; pin `ROCBLAS_USE_HIPBLASLT=0` before comparing starts | doctrine |
 | **§45** | a split the op cannot serve locally must be rejected, never approximated — and "locally" means no device straddles the reduction | fix (r101) |
 | **§46** | a tile→WMMA family switch is judged at a calibrated point (base PPL in the gate's domain) against a same-kernel ubatch control; the r102 head-512 rows pass there | doctrine (r102, TODO #81 closed 2026-10-21) |
+| **§47** | an exact F32 GEMM in a different summation order is a family switch too; own the path in-code and judge it against the same-kernel control (12/12 fresh starts determinism, +4.2 % prefill) | fix (r104, TODO #82 closed) |
 
 ---
 
@@ -901,7 +902,8 @@ mechanism; and greedy text was identical 12/12 across class-varying starts — j
 decode (tg128 108.2/108.0 vs 107.9/108.0), and peak VRAM 21822 -> 21752 MiB.  It is the model- and
 runtime-dependence of that number that makes `ROCBLAS_USE_HIPBLASLT=0` a tester's control and not a shipping
 default: on gemma4 above it is a real prefill+decode *win*, elsewhere it is the -15 % decode cost.  Removing
-the dispatch instead of pinning it is `wip/hipblaslt-bypass/` (`TODO #82`).
+the dispatch instead of pinning it is block 06's `mmf32` (`GREEDY-PURITY.md` §47; campaign record in
+`archive/work/hipblaslt-bypass/`, `TODO #82` closed at r104).
 
 **Its outside-slab footprint is a constant ~70 MiB (2026-10-21, measured).**  Qwen3.8-Flash-Next GSQ, 2 GPU
 `-sm tensor -ncmoe 48`, `GGML_CUDA_SLAB_STATS=1`: the slab's `free_min` is 53-88 MiB higher with
@@ -1049,3 +1051,53 @@ default point.
 against the delivery without the 512 rows (`0.0293 / 92.59 %`), while the fully-tile absolute pair is
 `0.0462 / 90.42 %` — and the delivery's own head-256 rows already cost `0.0441 / 90.63 %` against fully
 tile.  The `WORKLOG` 261021.004 line labels the marginal pair "head-512 WMMA vs tile".
+
+## 47. An exact F32 GEMM in a different summation order is a family switch — and owning the path is the fix
+
+**Claim.**  On RDNA the F32 prefill GEMMs with more than 16 token columns (the GDN `ssm_alpha`/`ssm_beta`
+projections and the MoE routers) used to fall through `ggml_cuda_mul_mat_cublas()` to rocBLAS, i.e. to
+hipBLASLt.  That is a *per-start* purity defect, not a numeric one: hipBLASLt picks its solution for a shape
+from a heap-ordered container, so a fresh process lands on a different TensileLite spine and the prefill
+logits move (§44; TODO #75: **3 classes in 8 starts** on 35B-A3B `llama-perplexity`, 3 in 18 on gemma4).  It
+is also slow: on `m=32 n=512 k=2048` the heuristic's class costs 0.13-0.19 ms against 0.046 ms for a
+well-chosen solution.
+
+**Fix (r104, block 06).**  `mmf32`: our own SIMT tiled GEMM for exactly those shapes (`mmf32.cu`).  There is
+no F32 MMA form on RDNA (§2 arm B / `amd_mfma_available` is CDNA-only), so this is a plain tiled kernel — 32
+output rows per block, a 4×8 thread sub-tile, and the k range split into contiguous chunks summed in
+increasing z.  That is a **fixed reduction tree with no atomics**: one logits class in **12/12** fresh starts
+at 1 GPU and **6/6** at 2 GPU `-sm tensor`, and `--chunks 8` dumps byte-identical.  No approximation anywhere
+(it is an F32 FMA accumulation in a pinned order), and 0.032 ms on `32×512×2048`.
+
+**It is still a family switch, so it is gated as one.**  Its divergence from the rocBLAS path *is* the
+reordering, and it cannot be driven to zero (§46).  Measured with `--family-switch` (2026-10-21, gfx1201):
+
+| point | base PPL | candidate | same-kernel control | `ROCBLAS_USE_HIPBLASLT=0` |
+|---|---:|---|---|---|
+| wikitext, `-c 512 --chunks 40` | 5.8194 | **0.005787 / 96.480 %** | 0.006017 / 96.588 % | 0.005969 / 96.667 % |
+| in-domain, `-c 2048 --chunks 7` (`prompts/kld-corpus-35b-in-domain.txt`) | **1.4345** | **0.014646 / 98.045 %** | 0.018100 / 97.808 % | — |
+
+At the confident point it is no worse than the control on **both** metrics (PASS with
+`--allow-control-pass`); at the wikitext point it is closer to the default than both the control and the
+`=0` arm.  **The absolute limits are missed at both points by every reordering, including the control** —
+that is §46's calibration, not a defect of this kernel.
+
+**The op-level accuracy leg** (deterministic, r103's instrument): `LLAMA_TEST_OP_NMSE=1 LLAMA_TEST_SEED=1
+test-backend-ops -o MUL_MAT` puts the F32 kernels at **6.1e-14** (ours) vs **6.9e-13** (rocBLAS) against the
+CPU reference on the two cases the kernel intercepts, threshold 5e-4 — i.e. both at F32 rounding, ours
+closer, and a case the kernel does not take is bit-identical.
+
+**Rule.**  A GEMM family we own must be (a) exact — no precision change hiding behind a "faster kernel";
+(b) deterministic by construction (fixed reduction order, no atomics, no per-start choice); (c) judged by
+§46's family-switch protocol at a confident point **and** by the op-level NMSE pair; and (d) **re-baselined**
+once: a shipping default that moves the prefill arithmetic means the prefill-logit base is recorded on the
+new arm (`benchmarks/prefill-logit-methodology.md` §5b).  Any later tuning of the kernel's tiling is a
+within-family change and must meet the absolute limits at the default point.
+
+**Scope, and what is deliberately not claimed.**  F32 only, `m <= 256`, `17 <= n <= 65536`,
+`256 <= k <= 8192` — decode cannot reach it (`n >= 17`, so `W = 1..8` band uniformity is untouched by
+construction) and BF16/f16 prefill is untouched, so Flash-Next keeps both hipBLASLt's +51 % and its own
+per-start lottery (a BF16 counterpart is a separate job, not delivered).  A full-F32 model's FFN GEMMs
+(`m` ≫ 256) still reach hipBLASLt: an accepted limitation, recorded in `patches/README.md` (block 06).
+Default-on for RDNA4 only; RDNA3/RDNA3_5 are opt-in until that box runs the same determinism + bench pair
+(§19's arch-admission discipline).

@@ -12,7 +12,7 @@ Details never live here: they live in `AGENTS.md`, `patches/README.md`, `MANIFES
 still means the same subject after that item is closed and removed from this file.  New items append.
 
 **Current state:** the **12-block V2.0 set** (block 00 + blocks 01-11) at fork point **`097cf33d9`**,
-release **`v12-097cf33d9-r103`**.  `release.json` is the source of truth for the tip/tree and hashes; the
+release **`v12-097cf33d9-r104`**.  `release.json` is the source of truth for the tip/tree and hashes; the
 top of `WORKLOG.md` is the newest record.
 
 | # | subject | kind | status |
@@ -28,7 +28,6 @@ top of `WORKLOG.md` is the newest record.
 | **78** | DFlash2 `-sm tensor`: the real Meta distributed `TOP_K` fix | correctness | open, scoping (`wip/dflash-meta-split-impl/`) |
 | **79** | RDNA3_0 verify-band fusions: no multi-device measurement, and gfx1101/gfx1102 untested | platform validation | open (shipped default-on in r95; needs a 2+ card gfx1100 box) |
 | **80** | meta split-state cache: 30+ lookups per node per re-allocation | performance | parked (`archive/work/issue-184-meta-r80r82/RESOLUTION.md` `§` headroom) |
-| **82** | stop calling hipBLASLt entirely (bypass the rocBLAS dispatch) — correctness first | correctness | open, **two deterministic prototypes measured 2026-10-21 (r103): arm G (pin the hipBLASLt solution, +5.2 % prefill, needs a per-ROCm index table) and P3(ii) (our own F32 SIMT GEMM, +4.2 %, no external dependency, judged PASS by the `--family-switch` gate at a confident point) — P3(ii) is the recommended shipping shape; promotion + base re-record not taken** (`wip/hipblaslt-bypass/`, `WORKLOG.md` 261021.008/.010); arms B/A refuted; P3(i) BF16 untouched |
 
 Accepted limitations that are deliberately **not** fixed are listed at the end — do not re-report them.
 
@@ -185,51 +184,15 @@ Two gaps, both needing hardware the fleet does not have:
 
 ---
 
-## 82. Stop calling hipBLASLt entirely — CORRECTNESS first, performance second (scoping)
-
-Opened 2026-10-21, in the same session that closed **#75** on the hipBLASLt per-start solution flip
-(`wip/hipblaslt-bypass/FINDINGS-2026-10-21-todo-75.md`).  hipBLASLt is not a feature we use on purpose: it is
-where rocBLAS sends a **non-quantized `mul_mat` wider than the native GEMM cap** (`mmf.cu`:
-`src1_ncols > 16 -> false`), so in this set it serves exactly the GDN F32 `ssm_alpha`/`ssm_beta` projections
-and the F32 MoE router — on 35B-A3B those are `A[F32 2048x32]` (alpha/beta) and `A[F32 2048x256]`
-(`ffn_gate_inp`, 256 experts), 159 dispatches per prefill+32-token CLI run — plus gemma4's F32 router, plus
-**27 BF16 shapes (2790 dispatches) on Qwen3.8-Flash-Next**, and **nothing at all** on a dense quantized 27B
-(0 dispatches, measured).
-
-**The driver is correctness.**  hipBLASLt's per-process solution pick is the last run-to-run lottery in the set;
-removing the dispatch makes a run reproducible by construction instead of by environment variable.  The
-VRAM/headroom motivation from the 2026-10-21 thread was **measured and dropped**: on Flash-Next (2 GPU
-`-ncmoe 48`, `GGML_CUDA_SLAB_STATS`) hipBLASLt holds a **constant ~70 MiB outside the slab**, independent of
-ubatch (512..8192), prompt length (602..68 262 tokens), context (16K..131K) and model — ~3.5 % of a 2 GiB
-headroom floor, whose real consumers are elsewhere.  Do not restate the ~2 GiB as hipBLASLt's.
-
-**The deterministic alternative is measured, and it may also be faster.**  A standalone probe of the solution
-pool (campaign `evidence/p2-arm-g-algo-classes.txt`) shows each shape splits into **3-4 bit-classes** with very
-different cost, and the class hipBLASLt's heuristic lands in is the **slowest**: 35B-A3B alpha/beta
-(`m=32 n=512 k=2048` f32) has 140215-140218 at 0.127-0.229 ms vs **140219-140222 at 0.045 ms**; the gemma4 router
-has 140215-140218 at 0.174-0.290 ms vs **140232 alone at 0.066 ms**.  So selecting the algo ourselves
-(`getAllAlgos` + a deterministic pick, arm G) is a determinism fix *and* a candidate prefill win, and it keeps
-the Flash-Next path hipBLASLt serves.  The lottery itself lives in **rocBLAS's** selection (its
-`getAllSolutions()` heap-ordered container), which is the layer that fix bypasses.  Pinning via the library's
-own knobs does **not** work: `TENSILE_SOLUTION_INDEX` has no effect and `HIPBLASLT_TUNING_OVERRIDE_FILE` is
-rejected unless it names the exact hipBLASLt git version, i.e. it cannot be shipped.
-
-**What a bypass has to clear is not uniform:** on 35B-A3B the F32 path is **free** (`ROCBLAS_USE_HIPBLASLT=0`
-measures +1-3 % prefill, flat decode), while on Flash-Next it is worth **+51 % prefill** (2405 vs 1595 t/s at
-68K tokens, `-ub 8192`) — so the F32 kernel is a correctness win with no performance argument against it, and
-the BF16 kernel is a performance proposition first.  `mmf` cannot simply be uncapped: RDNA has **no F32 MMA
-GEMM** (`amd_mfma_available` is CDNA-only; `amd_wmma_available` is f16/bf16) and the 16-column cap is a kernel
-limit (`mmf.cuh:771 GGML_ASSERT`), not a predicate (attempt kept in the campaign's `tools/experiments/`).
-
-**Gates** (any candidate): one logits class across 12 fresh `llama-perplexity -c 512` starts, prefill-logit
-KLD recorded against the §113 calibration, interleaved prefill/decode A/B per model, the 4-axis MTP +
-`none == draft-mtp` gates, and cross-backend instantiation consistency.  Working home, measured inventory and
-plan: [`wip/hipblaslt-bypass/`](wip/hipblaslt-bypass/README.md).
-
----
-
 ## Documented, deliberately NOT fixed (accepted limitations — do not re-report)
 
+- **`mmf32` covers the skinny F32 shapes only (r104, `TODO` #82 closed) — accepted.**  A full-F32 model's FFN
+  GEMMs (`m` ≫ 256: dense F32/F16-weights-heavy prefill) still fall through to rocBLAS/hipBLASLt, so they keep
+  that path's per-start solution lottery; the kernel's tile (32 output rows) is the wrong shape to be
+  competitive there and no such model is validated.  Also untouched: BF16/f16 prefill (Flash-Next keeps both
+  hipBLASLt's +51 % and its own lottery — a BF16 counterpart is its own job) and RDNA3/RDNA3_5, where the
+  kernel is opt-in (`GGML_CUDA_MMF32=1`) until those boxes run the determinism + bench pair.  Scope:
+  `patches/README.md` (block 06), rule: `GREEDY-PURITY.md` §47.
 - **The `launch-ledger` remainder (item 5(c)) — measured, not pursued (2026-09-12 (8)).**  The small-pp
   remainder (+38 `scale_f32`/eval, an `rms_norm<256,true>` count diff) is sub-0.2 %, root-cause-only.
 - **The mmq mma `sum[]` accumulator-overflow latent defect (item 5(d)) — accepted, no upstream report

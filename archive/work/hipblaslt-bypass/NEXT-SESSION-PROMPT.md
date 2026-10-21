@@ -1,15 +1,15 @@
-# Next-session prompt — `wip/hipblaslt-bypass`
+# Next-session prompt — `archive/work/hipblaslt-bypass`
 
 Paste this in as the first message of a fresh session.
 
 ---
 
-We are continuing the **hipBLASLt bypass** campaign in `~/llama-cpp-rdna-boosts/wip/hipblaslt-bypass/`.
+We are continuing the **hipBLASLt bypass** campaign in `~/llama-cpp-rdna-boosts/archive/work/hipblaslt-bypass/`.
 Read, in this order, before doing anything:
 
-1. `wip/hipblaslt-bypass/README.md` (the campaign: why, what is measured, the design space, the gates),
-2. `wip/hipblaslt-bypass/FINDINGS-2026-10-21-todo-75.md` (the closure evidence that started it),
-3. `wip/hipblaslt-bypass/evidence/p0-*.txt`, `p1-*.txt`, `p2-*.txt` (this session's measurements),
+1. `archive/work/hipblaslt-bypass/README.md` (the campaign: why, what is measured, the design space, the gates),
+2. `archive/work/hipblaslt-bypass/FINDINGS-2026-10-21-todo-75.md` (the closure evidence that started it),
+3. `archive/work/hipblaslt-bypass/evidence/p0-*.txt`, `p1-*.txt`, `p2-*.txt` (this session's measurements),
 4. `AGENTS.md` (policies), `GREEDY-PURITY.md` §44 (hipBLASLt doctrine) and §19/§24/§25 (band uniformity).
 
 **State at handover (2026-10-21, end of session).**

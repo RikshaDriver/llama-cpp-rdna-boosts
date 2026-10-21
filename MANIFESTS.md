@@ -25,7 +25,7 @@ reorder, never insert.
 | 03 | `0003-…-block-03-chunked-gated-delta-net-prefill` | chunked GDN prefill | two arch-segregated kernels + rollback tracker |
 | 04 | `0004-…-block-04-BF16-KV-cache-…` | BF16 KV + native-BF16 FA | |
 | 05 | `0005-…-block-05-flash-attention-band-…` | FA band / native quantized K-V / derived kq mask | |
-| 06 | `0006-…-block-06-MMB-quantized-prefill-GEMM` | MMB quantized prefill GEMM | |
+| 06 | `0006-…-block-06-MMB-quantized-prefill-GEMM` | MMB quantized prefill GEMM + `mmf32` (the F32 skinny prefill GEMM, r104) | |
 | 07 | `0007-…-block-07-k-quant-boosts-…` | k-quant boosts (`mmvq` VDR, Q6_K MMQ, Q1_0, grid pad) | **the decode-numerics block** — see `GREEDY-PURITY.md` §2/§9 |
 | 08 | `0008-…-block-08-fused-kernels-…` | fused kernels | fusions + fused MoE gate+up+GLU + per-shape `mmvq` `nwarps` |
 | 09 | `0009-…-block-09-host-resident-MoE-…` | host-resident MoE | slab, expert cache, prefill cache staging |
@@ -105,6 +105,7 @@ on the tip.
 | 04 | `test-backend-ops` bf16-KV FA cases + a bf16-cache model run | pass; coherence identical to f16 |
 | 05 | `test-backend-ops -o FLASH_ATTN_EXT` (full matrix); width probe; prefill-logit gate | 6389/6389 on the r102 tree (gfx1100); probe PASS; KLD <= 0.005 for within-family changes, and the RDNA3_0 head-512 row set passes the absolute limit in `--family-switch` mode (0.001778 / 98.967 % at a base-PPL-2.65 point) — `GREEDY-PURITY.md` §46 |
 | 06 | `test-backend-ops -o MUL_MAT` (MMQ cases) + prefill A/B | pass; prefill not slower at depth |
+| 06 | **(r104) `mmf32`**: `test-backend-ops -o MUL_MAT` (F32 cases; with `LLAMA_TEST_OP_NMSE=1 LLAMA_TEST_SEED=1` the intercepted cases must be no worse than the rocBLAS path's NMSE) + fresh-start determinism (`llama-perplexity -c 512 --chunks 1`, 12 starts, 1 class; plus 2 GPU `-sm tensor`) + `llama-bench` A/B against `GGML_CUDA_MMF32=0` | 2444/2444 and 11x closer to the CPU reference than rocBLAS (6.1e-14 vs 6.9e-13, threshold 5e-4); 12/12 one class, 6/6 at 2 GPU; `+4.2 % pp512 / +4.1 % pp2048`, decode flat — `GREEDY-PURITY.md` §47 |
 | 07 | `test-backend-ops -o MUL_MAT`/`MUL_MAT_ID` (K-quant cases); `llama-perplexity` before/after | pass; **PPL must be unchanged** (it is a numerics change, not a quality change) |
 | 08 | `test-backend-ops -o MUL_MAT_ID`; MoE decode + `llama-batched-bench -npl 1,4,8`; width probe on a MoE model | pass; one hash across the band; verify widths not slower than stock-relative |
 | 09 | host-expert coherence (`-ncmoe`/`-cmoe`), `test-llama-archs`, `MOE_EXPERT_CACHE_VALIDATE=1`; for the batched f32 CPY: `test-logits-width-probe` default vs `GGML_CUDA_FUSE_CPY_BATCH=0` | pass; no `////`, no fault; cache-on == cache-off text; probe maxdiff 0 and identical hashes |

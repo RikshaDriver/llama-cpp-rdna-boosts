@@ -25,6 +25,7 @@ numbers unreproducible. Every prompt here is a committed file with a recorded si
 | `recall.txt` | 2001 | 551 | `4e11ce3c7369cee37932f545215d72a2750452405a7307060d63f119af6897cb` | verbatim-recall workload (the **K** axis): a distinctive passage to reproduce character for character. The highest-acceptance workload, and the one where the adaptive controller drafts deepest. |
 | `code-reasoning-mixed.txt` | 1226 | 296 | `97a4caa79355e12f10209e2545587dcc4c6a19087285c91679e1df5a5813d18f` | **phase-switching** probe (added 2026-09-15): ten tasks, each asking for two or three paragraphs of design reasoning *then* a short snippet, so the generated stream alternates code ↔ reasoning and the adaptive controller must drop back to a low depth after a productive code phase. The workload a real coding assistant produces, and the one a slow-dropping controller loses on. |
 | `fa-family-switch-gemma4-26B-A4B.txt` | 64864 | n/a | `f698f20a8171e9daecfcc40938868f2abf35f0ce06661167ef5a7ea9faf74724` | **KLD corpus** (not a prompt): the prefill-logit gate's `--family-switch` point, `--ctx 2048 --chunks 10`. The model's own in-domain continuations (six greedy answers, `--temp 0 --seed 42`, wrapped in the gemma chat template), so gemma-4-26B-A4B has base PPL 2.65 instead of 607 on wikitext — inside the gate's calibrated domain, which is what makes a tile→WMMA family switch decidable (`GREEDY-PURITY.md` §46). Generated 2026-10-21 from the six task prompts recorded in `archive/work/fa-rdna3-head512-purity/RESOLUTION.md`; it is a *shipped artefact*, never regenerated. |
+| `kld-corpus-35b-in-domain.txt` | 92892 | n/a | `0818e79e012ed7e47b5d047120aa71d84d06048beb3e58921e6b9de77e5f2596` | **KLD corpus** (not a prompt): the `--family-switch` point for Qwen3.6-35B-A3B, `--ctx 2048 --chunks 7`.  The model's own greedy answers (`-n 4500 --temp 0 --seed 42 --reasoning off --ignore-eos`) to six technical prompts, wrapped in the Qwen chat template, so the base PPL is **1.43** instead of 5.82 on wikitext — inside the gate's calibrated domain, which is what makes the block-06 F32 GEMM family switch decidable (`GREEDY-PURITY.md` §47).  Generated 2026-10-21 (r104).  It is a *shipped artefact*, never regenerated in place.
 
 ¹ Token count from `llama-tokenize` on the Qwen3.8-27B tokenizer (a different tokenizer will differ; the
 **byte size and sha256** are the stable identity, not the token count).
@@ -48,6 +49,31 @@ gate. Its throughput is *maximal* at the floor (`--spec-type draft-mtp-adaptive
 monotonically to 50.0 at depth 12), so it is the prompt that punishes a controller which is slow to
 drop after a code phase. Judge an adaptive change on it in addition to the four axes above; recorded
 results are in `archive/work/adaptive-mtp-ceiling-scaling/bucketed-port/README.md`.
+
+## The `kld-corpus-*` files (how they are made)
+
+A `kld-corpus-*` file is **not** a prompt: it is the *point* the prefill-logit gate's family-switch mode
+measures at (`scripts/gate-prefill-logits.sh --family-switch --corpus <file> --ctx 2048 --chunks 10`).  A
+family switch can only be judged at a point the model is confident about, and raw wikitext is not one for a
+reasoning model (`GREEDY-PURITY.md` §46): the corpus is therefore the model's **own** continuations, which
+takes the base PPL from 607 to 2.65 (gemma4) and from 5.82 to 1.43 (35B-A3B).
+
+Recipe (used for both files, 2026-10-21):
+
+```bash
+# one greedy answer per prompt, wrapped in the model's chat template, concatenated in order
+llama-cli -m <model> -ngl 99 -fa on -t 8 -n 4500 --temp 0 --seed 42 --reasoning off \
+  --ignore-eos --no-display-prompt --single-turn -p "<chat template>user\n<PROMPT><end>\n<assistant>\n"
+```
+
+The six prompts behind `kld-corpus-35b-in-domain.txt` (recorded here so it can be rebuilt and hash-checked):
+the history of theatre in London; how a modern CPU cache hierarchy works; tuning GPU matrix-multiplication
+kernels; the water cycle on a fictional two-moon planet; European railway signalling systems; and how a
+compiler turns a loop into vector instructions.  The gemma4 file's six task prompts are recorded in
+`archive/work/fa-rdna3-head512-purity/RESOLUTION.md`.
+
+A shipped corpus is **never edited in place** (its sha256 is the identity of every measurement made at that
+point); a new point is a new file.
 
 ## Usage
 
