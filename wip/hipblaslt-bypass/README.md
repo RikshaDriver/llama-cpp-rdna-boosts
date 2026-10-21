@@ -180,14 +180,24 @@ classes in 6 fresh starts each), and `HIPBLASLT_TUNING_OVERRIDE_FILE`, written i
 for the exact shape hipBLASLt logs (`m=32 n=512 k=2048`, all `R_32F`, `T,N`), is rejected with *"The hipBLASLt
 git version and the override file git version are not the same"* — the file is locked to one ROCm build.
 
-**G. Make the pick deterministic in OUR code — the recommended practical fix (not yet prototyped).**  Call
-`hipblasLtMatmul` directly for the shapes we care about with an algo we choose deterministically (e.g. the
-lowest `solution_id` from `hipblasLtMatmulAlgoGetHeuristic`/`getAllAlgos`, or a fixed index validated once).
-This keeps hipBLASLt's **+51 % Flash-Next prefill** and removes the lottery at the same time, at the cost of
-adding hipBLASLt as a direct dependency (it is already linked transitively through rocBLAS) and of a fixed
-algo that must be re-validated per ROCm line.  Cheaper than an F32 GEMM to write, but less of a win: it does
-not remove the binary, and an implicit fallback path can still pick a different kernel.  Prototype this
-*before* building the F32 kernel if the goal is "reproducible shipped binary" rather than "no hipBLASLt".
+**G. Make the pick deterministic in OUR code — the recommended practical fix, prototyped at the API level.**
+Call `hipblasLtMatmul` directly for the shapes we care about with an algo we choose deterministically (the
+minimum `getIndexFromAlgo()` from `hipblaslt_ext::getAllAlgos`, or one validated index).  The standalone probe
+(`tools/experiments/hipblaslt-algo-classes.cpp`, `evidence/p2-arm-g-algo-classes.txt`) shows why this is worth
+more than determinism alone — the solution pool **splits into 3-4 bit-classes with very different cost**:
+
+| shape | bit-classes | heuristic's pick | fastest class |
+|---|---|---|---|
+| 35B-A3B alpha/beta (`m=32 n=512 k=2048` f32) | 3 | 0.127-0.229 ms (140215-140218) | **0.045 ms** (140219-140222) |
+| gemma4 router (`m=128 n=375 k=2816` f32) | 4 | 0.174-0.290 ms (140215-140218) | **0.066 ms** (140232 alone) |
+| Flash-Next prefill (`m=320 n=512 k=10240` bf16) | 3+ of 78 run | a class none of them (110544) | 0.064 ms |
+
+So a deterministic pick is also potentially a **prefill win** (4x on the 35B-A3B shape, whose heuristic
+lands in the slowest class).  What it does **not** do: remove hipBLASLt, remove the binary, or make the
+*implicit fallback* deterministic (a shape we do not pin still goes through rocBLAS).  Note also that the
+standalone `hipblasLtMatmulAlgoGetHeuristic` was **stable** across 10+6 fresh processes while the real run
+varies — the lottery is in **rocBLAS's** selection (`getAllSolutions()` heap order), which is precisely the
+layer arm G bypasses.  Recommended first task next session.
 
 **B. Raise the native-GEMM cap (`mmf.cu`: `src1_ncols > 16`) — REFUTED as a cheap arm (2026-10-21).**  Tried
 it (`GGML_CUDA_MMF_MAX_COLS`, patch kept as `tools/experiments/mmf-max-cols-ATTEMPT.patch`).  Two blockers:
@@ -252,9 +262,13 @@ it does not scale with ubatch or prompt length.  Headroom is **not** a reason to
 
 **P2 — the cheap arms.**  Arm B is refuted as cheap (§2): F32 has no MMA path on RDNA and the 16-column cap is
 a kernel limit.  **Arm A is refuted as a shipping mechanism** (§2): `TENSILE_SOLUTION_INDEX` has no effect and
-the tuning override file is locked to the exact hipBLASLt git version.  **Arm G (explicit algo in our code) is
-the recommended next step** for the correctness goal, because it keeps the Flash-Next +51 % prefill.  **Arm E**
-(`ROCBLAS_USE_HIPBLASLT=0` from our ROCm init) is free on 35B-A3B but -37 % Flash-Next prefill, and
+the tuning override file is locked to the exact hipBLASLt git version.  **Arm G is the recommended next step**
+and is prototyped at the API level (§2 + `evidence/p2-arm-g-algo-classes.txt`): a deterministic
+`getAllAlgos`-based pick gives fixed bits *and* is up to **4x faster** than the class the heuristic lands in on
+the 35B-A3B shape, which keeps the Flash-Next prefill win too.  Remaining work for arm G is the end-to-end
+part: a direct `hipBLASLtMatmul` per pinned shape in `ggml_cuda_mul_mat_cublas`, a link dependency on
+`hipblaslt`, then 12 fresh `llama-perplexity` starts must give **one** class and the prefill must not regress.  
+**Arm E** (`ROCBLAS_USE_HIPBLASLT=0` from our ROCm init) is free on 35B-A3B but -37 % Flash-Next prefill, and
 `ENVIRONMENT.md` records that `=0` was measured CORRUPT at `GGML_CUDA_SLAB_HEADROOM_MIB=2048` in the wide-prefill
 config (`-ub 6144 -c 204800`) — that claim predates this campaign and must be re-tested before any arm relies
 on `=0`; at 16384..131072 context and 896..256 headroom it is clean here.
@@ -306,4 +320,5 @@ CSV).  Both take the arm from the environment, so the `=0` control is the same c
 | `tools/hbl-kernels.sh` | adds the kernel-trace pass: which TensileLite kernel per start |
 | `tools/hbl-shapes.sh` | aggregate the hipBLASLt shape inventory from a log |
 | `tools/experiments/mmf-max-cols-ATTEMPT.patch` | the arm-B attempt (env knob on `mmf.cu`'s 16-column cap); refuted, kept so nobody repeats it |
-| `evidence/` | the dated measurement summaries quoted in §1 — `p0-inventory-all-models.txt`, `p0-shapes-flash-next.txt`, `p1-hipblaslt-outside-slab.txt`, `p2-mmf-cap-attempt.txt` are this session's |
+| `tools/experiments/hipblaslt-algo-classes.cpp` | arm-G probe: every solution of a shape, its bits and its cost, vs what the heuristic picks (standalone; needs `-isystem<rocm>/include`) |
+| `evidence/` | the dated measurement summaries quoted in §1 — `p0-inventory-all-models.txt`, `p0-shapes-flash-next.txt`, `p1-hipblaslt-outside-slab.txt`, `p2-mmf-cap-attempt.txt` are this session's; `p2-arm-g-algo-classes.txt` and `p2-arm-a-pinning-attempts.txt` close out P2 |

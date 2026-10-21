@@ -1,0 +1,51 @@
+# P2 arm G -- the hipBLASLt solution pool splits into BIT-CLASSES, and the heuristic is not the fastest.
+# Tool: tools/experiments/hipblaslt-algo-classes.cpp (standalone, no llama.cpp involvement).
+# Box: gfx1201 soar, ROCm 10.1.0, 2026-10-21.  One process per table unless stated.
+#
+# Method: for the exact GEMM shape hipBLASLt serves in a real run, ask hipblaslt_ext::getAllAlgos for
+# every solution, run each, hash D, and time 20 launches.  "class" = the hash, i.e. the bits are equal
+# within a class and differ across classes.  Then compare with what hipblasLtMatmulAlgoGetHeuristic picks
+# (which is what a caller asking for one solution gets).
+
+## 35B-A3B GDN alpha/beta -- m=32 n=512 k=2048, all R_32F, T,N (the shape that decides TODO #75)
+# 18 algos advertised, 12 runnable, 3 bit-classes:
+#   class 60a33a3923c8b4fe : idx 140219 140220 140221 140222   0.045 - 0.047 ms   <-- FASTEST
+#   class 162bc41d1db1b3fc : idx 140225 140229 140231 140232   0.050 - 0.236 ms
+#   class 731d693f366bffc5 : idx 140215 140216 140217 140218   0.127 - 0.229 ms   <-- heuristic lands here
+# heuristic pick over 10 fresh processes: 140218 x9, 140217 x1  -- all in the SLOWEST class.
+# => the heuristic's solution is ~4x slower than the class we could pin, and it is not even the
+#    fastest member of its own class.
+
+## Gemma4-26B-A4B F32 router -- m=128 n=375 k=2816, all R_32F, T,N
+# 4 bit-classes:
+#   class 4e4a44d653f1cccd : idx 140232                          0.066 ms           <-- FASTEST, alone
+#   class 48bd3c0a9f15c38b : idx 140219 140220 140221 140222     0.145 - 0.152 ms
+#   class 84e8745cf8418c93 : idx 140215 140216 140217 140218     0.174 - 0.290 ms   <-- heuristic lands here
+#   class ba174caf73c3869b : idx 140225 140229 140231            0.191 - 0.202 ms
+# Same pool as the §44 record (the shipped default-on gfx1100 head-512 work is unrelated); note 140232,
+# which GREEDY-PURITY 44 names as one of the two gemma4 solutions, is a *different class* from the
+# 140215-140218 group -- consistent with that record's 3 logit classes.
+
+## Qwen3.8-Flash-Next prefill -- m=320 n=512 k=10240, BF16 in, F32 out, T,N
+# 633 algos advertised and 78 run before the sweep stopped early (one solution kills the process; the
+# first three lines are the interesting ones):
+#   class 4da398f7ce3fdd03 : 46 of 78 run  0.064 - 0.147 ms   (min-index pick 109989 is here)
+#   class 0692389f75835d03 :  3 of 78      0.077 - 0.136 ms
+#   class 813cd25faa6e0b03 : 29 of 78      0.094 - 0.177 ms
+#   heuristic pick: idx 110544, class 9fb69a93a086d883  -- NOT any of the three above, i.e. the
+#   heuristic class differs from the class a deterministic min-index pin would choose.
+# 6 fresh processes all picked 110544 (stable here), so on this shape it is the END-TO-END path that
+# varies (rocBLAS's own selection), not this API.
+
+## What this does and does not prove
+# * It proves the *pool* contains several bit-classes with wildly different cost, and that a caller who
+#   picks deterministically (min index, or a validated index) gets fixed bits -- so arm G is mechanically
+#   feasible without a kernel.
+# * It does NOT by itself reproduce the end-to-end lottery here: `hipblasLtMatmulAlgoGetHeuristic` was
+#   stable across the 10+6 standalone processes above, while the real run produced 3 logit classes in 8
+#   starts.  The instability therefore sits in ROCBLAS's selection (the `getAllSolutions()` heap-ordered
+#   container -- 7 different orders in 8 fresh starts, evidence/getallsolutions-order.txt), which is
+#   exactly the layer arm G removes by calling hipBLASLt ourselves.
+# * Timing is per-launch on a synthetic problem (20 launches, one visit): use it for the CLASS STRUCTURE
+#   and the order-of-magnitude, not as a benchmark.  End-to-end prefill must still be measured
+#   (llama-bench, interleaved visits) before claiming a win.

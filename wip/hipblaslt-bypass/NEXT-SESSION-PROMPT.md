@@ -35,10 +35,13 @@ Read, in this order, before doing anything:
 
 **This session's goal — in this order:**
 
-1. **Arm G — deterministic algo selection in our code (recommended first).**  Call `hipblasLtMatmul` directly
-   for the two F32 shapes with an algo we choose deterministically (lowest `solution_id`, validated once), then
-   prove **one class across 12 fresh starts** and that Flash-Next's prefill does **not** regress (it is worth
-   +51 % today).  This is the cheapest route to "reproducible shipped binary" and it needs no kernel.
+1. **Arm G — deterministic algo selection in our code (recommended first, API-level prototype done).**
+   `evidence/p2-arm-g-algo-classes.txt` already has the per-shape table: the pool splits into 3-4 bit-classes
+   and the heuristic's class is the SLOWEST on 35B-A3B (0.19 ms vs **0.045 ms** for 140219-140222) and gemma4
+   (0.29 vs 0.066 ms for 140232).  What is left is the end-to-end part: a direct `hipBLASLtMatmul` for the
+   pinned shapes inside `ggml_cuda_mul_mat_cublas`, a `hipblaslt` link dependency, then **one class across 12
+   fresh starts** plus an interleaved `llama-bench` visit to confirm the prefill does not regress (and ideally
+   improves).  Keep the rocBLAS path as the kill-switch arm.
 2. **P3(ii) the F32 skinny GEMM** (the correctness win in-set): `M = 32` (35B-A3B alpha/beta) and `M = 128`
    (gemma4 router), `K = 2048/2816`, `N = ubatch`.  No MMA form exists, so this is a SIMT tiled kernel
    (block-per-token, weight streamed once, our own K-split order).  The bar is low: the F32 path is **free** on

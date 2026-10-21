@@ -29,7 +29,7 @@ top of `WORKLOG.md` is the newest record.
 | **79** | RDNA3_0 verify-band fusions: no multi-device measurement, and gfx1101/gfx1102 untested | platform validation | open (shipped default-on in r95; needs a 2+ card gfx1100 box) |
 | **80** | meta split-state cache: 30+ lookups per node per re-allocation | performance | parked (`archive/work/issue-184-meta-r80r82/RESOLUTION.md` `§` headroom) |
 | **81** | gfx1100 head-512 WMMA FA rows move the prefill logits; the absolute gate cannot decide a family switch | purity / methodology | open, accepted limitation (`wip/fa-rdna3-head512-purity/`, `GREEDY-PURITY.md` §46) |
-| **82** | stop calling hipBLASLt entirely (bypass the rocBLAS dispatch) — correctness first | correctness | open, scoping (`wip/hipblaslt-bypass/`); P0+P1 done 2026-10-21, arm B refuted, next is arm A (pin) and the F32 skinny GEMM |
+| **82** | stop calling hipBLASLt entirely (bypass the rocBLAS dispatch) — correctness first | correctness | open, scoping (`wip/hipblaslt-bypass/`); P0+P1 done 2026-10-21, arm B refuted, next is arm G (deterministic algo, API-level prototype done) then the F32 skinny GEMM |
 
 Accepted limitations that are deliberately **not** fixed are listed at the end — do not re-report them.
 
@@ -203,6 +203,17 @@ VRAM/headroom motivation from the 2026-10-21 thread was **measured and dropped**
 `-ncmoe 48`, `GGML_CUDA_SLAB_STATS`) hipBLASLt holds a **constant ~70 MiB outside the slab**, independent of
 ubatch (512..8192), prompt length (602..68 262 tokens), context (16K..131K) and model — ~3.5 % of a 2 GiB
 headroom floor, whose real consumers are elsewhere.  Do not restate the ~2 GiB as hipBLASLt's.
+
+**The deterministic alternative is measured, and it may also be faster.**  A standalone probe of the solution
+pool (campaign `evidence/p2-arm-g-algo-classes.txt`) shows each shape splits into **3-4 bit-classes** with very
+different cost, and the class hipBLASLt's heuristic lands in is the **slowest**: 35B-A3B alpha/beta
+(`m=32 n=512 k=2048` f32) has 140215-140218 at 0.127-0.229 ms vs **140219-140222 at 0.045 ms**; the gemma4 router
+has 140215-140218 at 0.174-0.290 ms vs **140232 alone at 0.066 ms**.  So selecting the algo ourselves
+(`getAllAlgos` + a deterministic pick, arm G) is a determinism fix *and* a candidate prefill win, and it keeps
+the Flash-Next path hipBLASLt serves.  The lottery itself lives in **rocBLAS's** selection (its
+`getAllSolutions()` heap-ordered container), which is the layer that fix bypasses.  Pinning via the library's
+own knobs does **not** work: `TENSILE_SOLUTION_INDEX` has no effect and `HIPBLASLT_TUNING_OVERRIDE_FILE` is
+rejected unless it names the exact hipBLASLt git version, i.e. it cannot be shipped.
 
 **What a bypass has to clear is not uniform:** on 35B-A3B the F32 path is **free** (`ROCBLAS_USE_HIPBLASLT=0`
 measures +1-3 % prefill, flat decode), while on Flash-Next it is worth **+51 % prefill** (2405 vs 1595 t/s at

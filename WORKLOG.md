@@ -56,10 +56,28 @@ ROCm build, so it cannot live in `patches/`.  Determinism therefore has to come 
 explicit algo we select (arm G, `hipblasLtMatmul` with a deterministic `solution_id` — keeps the Flash-Next
 +51 % prefill and is the recommended next step) or not calling hipBLASLt for the shapes that matter (P3).
 
+**P2 arm G (deterministic algo in our code) is prototyped at the API level and is the session's main finding.**
+A standalone probe (`wip/hipblaslt-bypass/tools/experiments/hipblaslt-algo-classes.cpp`,
+`evidence/p2-arm-g-algo-classes.txt`) enumerates every hipBLASLt solution for the three shapes that matter, runs
+it, hashes the output and times it.  The pool **splits into 3-4 bit-classes whose costs differ by up to 4x**,
+and the class the heuristic lands in is the **slowest**: 35B-A3B alpha/beta `m=32 n=512 k=2048` f32 —
+140215-140218 at 0.127-0.229 ms vs **140219-140222 at 0.045 ms** (3 classes, 12 runnable of 18); gemma4 router
+`m=128 n=375 k=2816` f32 — 140215-140218 at 0.174-0.290 ms vs **140232 alone at 0.066 ms** (4 classes);
+Flash-Next `m=320 n=512 k=10240` bf16 — 633 advertised, 3+ classes in the 78 that run, and the heuristic's
+pick (110544) sits in a class none of them.  So a deterministic `getAllAlgos`-based pick is a determinism fix
+**and potentially a prefill win**, and it keeps the Flash-Next advantage that makes arm E unacceptable.  A
+necessary nuance, recorded so nobody over-claims: `hipblasLtMatmulAlgoGetHeuristic` was **stable** across 10+6
+standalone fresh processes while the real run gives 3 classes in 8 starts, so the lottery lives in
+**rocBLAS's** selection (`getAllSolutions()` heap order) — which is exactly the layer arm G bypasses.  What
+remains for a future session is the end-to-end part only: call `hipblasLtMatmul` for the pinned shapes inside
+`ggml_cuda_mul_mat_cublas`, add the `hipblaslt` link dependency, and prove one class across 12 fresh starts plus
+a non-regressing interleaved prefill A/B.
+
 **Docs.**  `wip/hipblaslt-bypass/README.md` gains §1.1 (per-model inventory), §1.3 (the VRAM answer), the arm-A
-refutation and a new arm G, plus `evidence/p0-inventory-all-models.txt`, `p0-shapes-flash-next.txt`,
-`p1-hipblaslt-outside-slab.txt`, `p2-mmf-cap-attempt.txt`, `p2-arm-a-pinning-attempts.txt`, the experiment patch
-and a rewritten `NEXT-SESSION-PROMPT.md`; `TODO.md` #82 is retitled "correctness first" with the measured facts;
+refutation, arm G with the class tables and its status in §4, plus `evidence/p0-inventory-all-models.txt`,
+`p0-shapes-flash-next.txt`, `p1-hipblaslt-outside-slab.txt`, `p2-mmf-cap-attempt.txt`,
+`p2-arm-a-pinning-attempts.txt`, `p2-arm-g-algo-classes.txt`, two experiment artifacts and a rewritten
+`NEXT-SESSION-PROMPT.md`; `TODO.md` #82 is retitled "correctness first" with the measured facts;
 `GREEDY-PURITY.md` §44 gains the ~70 MiB constant and the model-dependent cost; `wip/CAMPAIGNS.md` row refreshed.
 The maintainer retracted the "hipBLASLt holds ~2 GiB" attribution in discussion #196 on the same day; the
 measurement here agrees with the retraction.
