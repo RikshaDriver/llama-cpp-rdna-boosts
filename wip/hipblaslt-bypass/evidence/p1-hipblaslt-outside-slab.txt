@@ -1,0 +1,40 @@
+# P1 -- how much VRAM does hipBLASLt consume OUTSIDE the slab, and does it scale?
+# gfx1201 soar, r102 build, Qwen3.8-Flash-Next GSQ-IQ3_XXS, 2 GPU -sm tensor -ncmoe 48 -fa on -t 8,
+# --load-mode mmap --lazy-mode off, GGML_CUDA_SLAB_STATS=1, headroom 896 MiB/device unless noted.
+# free_min is the slab's own accounting: free VRAM outside the slab at the measured point.
+# delta = (hipBLASLt OFF) - (ON) = what hipBLASLt itself holds outside the slab.
+
+config                                  point          ON      OFF     delta
+602 tok, -c 16384, -n 8                 wide-arm       735.0   805.0   +70
+602 tok, -c 16384, -n 8                 wide-drop      596.0   666.0   +70
+602 tok, -c 16384, -n 8                 exit           351.5   421.5   +70   (dev1: 375.0 -> 445.0, +70)
+5298 tok, -c 32768, -ub 2048            wide-arm       750.0   803.0   +53
+5298 tok, -c 32768, -ub 2048            exit           175.5   245.5   +70
+5298 tok, -c 32768, -ub 8192            wide-arm       750.0   803.0   +53
+5298 tok, -c 32768, -ub 8192            exit           175.5   245.5   +70
+68262 tok, -c 131072, -ub 8192 -b 8192  wide-arm       749.0   836.0   +87
+68262 tok, -c 131072, -ub 8192 -b 8192  wide-drop      609.5   697.5   +88
+68262 tok, -c 131072, -ub 8192 -b 8192  exit           371.5   441.5   +70
+
+headroom sweep (602 tok, -c 16384):
+  headroom 512  ON exit 375.0   OFF exit 445.0   (+70, both runs clean, outside_failed=0)
+  headroom 256  ON exit 275.0   OFF exit 445.0   (+70; OFF's floor is elsewhere)
+
+# CONCLUSION: a CONSTANT ~70 MiB (53-88 MiB), independent of ubatch (512..8192), prompt length
+# (602..68262 tokens), context size (16384..131072) and model (35B-A3B and Flash-Next both ~70).
+# It does NOT scale, which rules out a per-call workspace: the hipBLASLt log shows the requested
+# workspace is 0 / 12 KiB / 24 KiB / 64 KiB per call.  The constant is TensileLite code objects
+# (one set per distinct solution; Flash-Next loads 27 shapes) plus a fixed small arena.
+#
+# So of a ~2 GiB headroom floor, hipBLASLt is ~70 MiB (~3.5 %).  The rest is the MTP draft
+# buffer, the FA-QSA workspace, the workspace-pool high-water mark and the model's own
+# PLE/attention allocations -- NOT hipBLASLt.  (ENVIRONMENT.md 'Why the cards sit near-full'
+# lists hipBLASLt among those consumers; this measurement sizes it.)
+
+## throughput, same runs (single visit each -- indicative only)
+5298 tok, ub2048:  hipBLASLt ON 630.9 t/s   OFF 823.1 t/s   (prefill)
+5298 tok, ub8192:  hipBLASLt ON 966.8 t/s   OFF 823.9 t/s   (prefill)
+68262 tok, ub8192: hipBLASLt ON 2405.7 t/s  OFF 1595.1 t/s  (prefill, +51 % for hipBLASLt)
+decode (n=8) is flat: 25.16 vs 24.89 t/s at 68K.
+# => on Flash-Next with a wide ubatch/long prompt hipBLASLt is a LARGE prefill win; a bypass
+#    must beat that.  On 35B-A3B it is free (llama-bench, evidence/bench-hipblaslt-on-vs-off.txt).

@@ -29,7 +29,7 @@ top of `WORKLOG.md` is the newest record.
 | **79** | RDNA3_0 verify-band fusions: no multi-device measurement, and gfx1101/gfx1102 untested | platform validation | open (shipped default-on in r95; needs a 2+ card gfx1100 box) |
 | **80** | meta split-state cache: 30+ lookups per node per re-allocation | performance | parked (`archive/work/issue-184-meta-r80r82/RESOLUTION.md` `§` headroom) |
 | **81** | gfx1100 head-512 WMMA FA rows move the prefill logits; the absolute gate cannot decide a family switch | purity / methodology | open, accepted limitation (`wip/fa-rdna3-head512-purity/`, `GREEDY-PURITY.md` §46) |
-| **82** | stop calling hipBLASLt entirely (bypass the rocBLAS dispatch) | correctness / performance | open, scoping (`wip/hipblaslt-bypass/`) |
+| **82** | stop calling hipBLASLt entirely (bypass the rocBLAS dispatch) — correctness first | correctness | open, scoping (`wip/hipblaslt-bypass/`); P0+P1 done 2026-10-21, arm B refuted, next is arm A (pin) and the F32 skinny GEMM |
 
 Accepted limitations that are deliberately **not** fixed are listed at the end — do not re-report them.
 
@@ -186,29 +186,35 @@ Two gaps, both needing hardware the fleet does not have:
 
 ---
 
-## 82. Stop calling hipBLASLt entirely — CORRECTNESS / PERFORMANCE (scoping)
+## 82. Stop calling hipBLASLt entirely — CORRECTNESS first, performance second (scoping)
 
 Opened 2026-10-21, in the same session that closed **#75** on the hipBLASLt per-start solution flip
 (`wip/hipblaslt-bypass/FINDINGS-2026-10-21-todo-75.md`).  hipBLASLt is not a feature we use on purpose: it is
 where rocBLAS sends a **non-quantized `mul_mat` wider than the native GEMM cap** (`mmf.cu`:
 `src1_ncols > 16 -> false`), so in this set it serves exactly the GDN F32 `ssm_alpha`/`ssm_beta` projections
 and the F32 MoE router — on 35B-A3B those are `A[F32 2048x32]` (alpha/beta) and `A[F32 2048x256]`
-(`ffn_gate_inp`, 256 experts), 159 dispatches per prefill+32-token CLI run — plus gemma4's F32 router, and
-**nothing at all** on a dense quantized 27B.  It is the last source of per-start nondeterminism in the
-set, an unaccounted allocator the slab must leave headroom for, and one more binary on the hot path.
+(`ffn_gate_inp`, 256 experts), 159 dispatches per prefill+32-token CLI run — plus gemma4's F32 router, plus
+**27 BF16 shapes (2790 dispatches) on Qwen3.8-Flash-Next**, and **nothing at all** on a dense quantized 27B
+(0 dispatches, measured).
 
-**Measured before seeding, so the next session does not re-derive it:** disabling it
-(`ROCBLAS_USE_HIPBLASLT=0`) on 35B-A3B/1 GPU costs **nothing** (+1-3 % prefill, flat `tg128`, two interleaved
-visits) and saves **~70 MiB** of peak VRAM — *not* the ~2 GiB the 2026-10-21 discussion thread assumed, so
-that motivation must be re-measured on the `-ncmoe`/slab path (campaign P1) or dropped.  Elsewhere it is not
-free: `GREEDY-PURITY.md` §44 records up to -15 % decode on other models, which is why the arms are ranked
-cheap-to-structural (pin the solution via `HIPBLASLT_TUNING_OVERRIDE_FILE`; raise the `mmf` cap; a native
-skinny-F32 GEMM; requantize the weights) rather than “just set the env”.
+**The driver is correctness.**  hipBLASLt's per-process solution pick is the last run-to-run lottery in the set;
+removing the dispatch makes a run reproducible by construction instead of by environment variable.  The
+VRAM/headroom motivation from the 2026-10-21 thread was **measured and dropped**: on Flash-Next (2 GPU
+`-ncmoe 48`, `GGML_CUDA_SLAB_STATS`) hipBLASLt holds a **constant ~70 MiB outside the slab**, independent of
+ubatch (512..8192), prompt length (602..68 262 tokens), context (16K..131K) and model — ~3.5 % of a 2 GiB
+headroom floor, whose real consumers are elsewhere.  Do not restate the ~2 GiB as hipBLASLt's.
+
+**What a bypass has to clear is not uniform:** on 35B-A3B the F32 path is **free** (`ROCBLAS_USE_HIPBLASLT=0`
+measures +1-3 % prefill, flat decode), while on Flash-Next it is worth **+51 % prefill** (2405 vs 1595 t/s at
+68K tokens, `-ub 8192`) — so the F32 kernel is a correctness win with no performance argument against it, and
+the BF16 kernel is a performance proposition first.  `mmf` cannot simply be uncapped: RDNA has **no F32 MMA
+GEMM** (`amd_mfma_available` is CDNA-only; `amd_wmma_available` is f16/bf16) and the 16-column cap is a kernel
+limit (`mmf.cuh:771 GGML_ASSERT`), not a predicate (attempt kept in the campaign's `tools/experiments/`).
 
 **Gates** (any candidate): one logits class across 12 fresh `llama-perplexity -c 512` starts, prefill-logit
 KLD recorded against the §113 calibration, interleaved prefill/decode A/B per model, the 4-axis MTP +
-`none == draft-mtp` gates, and cross-backend instantiation consistency.  Working home and plan:
-[`wip/hipblaslt-bypass/`](wip/hipblaslt-bypass/README.md).
+`none == draft-mtp` gates, and cross-backend instantiation consistency.  Working home, measured inventory and
+plan: [`wip/hipblaslt-bypass/`](wip/hipblaslt-bypass/README.md).
 
 ---
 

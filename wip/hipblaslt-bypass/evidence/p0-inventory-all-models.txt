@@ -1,0 +1,24 @@
+# P0 -- hipBLASLt inventory per model (gfx1201 soar, r102 build, ROCm 10.1.0, 2026-10-21)
+# One llama-cli run per model, HIPBLASLT_LOG_LEVEL=4 HIPBLASLT_LOG_MASK=1, prompt prose-rdna-boosts.txt
+# (5246 tok), -n 8, greedy.  "dispatches" = rocblaslt_matmul calls in the whole run.
+#
+# model             dispatches  shapes  dtype   what they are
+# ----------------- ----------- ------- ------- -----------------------------------------------
+# Qwen3.8-27B       0           -       -       dense, fully quantized -> hipBLASLt NEVER called
+#   UD-Q4_K_XL
+# Gemma4-26B-A4B    29          1       F32     A[F32 2816x128] x B[F32 2816x375]  = the MoE router
+#   QAT-UD-Q4_K_XL                                (n_embd 2816, n_expert 128) at the prompt width
+#                                               -- exactly the GREEDY-PURITY 44 call site
+# Qwen3.6-35B-A3B   159         3       F32     A[2048x32] x N (x2, the GDN ssm_alpha/ssm_beta)
+#   UD-Q4_K_M                                    + A[2048x256] x N (the MoE router, 256 experts)
+# Qwen3.8-Flash-Next 2790       27       BF16    A[10240x{4,320,2560,10240}] and A[2560x{1,24,128,512,
+#   GSQ-IQ3_XXS                                  2560,10240}] x N in {42,44,512} -- attention /
+#                                               PLE projections; see p0-shapes-flash-next.txt
+#
+# Conclusions that define the campaign scope:
+#   * The surface is "non-quantized weight x more than 16 token columns" (mmf.cu cap) and nothing else.
+#   * A dense quantized model has NO hipBLASLt exposure at all -- the bypass cannot regress it.
+#   * The correctness problem (per-start logits classes) exists exactly where F32 weights meet the
+#     prefill band: 35B-A3B alpha/beta (3 classes / 8 starts) and the gemma4 router (44: 3 / 18).
+#   * Flash-Next is the big consumer by COUNT (2790 dispatches) and it is BF16, i.e. the one model
+#     where our own MMA path (WMMA, f16/bf16) already exists -- but see p2-mmf-cap-attempt.txt.

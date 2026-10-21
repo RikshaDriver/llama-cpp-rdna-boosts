@@ -1,0 +1,34 @@
+# P0 -- hipBLASLt shape inventory, Qwen3.8-Flash-Next GSQ-IQ3_XXS (2 GPU -sm tensor -ncmoe 48)
+# 2790 dispatches per run, 27 distinct shapes, ALL of them BF16 (R_16BF) -- not one F32.
+# A[weight] rows x cols as hipBLASLt sees it (transA=T), B = activations (token columns).
+# 10240 = n_embd, 2560 = PLE-ish projection width; the N values (42/44/512) are prefill widths.
+
+2790 hipBLASLt dispatches, 27 distinct shapes   (/var/tmp/hip75/fn-hbl.log)
+  calls  A[type rows x cols]        B[type rows x cols]        op           epilogue
+    190  A[R_16BF 10240 x  320]   B[R_16BF 10240 x   42]   OP_T,OP_N  EPILOGUE_DEFAULT
+    190  A[R_16BF 10240 x    4]   B[R_16BF 10240 x   42]   OP_T,OP_N  EPILOGUE_DEFAULT
+    190  A[R_16BF   320 x 10240]   B[R_16BF   320 x   42]   OP_T,OP_N  EPILOGUE_DEFAULT
+    190  A[R_16BF 10240 x  320]   B[R_16BF 10240 x   44]   OP_T,OP_N  EPILOGUE_DEFAULT
+    190  A[R_16BF 10240 x    4]   B[R_16BF 10240 x   44]   OP_T,OP_N  EPILOGUE_DEFAULT
+    190  A[R_16BF   320 x 10240]   B[R_16BF   320 x   44]   OP_T,OP_N  EPILOGUE_DEFAULT
+    190  A[R_16BF 10240 x  320]   B[R_16BF 10240 x  512]   OP_T,OP_N  EPILOGUE_DEFAULT
+    190  A[R_16BF 10240 x    4]   B[R_16BF 10240 x  512]   OP_T,OP_N  EPILOGUE_DEFAULT
+    190  A[R_16BF   320 x 10240]   B[R_16BF   320 x  512]   OP_T,OP_N  EPILOGUE_DEFAULT
+    144  A[R_16BF  2560 x   24]   B[R_16BF  2560 x   42]   OP_T,OP_N  EPILOGUE_DEFAULT
+    144  A[R_16BF  2560 x   24]   B[R_16BF  2560 x   44]   OP_T,OP_N  EPILOGUE_DEFAULT
+    144  A[R_16BF  2560 x   24]   B[R_16BF  2560 x  512]   OP_T,OP_N  EPILOGUE_DEFAULT
+     94  A[R_16BF  2560 x  512]   B[R_16BF  2560 x   42]   OP_T,OP_N  EPILOGUE_DEFAULT
+     94  A[R_16BF  2560 x    1]   B[R_16BF  2560 x   42]   OP_T,OP_N  EPILOGUE_DEFAULT
+     94  A[R_16BF  2560 x  512]   B[R_16BF  2560 x   44]   OP_T,OP_N  EPILOGUE_DEFAULT
+     94  A[R_16BF  2560 x    1]   B[R_16BF  2560 x   44]   OP_T,OP_N  EPILOGUE_DEFAULT
+     94  A[R_16BF  2560 x  512]   B[R_16BF  2560 x  512]   OP_T,OP_N  EPILOGUE_DEFAULT
+     94  A[R_16BF  2560 x    1]   B[R_16BF  2560 x  512]   OP_T,OP_N  EPILOGUE_DEFAULT
+     24  A[R_16BF  2560 x  128]   B[R_16BF  2560 x   42]   OP_T,OP_N  EPILOGUE_DEFAULT
+     24  A[R_16BF  2560 x  128]   B[R_16BF  2560 x   44]   OP_T,OP_N  EPILOGUE_DEFAULT
+     24  A[R_16BF  2560 x  128]   B[R_16BF  2560 x  512]   OP_T,OP_N  EPILOGUE_DEFAULT
+      2  A[R_16BF  2560 x 2560]   B[R_16BF  2560 x   42]   OP_T,OP_N  EPILOGUE_DEFAULT
+      2  A[R_16BF  2560 x 10240]   B[R_16BF  2560 x   42]   OP_T,OP_N  EPILOGUE_DEFAULT
+      2  A[R_16BF  2560 x 2560]   B[R_16BF  2560 x   44]   OP_T,OP_N  EPILOGUE_DEFAULT
+      2  A[R_16BF  2560 x 10240]   B[R_16BF  2560 x   44]   OP_T,OP_N  EPILOGUE_DEFAULT
+      2  A[R_16BF  2560 x 2560]   B[R_16BF  2560 x  512]   OP_T,OP_N  EPILOGUE_DEFAULT
+      2  A[R_16BF  2560 x 10240]   B[R_16BF  2560 x  512]   OP_T,OP_N  EPILOGUE_DEFAULT

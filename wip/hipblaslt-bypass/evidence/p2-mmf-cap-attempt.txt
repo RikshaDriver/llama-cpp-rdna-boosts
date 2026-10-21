@@ -1,0 +1,34 @@
+# P2 (arm B) -- "just raise mmf's 16-column cap" is NOT a predicate change.  REFUTED as cheap.
+#
+# Attempt: give ggml_cuda_should_use_mmf an env knob (GGML_CUDA_MMF_MAX_COLS, default 16) so a
+# non-quantized prefill GEMM takes the native MMA kernel instead of rocBLAS/hipBLASLt.
+# Patch: tools/experiments/mmf-max-cols-ATTEMPT.patch (applied to a working ~/llama.cpp, reverted after
+# the measurements; NOT a delivery change, NOT in patches/).
+#
+# Result 1 -- on 35B-A3B (the correctness case) the knob changes NOTHING:
+#   MMF_MAX_COLS=16   -> 61 hipBLASLt dispatches, logits 6d32945460bd
+#   MMF_MAX_COLS=8192 -> 61 hipBLASLt dispatches, logits 6d32945460bd
+#   Reason: the F32 branch of ggml_cuda_should_use_mmf ends in
+#     return ampere_mma_available(cc) || amd_mfma_available(cc);
+#   and amd_mfma_available() is CDNA-only (common.cuh: GGML_CUDA_CC_IS_CDNA).  amd_wmma_available()
+#   covers RDNA3/RDNA4 but only f16/bf16.  **RDNA has no native F32 MMA GEMM at all**, so the
+#   ssm_alpha/ssm_beta GEMM cannot be moved to mmf by any predicate change.
+#
+# Result 2 -- on Flash-Next (BF16, where WMMA does exist) raising the cap ABORTS:
+#   ggml/src/ggml-cuda/mmf.cuh:771: GGML_ASSERT(ids || ncols_dst <= 16) failed
+#   `cols_per_block` is a template parameter 1..16 and the non-ids launch passes ncols_dst =
+#   cols_per_block; only the mul_mat_id path tiles columns (block_nums_ids.y *= col_tiles).  So 16 is
+#   a KERNEL limit, not a heuristic.
+#
+# What this leaves, in order of effort:
+#   * BF16/f16 wide N: add the column tiling the ids path already has to the non-ids MMF launch
+#     (grid.y over column tiles + a col_base offset; the kernel body already carries col_base for the
+#     ids case).  Runs on WMMA, so it is plausible; must then beat the hipBLASLt number below.
+#   * F32 wide N (35B-A3B alpha/beta, gemma4 router): needs a SIMT tiled GEMM (there is no MMA form),
+#     or arm D (stop shipping F32 weights), or arm A/E (pin / disable hipBLASLt).
+#
+# The bar the BF16 arm has to clear (single visit, same run, Flash-Next GSQ 2 GPU -sm tensor -ncmoe 48):
+#   prefill 68262 tok ub8192: hipBLASLt ON 2405.7 t/s, OFF 1595.1 t/s  (+51 % for hipBLASLt)
+#   prefill  5298 tok ub8192: ON 966.8, OFF 823.9 t/s
+#   prefill  5298 tok ub2048: ON 630.9, OFF 823.1 t/s   (the low end of the ON arm is not understood --
+#                                                       re-measure with repeats before trusting the shape)

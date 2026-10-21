@@ -1,5 +1,57 @@
 # WORKLOG - dated delivery records
 
+## 261021.006 (docs) -- `wip/hipblaslt-bypass`: P0 inventory + P1 VRAM answer; the driver is correctness; arm B refuted
+
+**Docs only: no patch, no `release.json` change, no tree change; `scripts/validate-set.sh` is unaffected.**
+Same-day follow-on to 261021.005, which closed TODO #75 on the hipBLASLt per-start solution flip.  This entry
+records the first campaign session, run on the maintainer's steer that **the concern is correctness, not
+VRAM** (the slab-headroom attribution was theirs to test and it did not survive).
+
+**P0 — the inventory is now measured, and it is the campaign's scope.**  One `llama-cli` run per model with
+`HIPBLASLT_LOG_LEVEL=4` (5246-token prompt), hipBLASLt dispatches: **dense Qwen3.8-27B UD-Q4_K_XL = 0** (a
+quantized dense model never touches it), **Gemma4-26B-A4B QAT = 29 for one F32 shape**, the router
+`A[2816 x 128]` at N=375 (exactly §44), **Qwen3.6-35B-A3B = 159 for 3 F32 shapes** (`ssm_alpha`/`ssm_beta`
+`A[2048 x 32]` x2 + the router `A[2048 x 256]`), and **Qwen3.8-Flash-Next GSQ = 2790 for 27 BF16 shapes**
+(attention/PLE projections, N in {42, 44, 512}).  So the correctness problem lives where F32 weights meet the
+prefill band, and Flash-Next is the big consumer by count and is the one model where our own MMA path
+(f16/bf16 WMMA) already exists.
+
+**P1 — hipBLASLt's outside-slab footprint is a constant ~70 MiB, and it does not scale.**  Flash-Next GSQ,
+2 GPU `-sm tensor -ncmoe 48 -fa on`, `--load-mode mmap --lazy-mode off`, `GGML_CUDA_SLAB_STATS=1`, comparing
+the slab's own `free_min` between the arms at identical config: **+70 MiB** at every point measured — 602 tok
+`-c 16384` (wide-arm 735.0 -> 805.0, exit 351.5 -> 421.5), 5298 tok at `-ub 2048` *and* `-ub 8192` (exit
+175.5 -> 245.5), **68 262 tok `-c 131072 -ub 8192`** (wide-arm +87, exit +70), and at `SLAB_HEADROOM_MIB` 512
+and 256.  A per-call workspace would have to scale; the hipBLASLt log shows each call requesting 0 / 12 / 24 /
+64 KiB, so the constant is **TensileLite code objects** plus a fixed small arena.  Therefore hipBLASLt is
+~3.5 % of the slab's ~2 GiB headroom floor and **the campaign must not claim headroom as its motivation**;
+the floor is the MTP draft buffer, the FA-QSA workspace, the pool high-water mark and the model's own
+PLE/attention allocations.  (`ENVIRONMENT.md`'s "Why the cards sit near-full" lists hipBLASLt among those
+consumers — this sizes it rather than removing the mention.)
+
+**What a bypass must clear is not uniform.**  On 35B-A3B the F32 path is free (`ROCBLAS_USE_HIPBLASLT=0`:
++1-3 % prefill, flat decode), but on Flash-Next it is worth **+51 % prefill** — 68 262 tokens, `-ub 8192`:
+**2405.7 t/s with hipBLASLt vs 1595.1 without** (5298 tok `-ub 8192`: 966.8 vs 823.9; decode flat).  One
+configuration (`5298 tok -ub 2048`: 630.9 on vs 823.1 off) does not fit that shape and is recorded as
+unexplained, single-visit — do not quote it.  So the F32 job is a correctness win with no performance case
+against it, and the BF16 job is a performance proposition first.
+
+**P2 arm B ("raise `mmf`'s 16-column cap") is REFUTED as a cheap arm.**  Tried it behind `GGML_CUDA_MMF_MAX_COLS`
+(patch kept at `wip/hipblaslt-bypass/tools/experiments/mmf-max-cols-ATTEMPT.patch`, applied to a working
+`~/llama.cpp`, measured, **reverted**; never in `patches/`): on 35B-A3B the knob changes **nothing** (61
+dispatches, same logits) because the F32 branch of `ggml_cuda_should_use_mmf` requires `amd_mfma_available`,
+which is **CDNA-only** — `amd_wmma_available` covers RDNA3/4 but only f16/bf16, i.e. **RDNA has no native F32
+MMA GEMM at all**.  On Flash-Next (BF16) raising the cap **aborts**:
+`mmf.cuh:771 GGML_ASSERT(ids || ncols_dst <= 16)` — `cols_per_block` is a template argument and only the
+`mul_mat_id` launch tiles columns (`block_nums_ids.y *= col_tiles`).  The 16-column cap is a **kernel** limit,
+not a heuristic.  The tractable versions are a **column-tiled non-ids MMF launch** (bf16/f16 only) and a
+**SIMT F32 skinny GEMM**, recorded as P3(i)/(ii) with the bars above.
+
+**Docs.**  `wip/hipblaslt-bypass/README.md` gains §1.1 (per-model inventory), §1.3 (the VRAM answer) and the
+refutation in §2/§4, plus `evidence/p0-inventory-all-models.txt`, `p0-shapes-flash-next.txt`,
+`p1-hipblaslt-outside-slab.txt`, `p2-mmf-cap-attempt.txt`, the experiment patch and a rewritten
+`NEXT-SESSION-PROMPT.md`; `TODO.md` #82 is retitled "correctness first" with the measured facts; `GREEDY-PURITY.md`
+§44 gains the ~70 MiB constant and the model-dependent cost; `wip/CAMPAIGNS.md` row refreshed.
+
 ## 261021.005 (docs) -- TODO #75 closed: the 35B-A3B per-start flip is the hipBLASLt solution lottery; `wip/hipblaslt-bypass` seeded
 
 **Docs only: no patch, no `release.json` change, no tree change; `scripts/validate-set.sh` is unaffected.**

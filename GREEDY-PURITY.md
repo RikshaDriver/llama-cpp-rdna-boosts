@@ -903,6 +903,16 @@ runtime-dependence of that number that makes `ROCBLAS_USE_HIPBLASLT=0` a tester'
 default: on gemma4 above it is a real prefill+decode *win*, elsewhere it is the -15 % decode cost.  Removing
 the dispatch instead of pinning it is `wip/hipblaslt-bypass/` (`TODO #82`).
 
+**Its outside-slab footprint is a constant ~70 MiB (2026-10-21, measured).**  Qwen3.8-Flash-Next GSQ, 2 GPU
+`-sm tensor -ncmoe 48`, `GGML_CUDA_SLAB_STATS=1`: the slab's `free_min` is 53-88 MiB higher with
+`ROCBLAS_USE_HIPBLASLT=0`, **independent of ubatch (512..8192), prompt length (602..68 262 tokens), context
+(16K..131K) and model**.  It does not scale, so it is TensileLite code objects plus a small fixed arena, not a
+per-call workspace (the log shows 0 / 12 / 24 / 64 KiB requested per call).  Do **not** attribute the slab's
+~2 GiB headroom floor to it — that floor is the MTP draft buffer, the FA-QSA workspace, the pool high-water
+mark and the model's own PLE/attention allocations.  What hipBLASLt is *worth* is model-dependent: free on
+35B-A3B, **+51 % prefill** on Flash-Next (`-ub 8192`, 68 262-token prompt: 2405 vs 1595 t/s), which is why a
+BF16 bypass is a performance proposition while the F32 one is a correctness win.
+
 ROCm 10.1.0 does **not** have the fix (its `rocm-libraries` pin branched 2026-09-09); it is in
 `c50ea60130f`, develop 2026-10-02, TheRock nightlies from 2026-10-06.  So this *does* reproduce on **Linux**
 with 10.x — §41's "Linux / 7.14 does not reproduce it" holds for 7.14 only.

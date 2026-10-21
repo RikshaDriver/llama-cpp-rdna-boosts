@@ -9,35 +9,42 @@ Read, in this order, before doing anything:
 
 1. `wip/hipblaslt-bypass/README.md` (the campaign: why, what is measured, the design space, the gates),
 2. `wip/hipblaslt-bypass/FINDINGS-2026-10-21-todo-75.md` (the closure evidence that started it),
-3. `AGENTS.md` (policies: default-on, report-findings-first, no delivery patch changes without a go-ahead),
-4. `GREEDY-PURITY.md` §44 (hipBLASLt doctrine) and §19/§24/§25 (band uniformity, for any kernel arm).
+3. `wip/hipblaslt-bypass/evidence/p0-*.txt`, `p1-*.txt`, `p2-*.txt` (this session's measurements),
+4. `AGENTS.md` (policies), `GREEDY-PURITY.md` §44 (hipBLASLt doctrine) and §19/§24/§25 (band uniformity).
 
-**State at handover (2026-10-21).** TODO #75 is closed as the hipBLASLt per-start solution flip: 3 logits
-classes in 8 fresh `llama-perplexity` starts on ROCm 10.1.0, 1 class in 8/8 with `ROCBLAS_USE_HIPBLASLT=0`,
-and the class equals the TensileLite kernel spine hipBLASLt picked.  On this box, for 35B-A3B, disabling
-hipBLASLt is **free** (+1-3 % prefill, flat decode) and costs ~70 MiB of VRAM — so the campaign's remaining
-motivation is determinism, not throughput.  Nothing is in `patches/`; nothing is to be put there this session
-without the maintainer's explicit go-ahead.
+**State at handover (2026-10-21, end of session).**
 
-**This session's goal: complete P0 and P1, and answer P2 if time allows.**
+* **Driver = CORRECTNESS** (maintainer decision).  hipBLASLt's per-start solution lottery is the last source of
+  run-to-run nondeterminism in the set.  The VRAM/headroom motivation was **measured and dropped**: hipBLASLt
+  holds a constant **~70 MiB** outside the slab, independent of ubatch (512..8192) and prompt length
+  (602..68 262 tokens) — see `evidence/p1-hipblaslt-outside-slab.txt`.
+* **P0 (inventory) is done** for 4 models: dense 27B = **0** hipBLASLt dispatches; gemma4 26B-A4B = 1 F32 shape
+  (the router); 35B-A3B = 3 F32 shapes (`ssm_alpha`/`ssm_beta` + router); Flash-Next GSQ = **27 BF16 shapes /
+  2790 dispatches**.  Not yet done: Flash-Next IQ4_NL, and any run with an MTP draft (`-md`).
+* **P1 (VRAM) is done** — ~70 MiB, constant.
+* **P2 arm B is REFUTED as cheap** (`evidence/p2-mmf-cap-attempt.txt`): RDNA has **no F32 MMA GEMM**
+  (`amd_mfma_available` is CDNA-only, `amd_wmma_available` is f16/bf16), and the 16-column cap in `mmf` is a
+  **kernel** limit (`mmf.cuh:771 GGML_ASSERT(ids || ncols_dst <= 16)`), not a heuristic.
+* Nothing is in `patches/`; the experiment patch is `tools/experiments/mmf-max-cols-ATTEMPT.patch` (applied to
+  a working tree, measured, reverted).
 
-* **P0 — inventory.**  For each model below, produce the hipBLASLt shape table with
-  `wip/hipblaslt-bypass/tools/hbl-shapes.sh -- <llama-cli ...>`: model, shape (A/B), calls per run, and the
-  token widths that reach it.  Models: `/llm/models/Qwen3.6/35B-A3B/Q4_K_M/...` (GDN alpha/beta, known),
-  `/llm/models/Qwen3.8/27B/Q4_K_XL/...` (dense, expected **none** — confirm), the Gemma4 26B-A4B QAT tree
-  (F32 MoE router, known), and a Flash-Next GSQ model.  Deliverable: one table in the campaign README —
-  that table is the scope of the whole campaign.
-* **P1 — is the VRAM/slab claim real?**  On the `-ncmoe` + slab path (35B-A3B, e.g. `-ncmoe 30 -sm layer`),
-  measure peak VRAM and the slab's reported reservation with hipBLASLt on vs off, and check whether an
-  unaccounted hipBLASLt allocation ever triggers the `ggml_cuda_device_malloc` arena-drop fallback.  If the
-  delta stays ~70 MiB, say so in the README and in `TODO.md` #82 (the `~2 GB` motivation is then dead and
-  must not be repeated).
-* **P2 — cheapest viable arm.**  (a) Pin the solution with `HIPBLASLT_TUNING_OVERRIDE_FILE` and confirm the
-  flip is gone without any code change; (b) raise `mmf.cu`'s `src1_ncols > 16` cap behind a kill switch and
-  measure prefill (512/2048/8192 columns) on 35B-A3B + gemma4.  Both arms: 12 fresh logits-class samples
-  (`tools/hbl-classes.sh`) + prefill-logit KLD vs the current default + `llama-bench` interleaved visits.
+**This session's goal — in this order:**
+
+1. **P2 arm A (cheap, might end the campaign): `HIPBLASLT_TUNING_OVERRIDE_FILE`.**  Pin a solution index for the
+   35B-A3B F32 alpha/beta shape and for the gemma4 router shape, then run 12 fresh `llama-perplexity -c 512`
+   starts (`tools/hbl-classes.sh`) and confirm **one class**, plus prefill-logit KLD vs the unpinned default and
+   an interleaved `llama-bench` visit.  If a shipped tuning file is enough, that is a delivery-shaped answer
+   that needs no kernel at all — report it to the maintainer before writing anything.
+2. **P3(ii) the F32 skinny GEMM** (the correctness win in-set): `M = 32` (35B-A3B alpha/beta) and `M = 128`
+   (gemma4 router), `K = 2048/2816`, `N = ubatch`.  No MMA form exists, so this is a SIMT tiled kernel
+   (block-per-token, weight streamed once, our own K-split order).  The bar is low: the F32 path is **free** on
+   35B-A3B (`ROCBLAS_USE_HIPBLASLT=0` measures +1-3 % prefill there).  First milestone is not speed — it is
+   *bit-identical across fresh starts* plus a prefill-logit KLD number against the current default.
+3. Only if there is time: **P3(i)** the column-tiled non-ids MMF path for BF16 (Flash-Next), where the bar is
+   high (**2405 vs 1595 t/s prefill**, `-ub 8192`, 68K prompt).
 
 **Discipline that bit previous sessions.**  A config that does not flip proves nothing — validate every
-determinism claim on the `llama-perplexity -c 512 --chunks 1` config (which flips reliably here) with at
-least 8-12 fresh starts, never on a greedy text hash.  One GPU job at a time, no background benches.  Report
+determinism claim on the `llama-perplexity -c 512 --chunks 1` config (which flips reliably here) with 8-12
+fresh starts, never on a greedy text hash.  One GPU job at a time.  Flash-Next runs must use
+`--load-mode mmap --lazy-mode off` (fastest load, most consistent: the PLE weights are SSD-resident).  Report
 findings to the maintainer before any delivery-affecting change.

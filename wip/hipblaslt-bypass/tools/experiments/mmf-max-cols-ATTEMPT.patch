@@ -1,0 +1,32 @@
+diff --git a/ggml/src/ggml-cuda/mmf.cu b/ggml/src/ggml-cuda/mmf.cu
+index eeac36dd2..0bb9f57a6 100644
+--- a/ggml/src/ggml-cuda/mmf.cu
++++ b/ggml/src/ggml-cuda/mmf.cu
+@@ -130,6 +130,18 @@ void ggml_cuda_mul_mat_f(ggml_backend_cuda_context & ctx, const ggml_tensor * sr
+     }
+ }
+ 
++// wip/hipblaslt-bypass experiment knob (NOT a delivery change).
++// Upstream caps a non-quantized weight GEMM at 16 columns, which is what sends every prefill
++// f32/bf16 weight GEMM to cuBLAS -- and on ROCm, via rocBLAS, to hipBLASLt.  Raising the cap moves
++// those GEMMs onto the native MMA kernel.  16 = upstream behaviour (default); 0 = no extra cap.
++static int ggml_cuda_mmf_max_cols() {
++    static const int v = []() {
++        const char * s = getenv("GGML_CUDA_MMF_MAX_COLS");
++        return s ? atoi(s) : 16;
++    }();
++    return v;
++}
++
+ bool ggml_cuda_should_use_mmf(enum ggml_type type, int cc, int warp_size, const int64_t * src0_ne,
+         const size_t * src0_nb, const int src1_ncols, bool mul_mat_id) {
+     if (ggml_is_quantized(type)) {
+@@ -173,7 +185,7 @@ bool ggml_cuda_should_use_mmf(enum ggml_type type, int cc, int warp_size, const
+             return false;
+         } else if (GGML_CUDA_CC_IS_CDNA1(cc) && (type == GGML_TYPE_F16 || type == GGML_TYPE_BF16)) {
+             return false;
+-        } else if (src1_ncols > 16) {
++        } else if (const int max_cols = ggml_cuda_mmf_max_cols(); max_cols > 0 && src1_ncols > max_cols) {
+             return false;
+         }
+     }
