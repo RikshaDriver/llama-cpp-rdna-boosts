@@ -57,6 +57,29 @@ verification row), `ENVIRONMENT.md` §10.1, `GREEDY-PURITY.md` §47 (+ index), `
 `README.md`/`TODO.md` (release id; #82 closed), `wip/CAMPAIGNS.md` (campaign closed), and the campaign record
 moved to `archive/work/hipblaslt-bypass/`.
 
+**Release gates on the r104 tree (gfx1201).**  `scripts/validate-set.sh` green (checksums, strict 12/12 from a
+fresh tarball, tree `a1317584…` matches `release.json`); `scripts/gate-per-block-build.sh --changed-from
+<r103 tip>` **3/3** (blocks 06, 08, 11 — 08's delta changes only because its `ggml-cuda.cu` context moves);
+fresh-start determinism on the release build **12/12 one class** at 1 GPU and **4/4** at 2 GPU `-sm tensor`;
+`llama-bench`, 3 interleaved visits against the kill switch: **pp512 5114 vs 4862 (+5.2 %), pp2048 5033 vs
+4812 (+4.6 %)**, tg128 flat; prefill-logit gate, standard model (dense 27B Q8_0, untouched — 0 intercepts)
+**0.000000 / 100.000 % PASS**; family-switch gate at the shipped corpus point (base arm = the kill switch, base
+PPL 1.4345) **0.014646 / 98.045 %** against a same-kernel control of **0.020671 / 97.808 %** → PASS with
+`--allow-control-pass`; `test-backend-ops -o MUL_MAT` 2444/2444; `check-windows-paths.sh` clean.  Coherence:
+Qwen3.5-4B Q8_0 and Qwen3.8-27B Q8_0 see **0 intercepts** (bit-identical by construction), gemma4 sees 1 (its
+router) and measures 1209.848 → 1209.880 PPL.
+
+**ROCm 7.14.1 is default-on too (arch-gated, not runtime-gated), and was checked before publication:** the
+r104 tree built against `/opt/rocm-7.14.1-gfx120X` engages the kernel and gives **4/4 the same logits class**
+(`d598fa841cff`, the same class as the 10.1 build — the arithmetic is runtime-independent), with
+pp512 5063 vs 4828 and pp2048 4993 vs 4784 against the kill switch, decode flat.
+
+**Publication.**  Tag `v12-097cf33d9-r104`; fork `rdna-boosts` refreshed to `f38bfa9dd` (clean 12-block apply
+at `097cf33d9`, tree verified, gated, `--force-with-lease`); `validate.yml` + `release.yml` green on the tag
+and the GitHub Release carries `rdna-boosts-all.patch`, `patches.tar.gz`, `release.json`, `SHA256SUMS`.  The
+container images (ROCm 7.14.1 + 10.1) are built and pushed by the worker watcher on `radiance` from the tag —
+not on this box.
+
 ## 261021.010 (wip) -- P3(ii): our own F32 GEMM for the hipBLASLt shapes -- deterministic, +4.2 %, no external dependency
 
 **WIP only: no patch, no `release.json` change, no tree change** (prototype in
