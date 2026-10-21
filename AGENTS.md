@@ -441,6 +441,12 @@ cd ~/llama.cpp && ~/bin/build-llama-rocm          # default BUILD_DIR=build-rocm
 # runtime libs: LD_LIBRARY_PATH=/opt/rocm-10.1.0-gfx120X/lib
 ```
 
+**Keep the ccache large enough for a per-block build or it thrashes.**  The tool's default
+`max_size = 5 GiB` is far too small once one source tree carries several `GGML_CUDA_FA_*` instantiation
+sets: `scripts/gate-per-block-build.sh` then misses on nearly every FA translation unit and evicts the
+entries the next block needs (measured 2026-10-21: block 05 went from ~45 min at 5 GiB to ~7 min after
+`ccache --max-size=30G`).  Set it once per box.
+
 **`~/bin/build-llama-rocm` (ROCm 10.1.0, `/opt/rocm-10.1.0-gfx120X`) is the canonical build tree.**
 `~/bin/build-llama-rocm-714` is the older ROCm 7.14 tree (its own `BUILD_DIR`, `build-rocm-714`); it is
 still valid for a 7.14-specific check, but do not present it as the default. **Do not pass

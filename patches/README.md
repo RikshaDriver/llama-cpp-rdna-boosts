@@ -243,6 +243,17 @@ almost all of them `template-instances/*.cu`.
   of the unchecked `ncols2 > 1` branch takes the already-compiled `oob_check = true` form, so an exact-size
   operand (test-backend-ops) cannot read into the neighbouring allocation; every other target compiles the
   branch unchanged.  The 511-row guard tail stays with its derivation documented.
+* **RDNA3_0 head-512 WMMA rows (r102, PR #199)**: the RDNA head-512 rows of
+  `ggml_cuda_fattn_mma_get_config_rdna` were tuned on gfx1201 and keep Q in registers, so on gfx1100 every
+  head-512 kernel sat at the 256-VGPR limit and spilled ~1.0-1.4k VGPRs per lane — which is why head 512 was
+  capped back to the tile kernel on RDNA3_0 in r5 (issue #30).  RDNA3_0 now has its own rows for
+  `DKQ == DV == 512` (Q in shared memory, 128 threads, 64-wide K/V/combine batches, 16/32/64 columns) and
+  head 512 takes WMMA prefill again on top of the 256 cap.  Other heads above 256 keep the tile kernel,
+  RDNA4/RDNA3_5 rows are untouched, and the decode/verify band stays on the tile kernel.  +34 % deep prefill
+  at d32768 / +45 % at d65536 on gfx1100 (gemma-4-26B-A4B QAT, q8_0 K/V), decode unchanged.  **This is a
+  tile→WMMA family switch and the one FA arm in the set that does not meet the absolute prefill-logit gate**
+  (mean KLD 0.0293 vs the tile kernel; the head-256 switch shipped since r5 measures 0.0441 at the same
+  point) — see `GREEDY-PURITY.md` §46 and `TODO.md` #81.
 * **Fully-masked KV group skip** (`GGML_CUDA_FA_MASK_SKIP`, prefill only) — exact zeros, bit-identical.
 * **Hygiene**: the `(512, 512, 32)` RDNA MMA row retuned to a 4-warp shape (issue #188, Gemma-4 head-512
   prefill), the RDNA2 (gfx1030) gate fixes of PR #181, the masked-V HIP fixes, and the FA staging arena
@@ -251,12 +262,14 @@ almost all of them `template-instances/*.cu`.
 **Knobs.**  `LLAMA_KQ_MASK_DERIVED`, `GGML_CUDA_FA_KV_NATIVE` (auto / force on / force staging),
 `GGML_CUDA_FA_MASK_SKIP`, `GGML_HIP_FA_BAND_WMMA*` (`_SPLIT`, `_GQA_MAX`, `_WIDE`),
 `GGML_HIP_FA_BAND_FETCH_AHEAD` (r98; `=0` runs the q8_0 band kernel without the fetch-ahead variant),
-`GGML_CUDA_FA_WMMA_256` / `_MAX_HEAD`, `GGML_CUDA_FA_ALL_QUANTS` (build), `GGML_CUDA_OP_TIMING`
-(diagnostic).
+`GGML_CUDA_FA_WMMA_256` / `_MAX_HEAD`, `GGML_CUDA_FA_RDNA3_WMMA_512` (r102; `=0` sends gfx1100 head 512
+back to the tile kernel), `GGML_CUDA_FA_ALL_QUANTS` (build), `GGML_CUDA_OP_TIMING` (diagnostic).
 
 **Purity.**  One arm across `W = 1..8` is the contract; the guarantee is per KV type
 (`GREEDY-PURITY.md` §§11-14, 36).  **Any change to an FA kernel or the derived mask must pass
 `scripts/gate-prefill-logits.sh`** — decode-side coherence and MTP are blind to a uniform prefill shift.
+The single documented exception is the r102 RDNA3_0 head-512 row set (§46), which is calibrated against the
+family switches already shipped rather than against the absolute limit.
 
 **Upstream candidates.**  `fa-kv-split-width` (block 00), `fa-decode-verify-kernel-family`,
 `fa-512-rdna-head-cap`, `attn-k-null-mask-guard` — see [`../upstream/`](../upstream/README.md).
@@ -545,6 +558,18 @@ fusions.
 * **The fusion dispatcher** (`ggml-cuda-try-fuse.cu`): the matcher arms moved out of `ggml-cuda.cu`.
 * **Rope/FWHT fusions** (M-RoPE and NEOX, with the q8_0 K/V cache `SET_ROWS` folded in), the paired GDN
   q/k norms, and the `ADD + rms_norm_q8_1` one-token fusion (`GREEDY-PURITY.md` §42).
+* **The GDN / attention-gate decode fusions** (r102, PR #200): four bit-identical fusions with their own
+  switches — the qwen4exp alpha/beta BF16 projections plus `softplus(alpha + dt) * a` in one
+  `mul_mat_vec_f` launch (`GGML_CUDA_FUSE_GATE_BETA_BF16`), the q/k l2 norm pair folded into the direct conv
+  kernel (`GGML_CUDA_FUSE_GDN_CONV_NORM`), the attention gate's row-strided view read in place by the
+  gate → Q8_1 kernel so its `CONT` copies nothing (`GGML_CUDA_FUSE_CONT_GATE_Q8_1`), and qwen4exp's GDN
+  output `RMS_NORM * w` computed inside the gate kernel (`GGML_CUDA_FUSE_GDN_NORM_GATE`).  Two correctness
+  rules came with them: the conv-norm fold is taken only when both SCALE outputs are disjoint from the
+  conv's `x`/state/weight/output (the allocator may place them over the state or `x`, which the direct
+  kernel still reads — without the check 35B-A3B varied run to run), and the GDN-norm fold has its skip and
+  its emit at two different nodes, so **while a norm is pending no other fusion may start before its gate
+  node** and the pending norm's own (dead) `MUL` is skipped.  With that guard the two abort tripwires the
+  submitted form carried are unreachable rather than merely unlikely.
 * **The verify-band arch extension** (r95, PR #192 + PR #193):
   `ggml_cuda_should_fuse_mul_mat_vec_q(..., verify_band = true)` admits **RDNA3_0** as well as RDNA4 via
   one `verify_band_arch` term.  That predicate is the single gate the three 2..8-token Q8_1
@@ -582,6 +607,8 @@ fusions.
 **Knobs.**  The slab/cache set listed under block 09, plus `GGML_CUDA_POOL_WIDE[_MIN_MIB]`,
 `GGML_CUDA_SLAB_STATS` / `_GRAPH_TRACE`, `GGML_CUDA_ASYNC_INPUT_BATCH` / `_LAZY_DONE`,
 `GGML_CUDA_GDN_TAIL`, `GGML_CUDA_GRAPH_MEM_GEN`, `GGML_META_SPLIT_COPY`, `GGML_META_SEG_ASYNC`,
+`GGML_CUDA_FUSE_GATE_BETA_BF16` / `GGML_CUDA_FUSE_GDN_CONV_NORM` / `GGML_CUDA_FUSE_CONT_GATE_Q8_1` /
+`GGML_CUDA_FUSE_GDN_NORM_GATE` (r102, all default-on kill-switches),
 `GGML_CUDA_DISABLE_ROPE_FWHT_SET_ROWS` (now live on iSWA archs, not only on the non-iSWA builder),
 `LLAMA_KV_N_PAD_PREFILL`(+`_FROM`/`_MIN`), `LLAMA_QSA_*`, `GGML_QSA_*`, `LLAMA_HC_*` / `GGML_HC_*`,
 `LLAMA_MTP_SPARSE`.

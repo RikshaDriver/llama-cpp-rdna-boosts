@@ -1,5 +1,78 @@
 # WORKLOG - dated delivery records
 
+## 261021.004 (r102) -- PR #199 (gfx1100 head-512 WMMA FA rows) and PR #200 (GDN / attention-gate decode fusions) promoted
+
+Two contributor PRs folded as **two block amendments** (no new block): **v12-097cf33d9-r102**, 12 blocks,
+fork point `097cf33d9`, tip `5e37fa61d`, tree `42679a04ff814600483326a05353d272227e186e`.  Every number below
+was taken with `ROCBLAS_USE_HIPBLASLT=0` (issue #67) and one GPU job at a time, on the r101 tree plus the
+patches; `scripts/check-gpu-faults.sh` clean on gfx1201, gfx1100.
+
+**Block 05 gains the RDNA3_0 head-512 WMMA rows (PR #199, @briansp2020).**  The RDNA head-512 rows of
+`ggml_cuda_fattn_mma_get_config_rdna` were tuned on gfx1201 with Q in registers, so on gfx1100 every
+head-512 kernel sat at the 256-VGPR limit and spilled ~1.0-1.4k VGPRs per lane -- which is why head 512 was
+capped back to the tile kernel on RDNA3_0 in r5 (issue #30).  RDNA3_0 now has its own rows (Q in shared
+memory, 128 threads, 64-wide K/V/combine batches) and head 512 takes WMMA prefill again on top of the 256
+cap; RDNA4/RDNA3_5 rows are untouched, other heads above 256 keep the tile kernel, and the decode/verify
+band stays on tile.  Measured on **fingon** (gfx1100, RX 7900 XTX), gemma-4-26B-A4B QAT UD-Q4_K_XL, q8_0
+K/V, pp2048: **d32768 1908.3/1909.2 -> 2549.1/2554.6 t/s (+34 %)**, **d65536 1209.3/1207.6 -> 1756.2/1757.5
+(+45 %)**, tg128 at d32768 unchanged (127.74/127.74 -> 127.80/127.73).  `GGML_CUDA_FA_RDNA3_WMMA_512=0`
+reproduces r101's text bit for bit (`cf175b78ecd1`); the default arm gives different text, as any prefill
+kernel change does.  `test-backend-ops -o FLASH_ATTN_EXT` 6391/6391 on gfx1100, and gfx1201 **and** gfx1151
+output is byte-identical to r101 (gemma4 26B-A4B), so the claim "RDNA4/RDNA3_5 unchanged" holds.
+
+**Prefill-logit: accepted deviation, documented rather than papered over (`GREEDY-PURITY.md` §46, TODO #81,
+`wip/fa-rdna3-head512-purity/`).**  This is a tile->WMMA *family* switch and it does **not** meet the
+absolute gate: mean KLD **0.0293**, same-top-p **92.59 %** on that model (the gate's point is out of its
+calibrated domain -- base PPL 604 against 5.93 for the pinned 27B Q8_0).  Calibrated at the same point and
+protocol: the **head-256 WMMA rows the set has shipped default-on for gfx1100 since r5 measure 0.0441 /
+90.63 %**, a benign ubatch change on the same kernel ~0.12 per chunk, and issue #113's BF16 chunked GDN
+0.62.  PPL is unchanged within its +/-5 % error bar (f16 K/V 604.06 vs 607.20, q8_0 617.85 vs 620.59).  So
+the change is more faithful than the shipped equivalent switch, and the maintainer's decision was to ship
+it default-on with the deviation recorded and a campaign to close it -- not to hand-wave the gate.
+`GGML_CUDA_FA_RDNA3_WMMA_512=0` is the kill switch.
+
+**Block 10 gains the four GDN / attention-gate decode fusions (PR #200, @briansp2020), plus a structural
+guard.**  `GGML_CUDA_FUSE_GATE_BETA_BF16` (qwen4exp alpha/beta BF16 projections + `softplus(alpha + dt) * a`
+in one `mul_mat_vec_f` launch), `GGML_CUDA_FUSE_GDN_CONV_NORM` (the q/k l2 norm pair folded into the direct
+conv kernel, only when both SCALE outputs are disjoint from the conv's `x`/state/weight/output -- the
+allocator may place them over the state or `x`, which the direct kernel still reads, and without the check
+35B-A3B varied run to run), `GGML_CUDA_FUSE_CONT_GATE_Q8_1` (the attention gate's row-strided view read in
+place, so its `CONT` copies nothing) and `GGML_CUDA_FUSE_GDN_NORM_GATE` (qwen4exp's GDN output `RMS_NORM * w`
+computed inside the gate kernel).
+
+The GDN-norm pair is the one fusion whose skip and emit are two decisions (the norm node precedes the gate
+node that computes it), and the submitted form joined them with a context pointer guarded by two
+`GGML_ABORT`s.  We instrumented the window instead of trusting it: on the only graph it fires on (qwen4exp)
+it is always **span 4 with a fixed signature, `[RMS_NORM][MUL][MUL_MAT][RESHAPE][UNARY(sigmoid)]`**, and the
+full chain including the gate matmul lookup is already validated at skip time -- so the only hazard is
+another fusion *starting inside the window and spanning the gate*.  The guard makes that impossible: while a
+norm is pending no other fusion may start before its gate node, and the pending norm's own `MUL` (dead: the
+gate kernel reads `xn` and `w` directly) is skipped too.  The two abort tripwires therefore stay as
+tripwires, unreachable rather than merely unlikely, and the window nodes run unfused at the cost of one
+plain matmul per GDN layer (measured: no change to the 27B MTP gain).
+
+Gates on the folded tree (r101 base, gfx1201): greedy text **identical in five arms** (27B plain and MTP n3,
+35B-A3B 1 GPU and 2 GPU `-sm tensor`, Flash-Next IQ3_XXS 2 GPU `-sm tensor` + shared MTP head);
+`test-logits-width-probe` per-W hashes identical to r101; the prefill-logit gate **0.000707 / 98.755 %** for
+both builds (the r101 numbers exactly); `test-backend-ops` SSM_CONV 47, RMS_NORM 55, SCALE 9, MUL_MAT 2446,
+0 failures; rule-5 batched decode within noise (B=1 1.008 vs 1.009 s, B=4 1.248 vs 1.247, B=8 1.743 vs
+1.743).  Decode: **27B MTP +0.2-0.3 %** (48.6/48.6/48.5 -> 48.7/48.6/48.7), **Flash-Next 2 GPU tensor + MTP
++0.7 %** (83.4 -> 84.2 mean of 3), **35B-A3B 1 GPU tg128 -0.2 %** -- the submitter's +0.5 % there did not
+reproduce, and 35B-A3B decode does not take the direct conv path anyway.  All four switches on vs all four
+off on the patched build is 48.8/48.7 vs 48.5/48.4, so the mechanism is the delta.
+
+**Fold rule.**  Block 05 owns `fattn.cu` / `fattn-mma-f16.cuh` and block 10 owns every file PR #200 touches
+(`common.cuh`, `ggml-cuda-try-fuse.cu`, `mmvf.*`, `gdn-conv.*`, `unary.*`), so each PR rides the last block
+that touches its files and the per-block build gate stays green (3 commits rebuilt from a wiped dir).
+
+**Validation.**  `scripts/validate-set.sh` strict 12/12 from a fresh tarball, applied tree matches
+`release.json`; `scripts/gate-per-block-build.sh --changed-from r101-tip` 3/3; the candidate tree's CUDA
+sources are byte-identical to the tree every gate above was run on.
+
+**Docs.**  `patches/README.md` blocks 05/10, `ENVIRONMENT.md` (`GGML_CUDA_FA_RDNA3_WMMA_512` and the four
+`GGML_CUDA_FUSE_*`), `GREEDY-PURITY.md` §46 + the index, `TODO.md` #81, `README.md`/`TODO.md` release id, and
+the new `wip/fa-rdna3-head512-purity/` campaign (+ `wip/CAMPAIGNS.md`).
+
 ## 261021.003 (r101) -- fix-gemma-4 promoted: gemma4 dense `-sm tensor` works, expert cache sizes, iSWA fusion live
 
 The `wip/fix-gemma-4/` campaign is folded and released as **v12-097cf33d9-r101** (12 blocks, fork point

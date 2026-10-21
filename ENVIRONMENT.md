@@ -345,6 +345,17 @@ any single fusion.)
 These use `getenv(...) == nullptr || atoi(...) != 0`, so unset = **on** and `0` = off.
 (Git history note: these were originally *opt-in* `=1` switches; they are now default-on kill-switches.)
 
+Four more from r102 (PR #200, block 10), all bit-identical with their own switch: `GGML_CUDA_FUSE_GATE_BETA_BF16`
+(qwen4exp's alpha/beta BF16 projections plus `softplus(alpha + dt) * a` in one `mul_mat_vec_f` launch),
+`GGML_CUDA_FUSE_GDN_CONV_NORM` (the q/k l2 norm pair folded into the direct conv kernel; falls back when a
+SCALE output would overlap the conv's `x`/state/weight/output, which the allocator may do since all of them
+are dead after the CONCAT), `GGML_CUDA_FUSE_CONT_GATE_Q8_1` (the attention gate's row-strided view read in
+place by the gate -> Q8_1 kernel, so its CONT copies nothing) and `GGML_CUDA_FUSE_GDN_NORM_GATE` (qwen4exp's
+GDN output `RMS_NORM * w` computed inside the gate kernel).  Worth +0.2-0.3 % on 27B MTP and +0.7 % on
+Flash-Next 2 GPU `-sm tensor` + MTP, flat on 35B-A3B 1 GPU.  The GDN-norm pair is the only fusion in the set
+whose skip and emit are two decisions (the norm node comes before the gate that computes it): while a norm is
+pending no other fusion may start in between, so the two abort tripwires are unreachable.
+
 The same idiom — and therefore also default-on despite the name — covers
 `GGML_CUDA_DISABLE_IDX_RELU_SUM`, `GGML_CUDA_CONCAT_VERIFY` and (r46, block 15) `GGML_CUDA_FUSE_GDN_STATE_GATHER`.
 
@@ -466,6 +477,7 @@ see `../WORKLOG.md` 261017.008).
 | `GGML_HIP_FA_BAND_WIDE` | on | kill-switch | `0` disables the wide band. |
 | `GGML_HIP_FA_BAND_WMMA` / `GGML_HIP_FA_BAND_WMMA_SPLIT` / `GGML_HIP_FA_BAND_WMMA_GQA_MAX` | unset | tuning | band kernel selection.  `GGML_HIP_FA_BAND_WMMA=0` disables the band; `2` / `4` force `ncols1` (any other non-zero value means 4).  The default is **4 for every K/V type** since r92 (the 2-byte f16/bf16 arm used 2 before TODO #27; with the band's 64-half2 row the narrower tile only wins ~5 % at `n_q = 1` and loses at every verify width).  `SPLIT` = blocks per output tile: default `nsm` for the native-quantized types and `nsm/2` for the 2-byte types (r92; was `3*nsm/4`).  It must not depend on `n_q` or the KV length, or decode and verify would split differently.  `GQA_MAX` (default `12`) is the largest GQA ratio the band folds into its `ncols2 = 8` groups; `<= 8` keeps the old whole-group fold (issue #133). |
 | `GGML_CUDA_FA_WMMA_256` / `GGML_CUDA_FA_WMMA_MAX_HEAD` | unset | tuning | WMMA tile / head caps.  The RDNA4 cap is 576, which covers the head-512 Gemma 4 global layers; that only pays because r92 retuned the `(512, 512, 32)` RDNA MMA row (issue #188), so `GGML_CUDA_FA_WMMA_MAX_HEAD=256` is the A/B arm that shows the tile kernel is 1.35x slower there. |
+| `GGML_CUDA_FA_RDNA3_WMMA_512` | **on** | kill-switch | r102 (PR #199): RDNA3_0 (gfx1100-1103) head-512 (`DKQ == DV == 512`, e.g. Gemma 4's global layers) takes WMMA prefill on top of the 256 head cap, using its own rows in `ggml_cuda_fattn_mma_get_config_rdna` (Q in shared memory, 128 threads, 64-wide K/V/combine batches: the gfx1201-tuned head-512 rows keep Q in registers and spill ~1.0-1.4k VGPRs per lane on gfx1100).  `=0` sends head 512 back to the tile kernel, which is the pre-r102 behaviour and bit-identical to r101.  `GGML_CUDA_FA_WMMA_256=0` also takes it out; `GGML_CUDA_FA_WMMA_MAX_HEAD` only decides whether head 512 takes WMMA at all (the rows themselves are RDNA3_0-only).  Worth +34 % deep prefill at d32768 and +45 % at d65536 (gemma-4-26B-A4B QAT, `q8_0` K/V) with decode unchanged.  **Known limitation:** it is a tile->WMMA family switch, so it moves the prefill logits against the tile kernel (mean KLD 0.0293 / same-top-p 92.6 % on that model, against 0.0441 / 90.6 % for the head-256 switch the delivery has shipped since r5) and does not meet the absolute 0.005 / 98 % prefill-logit gate.  See `GREEDY-PURITY.md` §46 and `TODO.md` #81. |
 | `GGML_HIP_FA_BAND_FETCH_AHEAD` | **on** | kill-switch | r98 (PR #195): with `q8_0` K and V read in place (decode/verify, `n_q <= 8`, head 256) the RDNA4 band runs a kernel variant that fetches the next K/V batches into registers ahead of use and orders only shared memory at its barriers.  `=0` runs the same kernel without the fetch-ahead, as every other K/V type does.  Bit-identical either way; worth ~+1 % decode at 8K and ~+2.4 % at 110K context (27B, `q8_0` K/V). |
 | `GGML_CUDA_FA_KV_NATIVE` / `GGML_CUDA_FA_MASK_SKIP` | unset | tuning | native-KV and mask-skip paths. |
 | `GGML_CUDA_FA_STAGE_MAX_MB` | unset | tuning | FA staging budget. |

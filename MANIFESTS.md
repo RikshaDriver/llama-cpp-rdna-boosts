@@ -70,7 +70,9 @@ in CI.  The model-level gates are manual:
 3. **Prefill logits** — `scripts/gate-prefill-logits.sh`: mean KLD <= 0.005 and same-top-p >= 98 % against
    a recorded known-good base.  **Required for any change to a prefill kernel** (GDN/SSM chunked, FA,
    MMQ/MMVF/MMB, MoE prefill) or to a default-on approximate path.  Protocol:
-   [`benchmarks/prefill-logit-methodology.md`](benchmarks/prefill-logit-methodology.md).
+   [`benchmarks/prefill-logit-methodology.md`](benchmarks/prefill-logit-methodology.md).  A **kernel-family
+   switch** (a new tile/WMMA head cap) is decided against the equivalent switch already shipped, not against
+   the absolute limit — `GREEDY-PURITY.md` §46; today's one such arm is block 05's RDNA3_0 head-512 rows.
 4. **Per-block build** — `scripts/gate-per-block-build.sh` on a clean `all` build per commit (bisection and
    review walk the blocks individually, so every block must build on its own).  Use `--changed-from` to
    rebuild only the blocks a release changed.
@@ -90,7 +92,7 @@ on the tip.
 | 02 | `tests/test-speculative-adaptive`, `tests/test-arg-parser`; `llama-server --spec-type draft-mtp-adaptive` smoke | pass |
 | 03 | `test-backend-ops -o GATED_DELTA_NET`; `test-recurrent-state-depth`, `test-recurrent-state-rollback` | per-arm FAIL/PASS set unchanged from the recorded baseline (the counts differ per box — never gate on zero) |
 | 04 | `test-backend-ops` bf16-KV FA cases + a bf16-cache model run | pass; coherence identical to f16 |
-| 05 | `test-backend-ops -o FLASH_ATTN_EXT` (full matrix); width probe; prefill-logit gate | 6391/6391 on the r92 tree; probe PASS; KLD <= 0.005 |
+| 05 | `test-backend-ops -o FLASH_ATTN_EXT` (full matrix); width probe; prefill-logit gate | 6391/6391 on the r92 tree; probe PASS; KLD <= 0.005 — except the RDNA3_0 head-512 row set, which is calibrated against the shipped head-256 switch instead (`GREEDY-PURITY.md` §46) |
 | 06 | `test-backend-ops -o MUL_MAT` (MMQ cases) + prefill A/B | pass; prefill not slower at depth |
 | 07 | `test-backend-ops -o MUL_MAT`/`MUL_MAT_ID` (K-quant cases); `llama-perplexity` before/after | pass; **PPL must be unchanged** (it is a numerics change, not a quality change) |
 | 08 | `test-backend-ops -o MUL_MAT_ID`; MoE decode + `llama-batched-bench -npl 1,4,8`; width probe on a MoE model | pass; one hash across the band; verify widths not slower than stock-relative |

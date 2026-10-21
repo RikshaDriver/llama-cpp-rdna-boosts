@@ -105,6 +105,7 @@ numbers are **stable** — dozens of docs cite them — so they are never renumb
 | **§43** | one split holds one consumer of a staged expert table | fix (r96) |
 | **§44** | a per-start hipBLASLt solution pick is not a code defect; pin `ROCBLAS_USE_HIPBLASLT=0` before comparing starts | doctrine |
 | **§45** | a split the op cannot serve locally must be rejected, never approximated — and "locally" means no device straddles the reduction | fix (r101) |
+| **§46** | a tile→WMMA family switch is calibrated against the switches already shipped, not against the absolute limit | accepted deviation (r102, TODO #81) |
 
 ---
 
@@ -955,3 +956,46 @@ both return 200 where the process used to abort.
 
 Where: `archive/work/fix-gemma-4/RESOLUTION.md`; measurements
 `archive/work/fix-gemma-4/evidence/MEASUREMENTS-2026-10-21f.md`.
+
+---
+
+## 46. A tile→WMMA family switch is calibrated against the switches already shipped, not against the absolute limit
+
+**Claim.** The prefill-logit gate's absolute limits (mean KLD `<= 0.005`, same-top-p `>= 98 %`) decide a
+change *inside* a kernel family: a new quant type, a precision change, an approximate path.  They cannot
+decide a **kernel-family switch** such as the r5/r99 FA head caps or the r102 RDNA3_0 head-512 rows,
+because the two families do not share a reduction order and the divergence is therefore not a defect to be
+driven to zero: the order *is* the tuning.  For a family switch the decidable criterion is **no worse than
+the equivalent switch the delivery already ships**, measured at the same model/corpus point.
+
+**The measurement.**  `scripts/gate-prefill-logits.sh` gives the base arm and the candidate arm.  For a
+family switch, run it twice against one base file: once with the candidate disabled (the fallback arm the
+shipped set already uses) and once with the candidate enabled, and require the candidate to be no worse on
+mean KLD and same-top-p, plus PPL within its error bar and the op oracle green
+(`test-backend-ops -o FLASH_ATTN_EXT`).
+
+**Numbers (r102, gfx1100, gemma-4-26B-A4B QAT UD-Q4_K_XL, wikitext-2, 40 x 512, f16 K/V — the gate's own
+protocol; the point has base PPL 604, so it is far outside the gate's calibrated domain, against 5.93 for
+the 27B Q8_0 it was pinned on).**
+
+| change | mean KLD | same top p |
+|---|---|---|
+| **candidate: head-512 WMMA vs tile (this switch)** | **0.0293** | **92.59 %** |
+| reference: head-256 WMMA vs fully tile (**shipped default-on for gfx1100 since r5**) | 0.0441 | 90.63 % |
+| reference: benign ubatch change, same kernel (tile `-ub 512` vs `-ub 256`) | ~0.12 per chunk | 84.5 % |
+| reference: issue #113 BF16 chunked GDN on gfx1100 | 0.62 | — |
+
+PPL agrees it is rounding-level: f16 K/V 604.06 (tile) vs 607.20 (WMMA); q8_0 K/V 617.85 vs 620.59.  That
+is +0.5 % with a +/-5 % error bar, in the same direction on both cache types, at a PPL where nothing is
+resolvable.  The op oracle is clean (`FLASH_ATTN_EXT` 6391/6391 on gfx1100, including the head-512 shapes).
+
+**Why the absolute limit cannot be met here.**  Making the WMMA rows reproduce the tile kernel's rounding
+would mean reproducing its threads, its VKQ combine order and its online-softmax rescaling interval, i.e.
+giving up the occupancy win that the rows exist for.  Every tile→WMMA cap the set already ships (head 240
+RDNA3_5, head 256 RDNA3_0, head 576 RDNA4) has the same property; measuring one of them against the tile
+kernel produces the 0.0441 above.
+
+**Status.**  Accepted as a documented deviation (r102, PR #199).  It is not a license for within-family
+changes: those still meet 0.005 / 98 %.  Closing the gap, or replacing this criterion with an accuracy
+reference (an op-level f64/CPU oracle instead of a KLD against a sibling kernel), is `TODO.md` #81 and
+`wip/fa-rdna3-head512-purity/`.

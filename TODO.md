@@ -12,7 +12,7 @@ Details never live here: they live in `AGENTS.md`, `patches/README.md`, `MANIFES
 still means the same subject after that item is closed and removed from this file.  New items append.
 
 **Current state:** the **12-block V2.0 set** (block 00 + blocks 01-11) at fork point **`097cf33d9`**,
-release **`v12-097cf33d9-r101`**.  `release.json` is the source of truth for the tip/tree and hashes; the
+release **`v12-097cf33d9-r102`**.  `release.json` is the source of truth for the tip/tree and hashes; the
 top of `WORKLOG.md` is the newest record.
 
 | # | subject | kind | status |
@@ -29,6 +29,7 @@ top of `WORKLOG.md` is the newest record.
 | **78** | DFlash2 `-sm tensor`: the real Meta distributed `TOP_K` fix | correctness | open, scoping (`wip/dflash-meta-split-impl/`) |
 | **79** | RDNA3_0 verify-band fusions: no multi-device measurement, and gfx1101/gfx1102 untested | platform validation | open (shipped default-on in r95; needs a 2+ card gfx1100 box) |
 | **80** | meta split-state cache: 30+ lookups per node per re-allocation | performance | parked (`archive/work/issue-184-meta-r80r82/RESOLUTION.md` `§` headroom) |
+| **81** | gfx1100 head-512 WMMA FA rows move the prefill logits; the absolute gate cannot decide a family switch | purity / methodology | open, accepted limitation (`wip/fa-rdna3-head512-purity/`, `GREEDY-PURITY.md` §46) |
 
 Accepted limitations that are deliberately **not** fixed are listed at the end — do not re-report them.
 
@@ -281,6 +282,36 @@ costs (336 B is ~11 vector words), so the lever is the lookup **count** (the rec
 the r100 change used: identical states under `GGML_META_SS_VERIFY=1`, identical greedy text and prefill
 KLD, and a same-binary A/B (`GGML_META_SS_SCRATCH=0` is the adjacent switch).  Measurements and the
 reporter's numbers: `archive/work/issue-184-meta-r80r82/RESOLUTION.md`.
+
+## 81. gfx1100 head-512 WMMA FA rows move the prefill logits; the gate's absolute limit cannot decide a family switch — PURITY / METHODOLOGY
+
+**Status: open, accepted limitation.  Shipped default-on in r102 on the maintainer's decision**
+(`WORKLOG.md` 261021.004, record `wip/fa-rdna3-head512-purity/`).  PR #199's RDNA3_0 head-512 rows are a
+34-45 % deep-prefill win on gfx1100 and are *more* faithful than the head-256 switch the set has shipped
+default-on since r5, but they do not meet the prefill-logit gate's absolute limits
+(`GREEDY-PURITY.md` §46):
+
+| arm (gemma-4-26B-A4B QAT, wikitext-2, 40x512, f16 K/V, gfx1100) | mean KLD | same top p |
+|---|---|---|
+| head-512 WMMA vs tile (this change) | 0.0293 | 92.59 % |
+| head-256 WMMA vs fully tile (shipped since r5) | 0.0441 | 90.63 % |
+| benign ubatch change, same kernel | ~0.12 / chunk | 84.5 % |
+
+Two questions, in order:
+
+1. **Where does the divergence come from?**  The new rows differ from the tile kernel in threads per block,
+   VKQ combine width and — the one that changes values rather than order — the online-softmax rescaling
+   interval (`nbatch_fa` 32/64 against the tile's strip).  Decompose it: force one dimension at a time
+   (a row variant at the tile's `nbatch_fa`, `Q_in_reg` on, fewer columns) and measure each arm's KLD
+   against the tile kernel with `llama-perplexity --kl-divergence` on one base file.  If most of the 0.0293
+   is one parameter, a row set that keeps the occupancy win and that parameter may pass the absolute gate.
+2. **If it is inherent, replace the criterion.**  The honest instrument for a family switch is accuracy
+   against an independent reference (an op-level f64/CPU oracle for `FLASH_ATTN_EXT` head 512, reported as
+   an error magnitude rather than pass/fail) instead of a KLD against a sibling kernel.  That would also let
+   the r5/r99 head caps be re-justified rather than inherited.
+
+Needs a gfx1100 box (`fingon`).  Both arms must run with `ROCBLAS_USE_HIPBLASLT=0` (issue #67) and one GPU
+job at a time; `GGML_CUDA_FA_RDNA3_WMMA_512=0` is the fallback arm.
 
 ## Where the current lists live
 
