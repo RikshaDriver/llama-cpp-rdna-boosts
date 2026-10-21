@@ -1,0 +1,32 @@
+# P2 arm A -- "just pin the hipBLASLt solution" -- two attempts, both rejected by the runtime.
+#
+# Goal: make the F32 ssm_alpha/ssm_beta GEMM pick ONE TensileLite solution, so the per-start logits
+# class lottery disappears without touching a kernel.  Instrument: llama-perplexity -c 512 --chunks 1,
+# logits-dump hash, fresh process per sample, 35B-A3B Q4_K_M, 1 GPU, ROCm 10.1.0, r102 build.
+# Reference (no pinning): 8 starts -> 3 classes (3629d90733a1 x5, a855c2000912 x2, 6d32945460bd x1).
+#
+# ATTEMPT 1 -- TENSILE_SOLUTION_INDEX=<id>   (the library's own "force a solution" env, which its strings
+# advertise: "Set TENSILE_SOLUTION_INDEX to a negative number to restore the default behavior.")
+#   TENSILE_SOLUTION_INDEX=140215, 6 starts -> 3 classes (6d32945460bd x4, 3629d90733a1 x1, a855c2000912 x1)
+#   TENSILE_SOLUTION_INDEX=140216, 6 starts -> 2 classes (6d32945460bd x4, 3629d90733a1 x2)
+#   => NOT honoured on the rocBLAS -> hipBLASLt dispatch path.  No effect at all.
+#
+# ATTEMPT 2 -- HIPBLASLT_TUNING_OVERRIDE_FILE=<csv>
+#   Wrote the documented column layout (mi,m,n,k,batch_count,{a,b,c,d}_type,compute_type,complex_alpha,
+#   complex_beta,{a,b,c,d}_scale,amaxD,alpha,beta,gsu,gsv,geu,gev,gtransA,gtransB,solution_index) for the
+#   shape hipBLASLt actually sees in this run -- from its own log:
+#     A[R_32F rows=2048 cols=32 ld=2048]  B[R_32F rows=2048 cols=512 ld=2048]  C[R_32F rows=32 cols=512]
+#   => m=32, n=512, k=2048, all R_32F, transA=T, transB=N.
+#   6 starts with the file set -> still 3 classes (a855c2000912 x3, 3629d90733a1 x2, 6d32945460bd x1),
+#   and at HIPBLASLT_LOG_LEVEL=4 the library says why:
+#     [Error][hipblasLtMatmulAlgoGetHeuristic] The hipBLASLt git version and the override file git version
+#     are not the same.
+#   The file must carry the exact hipBLASLt git-version string, i.e. it is locked to ONE ROCm build and
+#   breaks on any runtime update.
+#
+# Conclusion: pinning is NOT a shipping mechanism for this delivery.  A tuning file that must name the
+# exact hipBLASLt git version cannot be shipped in patches/ (it would have to be regenerated per ROCm
+# release) and TENSILE_SOLUTION_INDEX has no effect here.  Determinism therefore has to come from either
+# (a) an explicit algo chosen by OUR code (hipblasLtMatmul with an algo we selected deterministically --
+# keeps hipBLASLt, keeps the Flash-Next +51 %, adds it as a direct dependency), or (b) not calling it at
+# all for the shapes that matter (the F32 skinny GEMM, and the BF16 MMF column tiling).

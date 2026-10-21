@@ -25,16 +25,20 @@ Read, in this order, before doing anything:
 * **P2 arm B is REFUTED as cheap** (`evidence/p2-mmf-cap-attempt.txt`): RDNA has **no F32 MMA GEMM**
   (`amd_mfma_available` is CDNA-only, `amd_wmma_available` is f16/bf16), and the 16-column cap in `mmf` is a
   **kernel** limit (`mmf.cuh:771 GGML_ASSERT(ids || ncols_dst <= 16)`), not a heuristic.
+* **P2 arm A is REFUTED as a shipping mechanism** (`evidence/p2-arm-a-pinning-attempts.txt`):
+  `TENSILE_SOLUTION_INDEX` (140215/140216) has no effect on the rocBLAS→hipBLASLt path (3 and 2 classes in 6
+  fresh starts), and `HIPBLASLT_TUNING_OVERRIDE_FILE` — written in the documented column layout for the shape
+  hipBLASLt logs (`m=32 n=512 k=2048`, `R_32F`, `T,N`) — is rejected with *"The hipBLASLt git version and the
+  override file git version are not the same"*, i.e. it is locked to one ROCm build.
 * Nothing is in `patches/`; the experiment patch is `tools/experiments/mmf-max-cols-ATTEMPT.patch` (applied to
   a working tree, measured, reverted).
 
 **This session's goal — in this order:**
 
-1. **P2 arm A (cheap, might end the campaign): `HIPBLASLT_TUNING_OVERRIDE_FILE`.**  Pin a solution index for the
-   35B-A3B F32 alpha/beta shape and for the gemma4 router shape, then run 12 fresh `llama-perplexity -c 512`
-   starts (`tools/hbl-classes.sh`) and confirm **one class**, plus prefill-logit KLD vs the unpinned default and
-   an interleaved `llama-bench` visit.  If a shipped tuning file is enough, that is a delivery-shaped answer
-   that needs no kernel at all — report it to the maintainer before writing anything.
+1. **Arm G — deterministic algo selection in our code (recommended first).**  Call `hipblasLtMatmul` directly
+   for the two F32 shapes with an algo we choose deterministically (lowest `solution_id`, validated once), then
+   prove **one class across 12 fresh starts** and that Flash-Next's prefill does **not** regress (it is worth
+   +51 % today).  This is the cheapest route to "reproducible shipped binary" and it needs no kernel.
 2. **P3(ii) the F32 skinny GEMM** (the correctness win in-set): `M = 32` (35B-A3B alpha/beta) and `M = 128`
    (gemma4 router), `K = 2048/2816`, `N = ubatch`.  No MMA form exists, so this is a SIMT tiled kernel
    (block-per-token, weight streamed once, our own K-split order).  The bar is low: the F32 path is **free** on

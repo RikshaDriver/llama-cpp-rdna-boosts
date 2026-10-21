@@ -140,7 +140,8 @@ constant is **TensileLite code objects** (one set per distinct solution — Flas
 small fixed arena.  So hipBLASLt is ~3.5 % of a 2 GiB headroom floor; the rest is the MTP draft buffer, the
 FA-QSA workspace, the pool high-water mark and the model's own PLE/attention allocations.  `ENVIRONMENT.md`
 "Why the cards sit near-full" lists hipBLASLt among those consumers; this sizes it, and the campaign should
-**not** claim headroom as a reason to bypass it.
+**not** claim headroom as a reason to bypass it.  (The "~2 GiB is hipBLASLt" attribution was **retracted in
+discussion #196** by the maintainer on 2026-10-21; this measurement agrees with the retraction.)
 
 Single-visit throughput of the same runs (indicative, repeats needed): Flash-Next prefill **2405.7 t/s with
 hipBLASLt vs 1595.1 without (+51 %)** at 68K tokens/`-ub 8192`, 966.8 vs 823.9 at 5298 tokens/`-ub 8192`, and
@@ -169,12 +170,24 @@ campaign step P1**, and it is the item that decides whether the campaign is wort
 
 ## 2. Design space (what "bypass" can mean)
 
-Ordered by how much of the delivery they touch, cheapest first.  Nothing here is a decision yet.
+Each arm carries its 2026-10-21 status.  A and G are the no-kernel arms (G is the recommended one), B/C are
+kernel work, D is a model-side change, E is the blunt instrument, F is the status quo.
 
-**A. Pin the solution instead of removing it (`hipBLASLT_TUNING_OVERRIDE_FILE`).**  hipBLASLt reads a tuning
-file that pins a solution index per problem size.  This fixes determinism without touching a kernel, and it is
-upstream-supported.  It does **not** remove the dependency or the binary, and it leaves the pin outside the
-repo (a consumer-side file), so it is the fallback if C/D/E lose throughput — cheap enough to quantify first.
+**A. Pin the solution instead of removing it — REFUTED as a shipping mechanism (2026-10-21).**  Two attempts,
+both rejected by the runtime (`evidence/p2-arm-a-pinning-attempts.txt`): `TENSILE_SOLUTION_INDEX=140215/140216`
+(the library's own "force a solution" variable) changes **nothing** on the rocBLAS→hipBLASLt path (3 and 2
+classes in 6 fresh starts each), and `HIPBLASLT_TUNING_OVERRIDE_FILE`, written in the documented column layout
+for the exact shape hipBLASLt logs (`m=32 n=512 k=2048`, all `R_32F`, `T,N`), is rejected with *"The hipBLASLt
+git version and the override file git version are not the same"* — the file is locked to one ROCm build.
+
+**G. Make the pick deterministic in OUR code — the recommended practical fix (not yet prototyped).**  Call
+`hipblasLtMatmul` directly for the shapes we care about with an algo we choose deterministically (e.g. the
+lowest `solution_id` from `hipblasLtMatmulAlgoGetHeuristic`/`getAllAlgos`, or a fixed index validated once).
+This keeps hipBLASLt's **+51 % Flash-Next prefill** and removes the lottery at the same time, at the cost of
+adding hipBLASLt as a direct dependency (it is already linked transitively through rocBLAS) and of a fixed
+algo that must be re-validated per ROCm line.  Cheaper than an F32 GEMM to write, but less of a win: it does
+not remove the binary, and an implicit fallback path can still pick a different kernel.  Prototype this
+*before* building the F32 kernel if the goal is "reproducible shipped binary" rather than "no hipBLASLt".
 
 **B. Raise the native-GEMM cap (`mmf.cu`: `src1_ncols > 16`) — REFUTED as a cheap arm (2026-10-21).**  Tried
 it (`GGML_CUDA_MMF_MAX_COLS`, patch kept as `tools/experiments/mmf-max-cols-ATTEMPT.patch`).  Two blockers:
@@ -238,18 +251,20 @@ future pass: Flash-Next IQ4_NL (and the MTP draft's own GEMMs, which need a run 
 it does not scale with ubatch or prompt length.  Headroom is **not** a reason to bypass it; correctness is.
 
 **P2 — the cheap arms.**  Arm B is refuted as cheap (§2): F32 has no MMA path on RDNA and the 16-column cap is
-a kernel limit.  Still open and cheap: **arm A** (`HIPBLASLT_TUNING_OVERRIDE_FILE` to pin a solution index —
-fixes determinism with no code change; the number to beat is "does the pin survive a 12-start class check")
-and **arm E** (`ROCBLAS_USE_HIPBLASLT=0` from our ROCm init; free on 35B-A3B, -37 % prefill on Flash-Next).
-Note `ENVIRONMENT.md` records that `=0` was measured CORRUPT at `GGML_CUDA_SLAB_HEADROOM_MIB=2048` in the
-wide-prefill config (`-ub 6144 -c 204800`) — that claim predates this campaign and must be re-tested before any
-arm relies on `=0`; at 16384..131072 context and 896..256 headroom it is clean here.
+a kernel limit.  **Arm A is refuted as a shipping mechanism** (§2): `TENSILE_SOLUTION_INDEX` has no effect and
+the tuning override file is locked to the exact hipBLASLt git version.  **Arm G (explicit algo in our code) is
+the recommended next step** for the correctness goal, because it keeps the Flash-Next +51 % prefill.  **Arm E**
+(`ROCBLAS_USE_HIPBLASLT=0` from our ROCm init) is free on 35B-A3B but -37 % Flash-Next prefill, and
+`ENVIRONMENT.md` records that `=0` was measured CORRUPT at `GGML_CUDA_SLAB_HEADROOM_MIB=2048` in the wide-prefill
+config (`-ub 6144 -c 204800`) — that claim predates this campaign and must be re-tested before any arm relies
+on `=0`; at 16384..131072 context and 896..256 headroom it is clean here.
 
-**P3 — the real kernels.**  Two separate jobs, no longer one: **(i) BF16/f16 wide N** = the column-tiled
-non-ids MMF path (WMMA exists) for Flash-Next; **(ii) F32 wide N** = a SIMT tiled GEMM for 35B-A3B
-alpha/beta + the gemma4 router (no MMA form exists on RDNA), or arm D (stop shipping those weights as F32).
-The F32 job is the one that removes the last per-start lottery, and it has a low bar (the F32 path is free on
-35B-A3B today).  The BF16 job is a performance proposition first.
+**P3 — the real kernels.**  Two separate jobs: **(i) BF16/f16 wide N** = port the column tiling the
+`mul_mat_id` MMF launch already has to the non-ids launch (WMMA exists on RDNA for f16/bf16) for Flash-Next;
+**(ii) F32 wide N** = a SIMT tiled GEMM for 35B-A3B alpha/beta + the gemma4 router (no MMA form exists on
+RDNA), or arm D (stop shipping those weights as F32).  The F32 job is the one that removes the last per-start
+lottery and has a low bar (the F32 path is free on 35B-A3B today); the BF16 job is a performance proposition
+first, against a **+51 %** hipBLASLt prefill advantage.
 
 **P4 — default.**  Whichever arm wins becomes **default-on with a kill switch** (`default-on policy` in
 `AGENTS.md`), the old path is the kill switch value, and `ENVIRONMENT.md` gains the variable.

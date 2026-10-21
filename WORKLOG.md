@@ -46,11 +46,23 @@ MMA GEMM at all**.  On Flash-Next (BF16) raising the cap **aborts**:
 not a heuristic.  The tractable versions are a **column-tiled non-ids MMF launch** (bf16/f16 only) and a
 **SIMT F32 skinny GEMM**, recorded as P3(i)/(ii) with the bars above.
 
-**Docs.**  `wip/hipblaslt-bypass/README.md` gains §1.1 (per-model inventory), §1.3 (the VRAM answer) and the
-refutation in §2/§4, plus `evidence/p0-inventory-all-models.txt`, `p0-shapes-flash-next.txt`,
-`p1-hipblaslt-outside-slab.txt`, `p2-mmf-cap-attempt.txt`, the experiment patch and a rewritten
-`NEXT-SESSION-PROMPT.md`; `TODO.md` #82 is retitled "correctness first" with the measured facts; `GREEDY-PURITY.md`
-§44 gains the ~70 MiB constant and the model-dependent cost; `wip/CAMPAIGNS.md` row refreshed.
+**P2 arm A (pinning) is REFUTED as a shipping mechanism.**  Two attempts (`wip/hipblaslt-bypass/evidence/
+p2-arm-a-pinning-attempts.txt`): `TENSILE_SOLUTION_INDEX=140215/140216` — the library's own "force a solution"
+variable — has **no effect** on the rocBLAS→hipBLASLt dispatch (3 and 2 classes in 6 fresh starts each), and
+`HIPBLASLT_TUNING_OVERRIDE_FILE`, written in the documented column layout for the shape hipBLASLt itself logs
+(`A[R_32F 2048x32] x B[R_32F 2048x512]`, i.e. m=32, n=512, k=2048, `T,N`), is rejected outright:
+*"The hipBLASLt git version and the override file git version are not the same"* — the file is locked to one
+ROCm build, so it cannot live in `patches/`.  Determinism therefore has to come from **our code**: either an
+explicit algo we select (arm G, `hipblasLtMatmul` with a deterministic `solution_id` — keeps the Flash-Next
++51 % prefill and is the recommended next step) or not calling hipBLASLt for the shapes that matter (P3).
+
+**Docs.**  `wip/hipblaslt-bypass/README.md` gains §1.1 (per-model inventory), §1.3 (the VRAM answer), the arm-A
+refutation and a new arm G, plus `evidence/p0-inventory-all-models.txt`, `p0-shapes-flash-next.txt`,
+`p1-hipblaslt-outside-slab.txt`, `p2-mmf-cap-attempt.txt`, `p2-arm-a-pinning-attempts.txt`, the experiment patch
+and a rewritten `NEXT-SESSION-PROMPT.md`; `TODO.md` #82 is retitled "correctness first" with the measured facts;
+`GREEDY-PURITY.md` §44 gains the ~70 MiB constant and the model-dependent cost; `wip/CAMPAIGNS.md` row refreshed.
+The maintainer retracted the "hipBLASLt holds ~2 GiB" attribution in discussion #196 on the same day; the
+measurement here agrees with the retraction.
 
 ## 261021.005 (docs) -- TODO #75 closed: the 35B-A3B per-start flip is the hipBLASLt solution lottery; `wip/hipblaslt-bypass` seeded
 
