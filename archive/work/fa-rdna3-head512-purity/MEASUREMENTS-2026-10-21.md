@@ -170,3 +170,23 @@ scripts/gate-prefill-logits.sh --family-switch \
 # a row variant, costed
 wip/…/sweep.sh V1-fa64 "128, 1, 64, 64, 64, 64, 1, false"    # apply, build, measure, revert (moved to archive)
 ```
+
+## 7. Which binary each number came from (rigor note)
+
+The sweep arms were built one at a time from the r102 tree, so every row in §3 belongs to its own build
+(the variant patch is recorded in `variants/`).  The point-sensitivity table in §2 and the gate runs were
+measured on builds that were either the shipped row or **bit-identical** to it (`V4` `Q_in_reg=true`
+produces the shipped row's KLD to every printed digit, so a `V4` build is a valid stand-in).  One trap was
+caught while closing: after the last experiment the *built library* was still the fp32-accumulator arm even
+though the source had been reverted, which silently shifted the default-mode gate number from
+`0.046179 / 90.422 %` to `0.045722 / 90.245 %` (the E1c value).  Final verification was therefore redone on
+a rebuild of the reverted (shipped) source:
+
+```
+default (wikitext) mode   : mean KLD 0.046179   same top p 90.422 %   -> FAIL (the historical result)
+family-switch mode        : mean KLD 0.001778   same top p 98.967 %  -> PASS
+                            control (same kernel, -ub 256): 0.012049 / 97.333 %, point PPL 2.646
+```
+
+Record the build along with the number, and rebuild after reverting a variant — a stale `libggml-hip.so` is
+invisible in the source diff.
