@@ -109,6 +109,7 @@ on the tip.
 | 08 | `test-backend-ops -o MUL_MAT_ID`; MoE decode + `llama-batched-bench -npl 1,4,8`; width probe on a MoE model | pass; one hash across the band; verify widths not slower than stock-relative |
 | 09 | host-expert coherence (`-ncmoe`/`-cmoe`), `test-llama-archs`, `MOE_EXPERT_CACHE_VALIDATE=1`; for the batched f32 CPY: `test-logits-width-probe` default vs `GGML_CUDA_FUSE_CPY_BATCH=0` | pass; no `////`, no fault; cache-on == cache-off text; probe maxdiff 0 and identical hashes |
 | 10 | `test-backend-ops -o FLASH_ATTN_QSA` (18/18 minimum); `test-llama-archs -a qwen4exp`; sparse-vs-dense perplexity ratio (`LLAMA_QSA_SPARSE_FA=0`); `scripts/gate-qwen4exp-quant-coherence.sh`; for the verify-band fusions: `test-logits-width-probe` default vs `GGML_CUDA_FUSE_Q8_1_VERIFY=0` + `GGML_CUDA_FUSE_GDN_CONV_VERIFY=0` | pass; ratio close to 1; probe maxdiff 0 and identical hashes (`GREEDY-PURITY.md` §11) |
+| 10 | **(r103)** bf16 K/V prefill runs and is bit-identical to the unfused chain: `llama-bench -ctk bf16 -ctv bf16` (must not abort) + a prefill-logit compare against a base recorded with `GGML_CUDA_DISABLE_ROPE_SET_ROWS=1`; `test-backend-ops -o ROPE -o SET_ROWS` | 5136.70 t/s pp512; KLD −0.000000 / 100.000 %; ROPE+SET_ROWS green |
 | 11 | dense coherence + the block's own arm (DFlash/CPU/mmap): `-ncmoe` peak-RSS check with and without the reclaim | identical text; RSS as recorded in `patches/README.md` |
 
 ## Failure handling (agent instruction)

@@ -250,10 +250,16 @@ almost all of them `template-instances/*.cu`.
   `DKQ == DV == 512` (Q in shared memory, 128 threads, 64-wide K/V/combine batches, 16/32/64 columns) and
   head 512 takes WMMA prefill again on top of the 256 cap.  Other heads above 256 keep the tile kernel,
   RDNA4/RDNA3_5 rows are untouched, and the decode/verify band stays on the tile kernel.  +34 % deep prefill
-  at d32768 / +45 % at d65536 on gfx1100 (gemma-4-26B-A4B QAT, q8_0 K/V), decode unchanged.  **This is a
-  tile→WMMA family switch and the one FA arm in the set that does not meet the absolute prefill-logit gate**
-  (mean KLD 0.0293 vs the tile kernel; the head-256 switch shipped since r5 measures 0.0441 at the same
-  point) — see `GREEDY-PURITY.md` §46 and `TODO.md` #81.
+  at d32768 / +45 % at d65536 on gfx1100 (gemma-4-26B-A4B QAT, q8_0 K/V), decode unchanged.  This is a
+  tile→WMMA **family switch**; judged with the gate's `--family-switch` mode (calibrated point + a
+  same-kernel ubatch control, `GREEDY-PURITY.md` §46) it measures **0.001778 / 98.967 %**, inside the
+  absolute limits.  The r102 ledger's `0.0293` was the *marginal* pair (default vs the delivery without these
+  rows): against fully tile the same build is 0.0462, and a benign same-kernel `-ub` change is 0.105 at that
+  point, so the wikitext point never could decide it — `WORKLOG.md` 261021.007,
+  `archive/work/fa-rdna3-head512-purity/`.
+  **r103:** the fp32 `VKQ_C` array is now sized by the C tile's column span (`T_C_VKQ::J` vs
+  `2*T_C_VKQ::J`), so an fp32 accumulator at `DV % 32 == 0` no longer indexes out of bounds.  Every
+  instantiated row is fp16 C, for which the expression — and the generated code — is unchanged.
 * **Fully-masked KV group skip** (`GGML_CUDA_FA_MASK_SKIP`, prefill only) — exact zeros, bit-identical.
 * **Hygiene**: the `(512, 512, 32)` RDNA MMA row retuned to a 4-warp shape (issue #188, Gemma-4 head-512
   prefill), the RDNA2 (gfx1030) gate fixes of PR #181, the masked-V HIP fixes, and the FA staging arena
@@ -560,6 +566,16 @@ fusions.
 * **The fusion dispatcher** (`ggml-cuda-try-fuse.cu`): the matcher arms moved out of `ggml-cuda.cu`.
 * **Rope/FWHT fusions** (M-RoPE and NEOX, with the q8_0 K/V cache `SET_ROWS` folded in), the paired GDN
   q/k norms, and the `ADD + rms_norm_q8_1` one-token fusion (`GREEDY-PURITY.md` §42).
+* **bf16 RoPE destinations (r103, `TODO` #83)**: `rope.cu` instantiated float/f16 destinations for the NORMAL
+  and NEOX modes but not bf16, and since r101 the iSWA `k_cur`/`v_cur` reorder lets the ROPE → VIEW →
+  SET_ROWS fusion fire for Gemma's K — so `-ctk bf16 -ctv bf16` prefill aborted at `rope.cu:672`.  The four
+  missing instantiations are in; the fused store is one `ggml_cuda_cast<D>`, exactly like the `SET_ROWS` it
+  replaces, so it is **bit-identical** to the `GGML_CUDA_DISABLE_ROPE_SET_ROWS=1` chain (verified: KLD
+  −0.000000 / 100.000 % at bf16 K/V) and faster than it (pp512 5136.70 vs 4973.06 t/s).
+* **The FA accuracy instrument (r103, `tests/test-backend-ops.cpp`)**: `LLAMA_TEST_OP_NMSE=1` prints the error
+  magnitude every case already computes, and `LLAMA_TEST_SEED=<n>` pins the random input so two arms are
+  comparable (unseeded, an NMSE moves by up to 13x).  Plus the gemma-4 head-512 prefill-shape cases
+  (kv 32768, nb 512, GQA 8, f16 and q8_0) that the family-switch criterion reads.
 * **The GDN / attention-gate decode fusions** (r102, PR #200): four bit-identical fusions with their own
   switches — the qwen4exp alpha/beta BF16 projections plus `softplus(alpha + dt) * a` in one
   `mul_mat_vec_f` launch (`GGML_CUDA_FUSE_GATE_BETA_BF16`), the q/k l2 norm pair folded into the direct conv
