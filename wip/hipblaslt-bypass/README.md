@@ -1,9 +1,10 @@
 # wip/hipblaslt-bypass — can the delivery stop calling hipBLASLt entirely?
 
-**Status: OPEN (seeded 2026-10-21, r102; arm G implemented as a prototype the same day).**  P0-P2 are
-measured, arm G works (deterministic AND +5 % prefill on 35B-A3B) but is **not** in `patches/`: nothing here is
-applied by `scripts/apply-all.sh`, and no delivery change has been made.  Arm G's remaining work is a
-portability decision, not a measurement (see §2 arm G and §4).
+**Status: OPEN (seeded 2026-10-21, r102; arm G and P3(ii) implemented as prototypes the same day, P3(ii)
+re-measured on r103).**  P0-P3(ii) are measured: **arm G** (pin the hipBLASLt solution, +5.2 % prefill) and
+**P3(ii)** (our own F32 kernel, +4.2 %, no external dependency) both make the F32 path deterministic, and
+P3(ii) is the better *shipping shape* because it removes the per-ROCm index table entirely.  Nothing is in
+`patches/`: what remains is a promotion decision plus P3(i) (BF16 / Flash-Next).
 
 **Why it exists.**  Three things happened on 2026-10-21:
 
@@ -253,13 +254,17 @@ non-ids MMF launch** (bf16/f16 only, the kernel body already carries `col_base` 
 real kernel change, not a predicate, and it must beat 2405 t/s prefill on Flash-Next.  Full record:
 `evidence/p2-mmf-cap-attempt.txt`.
 
-**C. A dedicated small-M x wide-N F32 kernel (the "GDN alpha/beta GEMM") — the only arm that removes the
-F32 lottery in-set.**  The shapes that matter are `M = 32/256, K = 2048, N = tokens` (35B-A3B) and
-`M = 128, K = 2816` (gemma4's router).  M is tiny, so this is a skinny GEMM: a block-per-token kernel with the
-weight streamed once could beat both rocBLAS and anything we could get from `mmf` here (there is no F32 MMA
-form on RDNA at all — §2 arm B).  It would be *ours*, so bit-stable by construction, and the K-split order is
-ours to pin (band-uniformity rules in `GREEDY-PURITY.md` §19/§24/§25 apply).  This is campaign step P3(ii)
-and the arm that makes every 35B-A3B/gemma4 run reproducible without an environment variable.
+**C. A dedicated small-M x wide-N F32 kernel (the "GDN alpha/beta GEMM") — IMPLEMENTED 2026-10-21, and it is
+the arm that removes the F32 lottery in-set.**  The shapes that matter are `M = 32/256, K = 2048, N = tokens`
+(35B-A3B) and `M = 128, K = 2816` (gemma4's router).  M is tiny, so this is a skinny GEMM, and RDNA has no F32
+MMA form at all (§2 arm B).  `tools/experiments/mmf32-splitk-WIP.patch` + `evidence/p4-mmf32-kernel-implemented.txt`:
+a 32-row block tile / 4×8 thread sub-tile with the k range split into deterministic contiguous chunks (the
+split is the whole win — 0.27 ms → 0.032 ms on `32×512×2048`, vs the best hipBLASLt class 0.046 ms).
+Measured on r103: **one logits class 12/12 at 1 GPU and 6/6 at 2 GPU `-sm tensor`, dumps byte-identical**;
+**+4.2 % pp512 / +4.1 % pp2048, decode flat**; and 11x closer to the CPU reference than rocBLAS on the
+`test-backend-ops` cases it intercepts.  Unlike arm G it needs no hipBLASLt, no solution index and no
+per-runtime table, so **it is the better shipping shape**.  Scope: F32 only, `m <= 256`, `17 <= n <= 65536`,
+`256 <= k <= 8192`; everything else (and all of BF16 / Flash-Next) keeps the rocBLAS path unchanged.
 
 **D. Stop shipping the F32 weights (requantize `ssm_alpha`/`ssm_beta` to Q8_0).**  DanoPTT's suggestion: with
 those tensors at Q8_0 the GEMM goes through MMQ and hipBLASLt is never called, at the same speed (their
@@ -326,15 +331,20 @@ on `=0`; at 16384..131072 context and 896..256 headroom it is clean here.
 solution indices are per-runtime) and the **prefill-base policy** above; both are maintainer calls, not
 measurements.
 
-**P3(ii) is in flight and PAUSED (2026-10-21): see
-[`STATUS-2026-10-21-p3ii-paused.md`](STATUS-2026-10-21-p3ii-paused.md).**  A SIMT F32 kernel with a
-deterministic k-split (`tools/experiments/mmf32-splitk-WIP.patch`) is correct (NMSE 1e-13, 16 shapes +
-`test-backend-ops` 2444/2444), deterministic (one logits class, 8/8 at 1 GPU and 6/6 at 2 GPU `-sm tensor`)
-and **+4.4 % pp512 / +4.3 % pp2048** — within ~0.8 % of arm G's pin while needing no hipBLASLt, no solution
-index and no per-runtime table.  It is paused on one open question: its **self-KLD control reads 99.951 %
-while the logits dumps of the same runs are byte-identical**, which must be resolved (it is either the
-compare path or the kernel) before any prefill base is recorded on this arm — and a parallel agent is
-changing the perplexity scripts that whole instrument runs on.
+**P3(ii) is DONE as a prototype (2026-10-21, re-measured on r103).**  A SIMT F32 GEMM with a deterministic
+k-split (`tools/experiments/mmf32-splitk-WIP.patch`, `GGML_CUDA_MMF32=1`) is correct (16-shape NMSE 1e-13;
+`test-backend-ops` 2444/2444 and, with the r103 NMSE instrument, **11x closer to the CPU reference than the
+rocBLAS path**), deterministic (one logits class 12/12 at 1 GPU, 6/6 at 2 GPU `-sm tensor`, dumps
+byte-identical), and **+4.2 % pp512 / +4.1 % pp2048, decode flat** — within ~1 % of arm G's pin while needing
+no hipBLASLt, no solution index and no per-runtime table.  Purity judged with the **r103 `--family-switch`
+mode**: at a confident point (in-domain corpus, base PPL 1.43) it measures **0.014646 / 98.045 %** against a
+same-kernel control of **0.018100 / 97.808 %** — no worse on both metrics (PASS with `--allow-control-pass`),
+and at the wikitext point it is closer to the default than both the control and `ROCBLAS_USE_HIPBLASLT=0`.
+Full record: [`evidence/p4-mmf32-kernel-implemented.txt`](evidence/p4-mmf32-kernel-implemented.txt).
+
+*(The session's open question — a self-KLD control reading 99.951 % while the dumps are byte-identical — is
+resolved and is an instrument property: the base file stores **uint16-quantised log-probs**, step ≈ 2.4e-4
+nats, so the same-arm control has that floor in every arm.  The determinism criterion is the dump hash.)*
 
 **P3 — the real kernels.**  Two separate jobs: **(i) BF16/f16 wide N** = port the column tiling the
 `mul_mat_id` MMF launch already has to the non-ids launch (WMMA exists on RDNA for f16/bf16) for Flash-Next;
@@ -387,7 +397,8 @@ CSV).  Both take the arm from the environment, so the `=0` control is the same c
 | `tools/hbl-shapes.sh` | aggregate the hipBLASLt shape inventory from a log |
 | `tools/experiments/mmf-max-cols-ATTEMPT.patch` | the arm-B attempt (env knob on `mmf.cu`'s 16-column cap); refuted, kept so nobody repeats it |
 | `tools/experiments/hipblaslt-pin-ATTEMPT.patch` | the arm-G prototype (deterministic `hipblasLtMatmul` for the F32 skinny shapes in `ggml_cuda_mul_mat_cublas_impl`, `GGML_CUDA_HIPBLASLT_PIN=1`); works and wins, NOT in `patches/` |
-| `STATUS-2026-10-21-p3ii-paused.md` | where P3(ii) stopped: what is proven, the open self-KLD anomaly, the layout facts, and the interlock with the perplexity-script work |
+| `evidence/p4-mmf32-kernel-implemented.txt` | P3(ii) implemented on r103: correctness (NMSE + the r103 test instrument), determinism, throughput, the `--family-switch` purity judgement, the uint16 self-KLD floor, coverage/limits |
+| `tools/kld-corpus-35b-in-domain.txt` | the confident gate point for 35B-A3B (the model's own greedy answers, Qwen chat template; sha256 in the evidence) — the analogue of r103's `prompts/fa-family-switch-gemma4-26B-A4B.txt` |
 | `tools/experiments/mmf32-splitk-WIP.patch` | the P3(ii) prototype (our own F32 SIMT GEMM, split-K, env-gated `GGML_CUDA_MMF32=1`); works and wins, NOT in `patches/` |
 | `tools/experiments/mmf32-standalone/` | the kernel's numerical oracle (16 shapes vs a double reference) and the tile/k-split bench harness |
 | `evidence/p3-arm-g-pin-implemented.txt` | arm G implemented: per-shape solution classes, the 12/12 determinism gate, the interleaved `llama-bench` visits, the KLD matrix and the prefill-base finding |

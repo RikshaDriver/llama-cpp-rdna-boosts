@@ -1,5 +1,56 @@
 # WORKLOG - dated delivery records
 
+## 261021.010 (wip) -- P3(ii): our own F32 GEMM for the hipBLASLt shapes -- deterministic, +4.2 %, no external dependency
+
+**WIP only: no patch, no `release.json` change, no tree change** (prototype in
+`wip/hipblaslt-bypass/tools/experiments/mmf32-splitk-WIP.patch`, applied to a working `~/llama.cpp`, measured
+on the **r103 tree**, reverted).  Record: `wip/hipblaslt-bypass/evidence/p4-mmf32-kernel-implemented.txt`;
+campaign status in `wip/hipblaslt-bypass/README.md` §2 arm C / P3(ii).
+
+**Why it exists.**  Arm G (261021.008) pins the hipBLASLt solution and wins 5.2 %, but it owes a per-ROCm
+solution table that must be re-established on every runtime.  A GEMM of our own removes that obligation
+entirely: RDNA has no F32 MMA (arm B), so this is a SIMT kernel — a 32-output-row block tile, a 4×8 thread
+sub-tile, `BN=256`/`64`, and the k range split into contiguous chunks summed in increasing z (a fixed reduction
+tree, no atomics).  The split is the whole win: 0.266 → 0.032 ms on `32×512×2048` (2.07 TFLOP/s vs the best
+hipBLASLt class 0.046 ms).
+
+**Correctness.**  16-shape standalone oracle vs a double reference: **NMSE ~1e-13** (odd `k=2051`, odd
+`m`/`ldc`, `n<m`, `n>m`, `n=17`, `m=1..256`).  `test-backend-ops -o MUL_MAT` **2444/2444**; with r103's new
+`LLAMA_TEST_OP_NMSE`/`LLAMA_TEST_SEED` instrument the two intercepted cases are **11x closer to the CPU
+reference than the rocBLAS path** (6.1e-14 vs 6.9e-13, threshold 5e-4), and a case the kernel does not take is
+bit-identical.  Gemma4 PPL 1209.848 (default) vs 1209.880.
+
+**Determinism.**  1 GPU: **1 logits class 12/12** (`-c 512 --chunks 1`) and **4/4 byte-identical dumps**
+(`--chunks 8`).  2 GPU `-sm tensor`: **1 class 6/6**.
+
+**The session's open "99.951 % self-KLD" question is closed, and it was the instrument.**  A run compared
+against a base recorded by the same arm reads mean KLD −0.000000 but same-top-p 99.951 % *while both dumps are
+byte-identical*: `tools/perplexity/perplexity.cpp` stores the base as **uint16-quantised log-probs**
+(`scale=(max−min)/65535` over a ≤16-nat window ⇒ step ≈ 2.4e-4 nats) and the top-1 comparison mixes exact F32
+candidate logits with quantised base values, so a sub-step near-tie can be scored as a disagreement.  The stock
+arm carries the same RMS Δp floor (0.001 %).  **Determinism is judged on the dump hash, not on the self-KLD
+top-p** — worth knowing for every gate read of this tool.
+
+**Throughput** (35B-A3B, 1 GPU, 3 interleaved visits): **pp512 +4.2 %** (5068 vs 4862), **pp2048 +4.1 %**
+(5013 vs 4818), tg128 flat.  Against `ROCBLAS_USE_HIPBLASLT=0` (4890/4820) the kernel is +3.6 % prefill: it
+buys determinism *and* speed, because the heuristic's bit-class is the slow one.
+
+**Purity, with the r103 family-switch mode** (candidate `GGML_CUDA_MMF32=1` vs the default base, same-kernel
+control measured on the spot): wikitext `-c 512 --chunks 40` (base PPL 5.82) candidate **0.005787 / 96.480 %**
+vs control 0.006017 / 96.588 % and `=0` 0.005969 / 96.667 %; in-domain `-c 2048 --chunks 7` (new corpus
+`wip/hipblaslt-bypass/tools/kld-corpus-35b-in-domain.txt`, base PPL **1.43**) candidate **0.014646 /
+98.045 %** vs control **0.018100 / 97.808 %** — no worse on both metrics, so `--allow-control-pass` PASSes
+(§46 calibration).  The absolute limits fail at both points for the control and the `=0` arm too, i.e. the
+point is what the limit measures, not the switch.  This is an **exact** F32 GEMM reordering: no quantisation,
+no approximation.
+
+**Scope / not covered.**  F32 only, `m <= 256`, `17 <= n <= 65536`, `256 <= k <= 8192`; outside that window the
+rocBLAS call is unchanged.  Flash-Next (BF16) and dense 27B see **zero intercepts**.  A full-F32 model's FFN
+GEMMs (`m` ≫ 256) still reach hipBLASLt — recorded as an accepted limitation.  P3(i) BF16 untouched.
+Promotion would need default-on with `GGML_CUDA_MMF32=0` as the kill switch, an `ENVIRONMENT.md` entry, a block
+note in `patches/README.md`, the prefill base re-recorded on this arm (§5b) and the corpus shipped under
+`prompts/`.  Maintainer decision, not taken.
+
 ## 261021.009 (docs) -- hipBLASLt-bypass promotion decisions: bases are arm-scoped, solution indices are a per-ROCm-release table
 
 **Docs only: no patch, no `release.json` change, no tree change.**  Records the maintainer's answers to the

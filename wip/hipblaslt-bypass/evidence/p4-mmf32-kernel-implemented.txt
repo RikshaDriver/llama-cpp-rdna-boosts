@@ -1,0 +1,129 @@
+# P4 (arm C / P3(ii)) -- our own F32 SIMT GEMM for the hipBLASLt shapes: implemented, deterministic, +4.2 %
+
+gfx1201 soar, ROCm 10.1.0, **r103 tree** (`release.json` tip `283b8b8ac`, tree `7b45c000…`), one GPU job at
+a time, fresh process per sample, 35B-A3B Q4_K_M unless stated.  Prototype (NOT delivery):
+`tools/experiments/mmf32-splitk-WIP.patch` — `ggml/src/ggml-cuda/mmf32.cu` + `mmf32.cuh` + a 12-line hook in
+`ggml_cuda_mul_mat_cublas_impl`'s F32 branch.  Env `GGML_CUDA_MMF32=1` enables (default OFF: WIP),
+`GGML_CUDA_MMF32_LOG=1` prints the resolved plan.
+
+> A new `.cu` is picked up by `ggml-hip/CMakeLists.txt`'s `file(GLOB …)`, which is evaluated at **configure**
+> time: after applying the patch you must re-run the configure (e.g. `~/bin/build-llama-rocm`), not just
+> `cmake --build`, or the symbol is missing at load (`undefined symbol: ggml_cuda_mmf32_supported`).
+
+## 1. What it is
+
+RDNA has no F32 MMA form (`amd_mfma_available` is CDNA-only, `amd_wmma_available` is f16/bf16), so the F32
+skinny GEMMs — the GDN `ssm_alpha`/`ssm_beta` projections and the MoE routers — can only leave rocBLAS via a
+SIMT kernel.  Ours: a 32-output-row block tile, a 4×8 thread sub-tile, `BK=32`, `BN=256` for `m <= 64` and
+`BN=64` above it, and the k range split across `blockIdx.z` into `ks` contiguous chunks (target ~256 blocks,
+capped at 16, never a chunk shorter than one `BK` block).  Each chunk accumulates its contiguous k range
+sequentially and the chunks are summed **in increasing z**, so the whole GEMM is a fixed reduction tree — no
+atomics, no data-dependent scheduling, deterministic by construction.
+
+Measured per-launch (isolated, `tools/experiments/mmf32-standalone/bench3.cpp`), `32×512×2048`:
+
+| variant | ms | TFLOP/s |
+|---|---:|---:|
+| no k-split (`ks=1`) | 0.266 | 0.25 |
+| `BN=128`, `ks=8` | 0.099 | 0.68 |
+| **`BN=256`, `ks=16` (shipped pick)** | **0.032** | **2.07** |
+| best hipBLASLt class (probe, `evidence/p2-arm-g-algo-classes.txt`) | 0.046 | 1.46 |
+
+The k-split is the whole win (5-8x): without it the grid is 8 blocks and the kernel is LDS/occupancy bound.
+
+## 2. Correctness
+
+* **Standalone oracle** (`mmf32-standalone/test2.cpp`, kernel compiled straight out of `mmf32.cu`, compared
+  with a double-precision reference): **16/16 shapes, NMSE ~1e-13** (F32 rounding).  Covered: `k = 2051`
+  (not a multiple of `BK` or of the chunk), odd `m`/`ldc` (`m=31 ld=31`, `m=33 ld=33`, `m=255`), `n < m`
+  (`n=17`, `n=44`), `n > m` (`n=8192`), `m=1`, `m=256`, `k=300/512/1000/2048/2816`.
+* **`test-backend-ops -o MUL_MAT`: 2444/2444** with the kernel enabled.  Two cases are intercepted; the r103
+  instrument (`LLAMA_TEST_OP_NMSE=1 LLAMA_TEST_SEED=1`) makes them comparable element by element, against the
+  **CPU reference** (threshold 5e-4):
+
+  | case | rocBLAS path | our kernel |
+  |---|---:|---:|
+  | `m=31 n=509 k=2051` | 6.97e-13 | **6.11e-14** |
+  | `m=32 n=509 k=2112` | 6.91e-13 | **6.14e-14** |
+  | a case the kernel does not take | 3.56e-08 | 3.56e-08 (identical) |
+
+  i.e. both paths are at F32 rounding and ours is ~11x closer to the reference; nothing is approximated.
+* **Gemma4-26B-A4B** (the router `m=128 n=256 k=2816`, `ks=16`): PPL 1209.8479 (default) vs 1209.8800 (kernel).
+
+## 3. Determinism
+
+| arm | instrument | result |
+|---|---|---|
+| 1 GPU | `llama-perplexity -c 512 --chunks 1`, logits class | **1 class, 12/12** (`d598fa841cff`) |
+| 1 GPU | `--chunks 8`, dump sha256 | **4/4 byte-identical** (`1e96b6704676`) |
+| 2 GPU `-sm tensor` | `--chunks 1`, logits class | **1 class, 6/6** (`e5179311f6d2`) |
+| default arm, same config | `--chunks 8`, dump sha256 | 4/4 identical too (`9a3d64807a8d`) — on r103 this config did not flip; record it, do not read it as a win |
+
+**The self-KLD control is not an exact-zero instrument, and that is a property of the tool, not the kernel.**
+A run compared against a base recorded by *the same arm* reads `mean KLD -0.000000` but **same-top-p
+99.951 %** (RMS Δp 0.001 %), even though the dumps of both runs are byte-identical.  Cause, from
+`tools/perplexity/perplexity.cpp`: the base file stores **uint16-quantized log-probabilities** with
+`scale = (max_logit - min_logit)/65535` over a ≤16-nat window, i.e. a quantisation **step ≈ 2.4e-4 nats**;
+the candidate's top-1 comes from exact F32 logits while the base's comes from the quantised values, so a
+position whose top-2 gap is below one step can be scored as a disagreement.  The stock arm shows the same
+RMS Δp floor (0.001 %) and happens to have no such near-tie in this run (hence 100.000 %).  **The determinism
+criterion is therefore the dump hash (byte-identical), not the self-KLD top-p.**
+
+## 4. Throughput (r103, 35B-A3B, 1 GPU, `-p 512,2048 -n 128 -r 3 -fa 1 -ub 512 -b 2048`, 3 interleaved visits)
+
+| arm | pp512 | pp2048 | tg128 |
+|---|---|---|---|
+| base (hipBLASLt default) | 4901.5 / 4829.9 / 4853.9 | 4840.1 / 4817.1 / 4797.8 | 108.16 / 107.96 / 107.95 |
+| **our kernel** | **5115.1 / 5058.7 / 5029.5** | **5047.1 / 5002.3 / 4989.9** | 107.91 / 107.90 / 107.93 |
+| `ROCBLAS_USE_HIPBLASLT=0` | 4909.8 / 4883.2 / 4876.8 | 4844.2 / 4815.8 / 4800.4 | 107.85 / 107.99 / 107.83 |
+
+Means: **pp512 +4.2 %** (5068 vs 4862), **pp2048 +4.1 %** (5013 vs 4818), tg128 −0.1 % (flat).  Against the
+existing determinism control (`=0`, 4890 / 4820) the kernel is **+3.6 % prefill** — it buys determinism *and*
+speed, because the heuristic's bit-class is the slow one (arm G measured the same thing at +5.2 %/+4.8 % with
+a hand-pinned solution; this is within ~1 % of that and needs no hipBLASLt, no solution index and no
+per-runtime table).
+
+## 5. Purity (r103 `scripts/gate-prefill-logits.sh --family-switch`, base = the default arm)
+
+Candidate = `--candidate-env "GGML_CUDA_MMF32=1"`; the control is the r103 mode's on-the-spot same-kernel
+reordering (`-ub 512` vs `-ub 256`), which is the floor a reordering costs *at that point*.
+
+| point | base PPL | candidate | same-kernel control | `ROCBLAS_USE_HIPBLASLT=0` |
+|---|---:|---|---|---|
+| wikitext, `-c 512 --chunks 40` | 5.8194 | **0.005787 / 96.480 %** | 0.006017 / 96.588 % | 0.005969 / 96.667 % |
+| in-domain, `-c 2048 --chunks 7` | **1.4345** | **0.014646 / 98.045 %** | 0.018100 / 97.808 % | — |
+
+* At both points the candidate is **closer to the default than the `=0` control and than a benign ubatch
+  change on KLD**; at the confident point it is no worse on **both** metrics, so
+  `--allow-control-pass` gives **PASS** (the r103 §46 calibration).  Without the opt-in both FAIL the absolute
+  limits — and so do the control and the `=0` arm, i.e. the point, not the switch, is what the absolute limit
+  is measuring (the same conclusion r103 reached for the FA family switch: at a 607-PPL point a benign ubatch
+  change measures 0.105).
+* Interpretation: this is an **exact F32 GEMM in a different summation order** — no quantisation, no
+  approximation — so its divergence is the family-switch magnitude by construction.  Shipping it does not add
+  error relative to what testers already do (`=0`); it removes the *per-start* variation on top.
+
+**The in-domain point** is a new corpus, `tools/kld-corpus-35b-in-domain.txt` (92 892 B, sha256
+`0818e79e012ed7e47b5d047120aa71d84d06048beb3e58921e6b9de77e5f2596`): the model's own greedy answers
+(`-n 4500 --temp 0 --seed 42 --reasoning off --ignore-eos`) to six technical prompts, wrapped in the Qwen
+chat template — the same recipe as r103's `prompts/fa-family-switch-gemma4-26B-A4B.txt`, which is what took
+the base PPL from 5.82 to 1.43 and made the point decidable.
+
+## 6. Coverage and limits
+
+* F32 weights only, single matrix (`ne12 == ne13 == 1`), contiguous layouts (`s01 == s11 == k`,
+  `dst->nb[0] == 4`), and `1 <= m <= 256`, `17 <= n <= 65536`, `256 <= k <= 8192`.  Outside that window the
+  rocBLAS call is unchanged, so **nothing that works today changes behaviour**.
+* **Flash-Next (BF16, 2790 hipBLASLt dispatches) and dense Qwen3.8-27B**: zero intercepts (not F32 / no
+  qualifying shape) — the Flash-Next +51 % hipBLASLt prefill advantage is untouched, and so is its BF16 lottery
+  (P3(i)).
+* A full-F32 model's FFN GEMMs (`m` ≫ 256) still reach hipBLASLt: the kernel would need a different tile to be
+  competitive there; **recorded as an accepted limitation**, not a silent gap.
+* The per-call `ks*n*ldc` temp comes from the context pool (16 MB at the largest case measured).
+
+## 7. What promotion would need
+
+Default-on with `GGML_CUDA_MMF32=0` as the kill switch (default-on policy), an `ENVIRONMENT.md` entry, a block
+note in `patches/README.md` (the shape window + the F32-only scope + the accepted limitation in §6), the
+prefill-logit base re-recorded on this arm (§5b — this kernel *is* the new baseline for 35B-A3B), and the
+in-domain corpus shipped under `prompts/` if it is to be the gate point.  Nothing here is in `patches/`.
