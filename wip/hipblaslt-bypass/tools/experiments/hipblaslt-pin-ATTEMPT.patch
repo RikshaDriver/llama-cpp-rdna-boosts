@@ -1,0 +1,255 @@
+diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
+index ad18f63ab..406560ba6 100644
+--- a/ggml/src/ggml-cuda/ggml-cuda.cu
++++ b/ggml/src/ggml-cuda/ggml-cuda.cu
+@@ -108,6 +108,14 @@
+ #include "ggml-cuda-try-fuse.cuh"
+ #include "ggml-cuda-vmm.h"
+ #include "ggml-cuda-moe-cache-hooks.cuh"
++
++#if defined(GGML_USE_HIP) && defined(GGML_HIP_HIPBLASLT_PIN)
++// wip/hipblaslt-bypass (arm G) -- EXPERIMENT, not a delivery change.  See
++// wip/hipblaslt-bypass/README.md §2 arm G: call hipBLASLt ourselves with ONE pinned solution
++// instead of letting rocBLAS pick per process start.
++#include <hipblaslt/hipblaslt.h>
++#include <hipblaslt/hipblaslt-ext.hpp>
++#endif
+ #include "ggml-cuda-arena.cuh"
+ 
+ static_assert(sizeof(half) == sizeof(ggml_fp16_t), "wrong fp16 size");
+@@ -3155,6 +3163,201 @@ struct cuda_gc_timer {
+ 
+ // GGML_CUDA_BF16_SRC1_CACHE=0 disables the per-graph BF16 src1 reuse (bf16_src1_cache in common.cuh).
+ 
++#if defined(GGML_USE_HIP) && defined(GGML_HIP_HIPBLASLT_PIN)
++// ---------------------------------------------------------------------------------------------
++// wip/hipblaslt-bypass (arm G) -- EXPERIMENT, NOT a delivery change.
++//
++// rocBLAS sends an untuned prefill GEMM to hipBLASLt, whose solution for a shape is picked from a
++// heap-ordered container, so a fresh process can land on a different TensileLite spine (different
++// bits, different logits class: GREEDY-PURITY.md §44 / TODO #75).  This calls hipBLASLt directly
++// with ONE validated solution per (dtype, m, n, k, ldc), which fixes the arithmetic by
++// construction.  GGML_CUDA_HIPBLASLT_PIN=1 enables it (default OFF: WIP stays env-gated OFF);
++// ROCBLAS_USE_HIPBLASLT is not consulted on this path, and a shape it refuses still goes to
++// rocBLAS.  The chosen index is logged with GGML_CUDA_HIPBLASLT_PIN_LOG=1.
++namespace {
++
++struct hbl_pin_plan {
++    hipblasLtMatmulDesc_t   op  = nullptr;
++    hipblasLtMatrixLayout_t A   = nullptr;
++    hipblasLtMatrixLayout_t B   = nullptr;
++    hipblasLtMatrixLayout_t C   = nullptr;
++    hipblasLtMatmulAlgo_t   alg{};
++    size_t                  ws  = 0;
++    int                     idx = -1;   // < 0: refused for this shape (fall back to rocBLAS)
++};
++
++static bool hbl_pin_enabled() {
++    static const bool on = [] {
++        const char * e = getenv("GGML_CUDA_HIPBLASLT_PIN");
++        return e != nullptr && atoi(e) != 0;
++    }();
++    return on;
++}
++
++static bool hbl_pin_log_on() {
++    static const bool on = getenv("GGML_CUDA_HIPBLASLT_PIN_LOG") != nullptr;
++    return on;
++}
++
++// dtype: 0 = F32 weights, 1 = BF16 weights (F32 in/out stays F32).
++// The probe (wip/hipblaslt-bypass/tools/experiments/hipblaslt-algo-classes.cpp) shows the fast
++// solution is not one index for every shape: on ROCm 10.1.0/gfx1201 solution 140219 wins on the
++// skinny m<=64 shapes (the GDN ssm_alpha/ssm_beta GEMMs) and 140232 wins on the wider ones (the
++// MoE routers), so the validated pick is keyed on the row count.  Both are env-overridable.
++static int hbl_pin_wanted_index(int dtype, int m) {
++    static const int idx_small = [] {
++        const char * e = getenv("GGML_CUDA_HIPBLASLT_PIN_INDEX");
++        return e != nullptr ? atoi(e) : 140219;
++    }();
++    static const int idx_large = [] {
++        const char * e = getenv("GGML_CUDA_HIPBLASLT_PIN_INDEX_LARGE");
++        return e != nullptr ? atoi(e) : 140232;
++    }();
++    static const int idx_bf16 = [] {
++        const char * e = getenv("GGML_CUDA_HIPBLASLT_PIN_INDEX_BF16");
++        return e != nullptr ? atoi(e) : -1;
++    }();
++    if (dtype == 1) {
++        return idx_bf16;
++    }
++    return m <= 64 ? idx_small : idx_large;
++}
++
++// hipBLASLt handles are bound to a device: one per CUDA device index (created on first use).
++static hipblasLtHandle_t hbl_pin_handle(int device) {
++    static std::map<int, hipblasLtHandle_t> handles;
++    auto it = handles.find(device);
++    if (it != handles.end()) {
++        return it->second;
++    }
++    int prev = -1;
++    cudaGetDevice(&prev);
++    cudaSetDevice(device);
++    hipblasLtHandle_t h = nullptr;
++    if (hipblasLtCreate(&h) != HIPBLAS_STATUS_SUCCESS) {
++        h = nullptr;
++    }
++    if (prev >= 0) {
++        cudaSetDevice(prev);
++    }
++    handles.emplace(device, h);
++    return h;
++}
++
++static std::mutex g_hbl_pin_mtx;
++// key: device, dtype, m, n, k, ldc
++static std::map<std::array<int, 6>, hbl_pin_plan> g_hbl_pin_plans;
++
++// Resolve (and cache) the plan for one shape.  Returns nullptr when the shape cannot be pinned.
++static hbl_pin_plan * hbl_pin_plan_for(int device, int dtype, int m, int n, int k, int ldc) {
++    const std::array<int, 6> key = { device, dtype, m, n, k, ldc };
++    auto it = g_hbl_pin_plans.find(key);
++    if (it != g_hbl_pin_plans.end()) {
++        return it->second.idx >= 0 ? &it->second : nullptr;
++    }
++
++    hbl_pin_plan p;
++    hipblasLtHandle_t handle = hbl_pin_handle(device);
++    const hipDataType dt = dtype == 1 ? HIP_R_16BF : HIP_R_32F;
++
++    bool ok = handle != nullptr;
++    if (ok) {
++        ok = hipblasLtMatmulDescCreate(&p.op, HIPBLAS_COMPUTE_32F, HIP_R_32F) == HIPBLAS_STATUS_SUCCESS;
++    }
++    if (ok) {
++        const hipblasOperation_t ta = HIPBLAS_OP_T;
++        const hipblasOperation_t tb = HIPBLAS_OP_N;
++        ok = hipblasLtMatmulDescSetAttribute(p.op, HIPBLASLT_MATMUL_DESC_TRANSA, &ta, sizeof(ta)) == HIPBLAS_STATUS_SUCCESS &&
++             hipblasLtMatmulDescSetAttribute(p.op, HIPBLASLT_MATMUL_DESC_TRANSB, &tb, sizeof(tb)) == HIPBLAS_STATUS_SUCCESS &&
++             hipblasLtMatrixLayoutCreate(&p.A, dt,       k, m, k)   == HIPBLAS_STATUS_SUCCESS &&
++             hipblasLtMatrixLayoutCreate(&p.B, dt,       k, n, k)   == HIPBLAS_STATUS_SUCCESS &&
++             hipblasLtMatrixLayoutCreate(&p.C, HIP_R_32F, m, n, ldc) == HIPBLAS_STATUS_SUCCESS;
++    }
++
++    std::vector<hipblasLtMatmulHeuristicResult_t> algos;
++    if (ok) {
++        ok = hipblaslt_ext::getAllAlgos(handle, hipblaslt_ext::GemmType::HIPBLASLT_GEMM,
++                                        HIPBLAS_OP_T, HIPBLAS_OP_N, dt, dt, HIP_R_32F, HIP_R_32F,
++                                        HIPBLAS_COMPUTE_32F, algos) == HIPBLAS_STATUS_SUCCESS && !algos.empty();
++    }
++
++    // A validated index wins; otherwise take the smallest advertised index (deterministic, but the
++    // campaign's measurements show the smallest index is in the SLOWEST bit-class for these shapes).
++    const int want = hbl_pin_wanted_index(dtype, m);
++    hipblasLtMatmulHeuristicResult_t * chosen = nullptr;
++    int best = -1;
++    for (auto & r : algos) {
++        const int idx = hipblaslt_ext::getIndexFromAlgo(r.algo);
++        if (want >= 0 && idx == want) {
++            chosen = &r;
++            break;
++        }
++        if (best < 0 || idx < best) {
++            best = idx;
++            chosen = &r;
++        }
++    }
++
++    if (ok && chosen != nullptr) {
++        p.alg = chosen->algo;
++        p.ws  = chosen->workspaceSize;
++        p.idx = hipblaslt_ext::getIndexFromAlgo(chosen->algo);
++    }
++
++    if (hbl_pin_log_on()) {
++        GGML_LOG_WARN("%s: hipBLASLt pin dev=%d %s m=%d n=%d k=%d ld=%d -> idx=%d ws=%zu (algos=%zu wanted=%d)\n",
++                      __func__, device, dtype == 1 ? "bf16" : "f32", m, n, k, ldc, p.idx, p.ws, algos.size(), want);
++    }
++
++    auto ins = g_hbl_pin_plans.emplace(key, p);
++    return ins.first->second.idx >= 0 ? &ins.first->second : nullptr;
++}
++
++// Returns true when the GEMM was issued through the pinned hipBLASLt solution.
++static bool hbl_pin_matmul(ggml_backend_cuda_context & ctx, int dtype, int64_t m_, int64_t n_, int64_t k_,
++                           int64_t ldc_, const void * a, const void * b, void * d) {
++    if (!hbl_pin_enabled()) {
++        return false;
++    }
++    const int m = (int) m_, n = (int) n_, k = (int) k_, ldc = (int) ldc_;
++    // The shapes this campaign targets: a handful of output rows (the GDN ssm_alpha/ssm_beta
++    // projections and the MoE router) against a prefill-width batch.
++    if (m <= 0 || m > 256 || n < 17 || k < 256) {
++        return false;
++    }
++
++    hbl_pin_plan * p = nullptr;
++    {
++        std::lock_guard<std::mutex> lock(g_hbl_pin_mtx);
++        p = hbl_pin_plan_for(ctx.device, dtype, m, n, k, ldc);
++    }
++    if (p == nullptr) {
++        return false;
++    }
++
++    ggml_cuda_pool_alloc<char> ws(ctx.pool());
++    char * ws_ptr = p->ws > 0 ? ws.alloc(p->ws) : nullptr;
++
++    const float alpha = 1.0f;
++    const float beta  = 0.0f;
++    const hipblasStatus_t st = hipblasLtMatmul(hbl_pin_handle(ctx.device), p->op, &alpha,
++                                               a, p->A, b, p->B, &beta, d, p->C, d, p->C,
++                                               &p->alg, ws_ptr, p->ws, ctx.stream());
++    if (st != HIPBLAS_STATUS_SUCCESS) {
++        static std::once_flag warn_flag;
++        std::call_once(warn_flag, [st]() {
++            GGML_LOG_WARN("%s: hipBLASLtMatmul failed (%d), falling back to rocBLAS\n", __func__, (int) st);
++        });
++        std::lock_guard<std::mutex> lock(g_hbl_pin_mtx);
++        p->idx = -1;   // refuse this shape from now on
++        return false;
++    }
++    return true;
++}
++
++} // namespace
++#endif // defined(GGML_USE_HIP) && defined(GGML_HIP_HIPBLASLT_PIN)
++
+ template<ggml_type compute_type>
+ 
+ static void ggml_cuda_mul_mat_cublas_impl(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
+@@ -3328,6 +3531,11 @@ static void ggml_cuda_mul_mat_cublas_impl(ggml_backend_cuda_context & ctx, const
+     // However, for some old NVIDIA and AMD GPUs the strided/Ex GEMM is much slower,
+     //     probably because the internal kernel selection logic is suboptimal.
+     if (compute_type == GGML_TYPE_F32 && ne12 == 1 && ne13 == 1) {
++#if defined(GGML_USE_HIP) && defined(GGML_HIP_HIPBLASLT_PIN)
++        if (hbl_pin_matmul(ctx, 0, ne01, ne11, ne10, ldc, src0_ptr, src1_ptr, dst_ptr)) {
++            // issued through the pinned hipBLASLt solution: same bits on every process start
++        } else
++#endif
+         CUBLAS_CHECK(
+             cublasSgemm(cublas_h, CUBLAS_OP_T, CUBLAS_OP_N,
+                     ne01, ne11, ne10,
+diff --git a/ggml/src/ggml-hip/CMakeLists.txt b/ggml/src/ggml-hip/CMakeLists.txt
+index 918ff4501..7389e0813 100644
+--- a/ggml/src/ggml-hip/CMakeLists.txt
++++ b/ggml/src/ggml-hip/CMakeLists.txt
+@@ -46,6 +46,8 @@ endif()
+ find_package(hip     REQUIRED)
+ find_package(hipblas REQUIRED)
+ find_package(rocblas REQUIRED)
++# wip/hipblaslt-bypass (arm G): optional direct hipBLASLt use (deterministic solution pin).
++find_package(hipblaslt QUIET)
+ 
+ if (GGML_HIP_RCCL)
+     find_package(rccl REQUIRED)
+@@ -168,3 +170,8 @@ if (GGML_HIP_RCCL)
+ endif()
+ 
+ target_link_libraries(ggml-hip PRIVATE ggml-base hip::host roc::rocblas roc::hipblas)
++
++if (hipblaslt_FOUND)
++    target_link_libraries(ggml-hip PRIVATE roc::hipblaslt)
++    target_compile_definitions(ggml-hip PRIVATE GGML_HIP_HIPBLASLT_PIN)
++endif()

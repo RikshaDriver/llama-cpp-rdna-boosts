@@ -72,6 +72,54 @@ point-sensitivity table), `MANIFESTS.md` (gate 3 + the block-05 verification row
 (blocks 05/10), `ENVIRONMENT.md` (the kill-switch note), `prompts/README.md` (+ the new corpus file),
 `wip/CAMPAIGNS.md` (closure note), `TODO.md` (#81 closed, #83 opened and closed).
 
+## 261021.009 (wip) -- `wip/hipblaslt-bypass` arm G: a deterministic hipBLASLt solution in our code is deterministic AND +5 % prefill
+
+**WIP only: no patch, no `release.json` change, no tree change** (the prototype lives in
+`wip/hipblaslt-bypass/tools/experiments/hipblaslt-pin-ATTEMPT.patch`, was applied to a working `~/llama.cpp`,
+measured, and reverted).  Record: `wip/hipblaslt-bypass/evidence/p3-arm-g-pin-implemented.txt`; campaign
+status in `wip/hipblaslt-bypass/README.md` §2 arm G.
+
+**What was built.**  `ggml_cuda_mul_mat_cublas_impl`'s F32 single-matrix branch (the `cublasSgemm` call that
+rocBLAS turns into the per-start hipBLASLt lottery) now offers the GEMM to `hipblasLtMatmul` with ONE solution
+picked deterministically from `hipblaslt_ext::getAllAlgos` — `m <= 64 -> 140219`, else `140232` on
+ROCm 10.1.0/gfx1201 — cached per (device, dtype, m, n, k, ldc).  A refused shape (index not advertised, launch
+error) falls through to the rocBLAS call untouched; the pin is behind `GGML_CUDA_HIPBLASLT_PIN=1` (default OFF,
+WIP rule) and is gated on `GGML_USE_HIP` + an optional `find_package(hipblaslt)`, so CUDA/MUSA/SYCL/Vulkan/CPU
+are untouched.  It does **not** remove hipBLASLt and covers **F32 only**.
+
+**Determinism (the #75 instrument).**  35B-A3B Q4_K_M, `llama-perplexity -c 512 --chunks 1`, logits-dump hash,
+fresh process per sample, 1 GPU: base **2 classes in 10 starts** (`3629d90733a1` x5, `6d32945460bd` x5) ->
+pinned **1 class in 12/12** (`fc9f0af5d260`).  The control that makes this about the mechanism: pinning `140215`
+gives a different-but-stable class (`227ce92cb01c` x4) and pinning `140232` a third (`d83bc068d84b` x4).  2 GPU
+`-sm tensor`: pinned 8/8 one class (the base arm does not flip in that config — recorded, not claimed).
+Pinned-vs-pinned KLD is exactly 0.000000 / 100.000 %.
+
+**Throughput (3 interleaved `llama-bench` visits, `-p 512,2048 -n 128 -r 3 -fa 1 -ub 512 -b 2048`, 1 GPU).**
+35B-A3B: pp512 **5088 vs 4842 (+5.2 %)**, pp2048 **5026 vs 4796 (+4.8 %)**, tg128 flat (+0.03 %).  The pin also
+beats `ROCBLAS_USE_HIPBLASLT=0` (4882 pp512 / 4826 pp2048) by ~4.4 %, i.e. the current default loses to BOTH
+because the heuristic's bit-class is the slow one — this is a prefill win, not a purity trade.  Gemma4-26B-A4B is
+unchanged end-to-end (its router is one dispatch per run in that config, so a 3x kernel gain does not show).
+
+**Purity, and one finding that needs a decision.**  `scripts/gate-prefill-logits.sh --chunks 8` against a base
+recorded on the *current* default: dense Qwen3.8-27B Q8_0 **PASS** (0.000001 KLD / 100 % — the pin is
+unreachable there, zero intercepts).  35B-A3B **FAIL**: mean KLD **0.007279** / same-top-p 96.618 % — and the
+arm that only *disables* hipBLASLt lands at **0.007271** / 96.618 % from the same base, while pinned-vs-rocblas
+is 0.006757.  So the failure is the **lottery's class spread**, not the change: it is a kernel-family switch of
+the same magnitude as the defect, and it straddles the 0.005 limit.  Consequence: **a prefill base recorded on
+an unpinned build is not a valid comparison for a config that flips** — the base must be recorded on the arm
+being shipped.  That is a policy call for the maintainer, not taken here (no delivery change was made).
+
+**Not covered.**  BF16 (Flash-Next's 2790 dispatches keep both their **+51 %** hipBLASLt prefill advantage and
+their own lottery — the pin logs **zero** intercepts there, so nothing regressed); P3(i) BF16 column tiling and
+P3(ii) the F32 SIMT kernel are untouched.  Two things a delivery must add: the solution indices are
+**runtime-specific** (a validated pick per ROCm line + the already-working fallback) and the
+per-call plan lookup should become a per-context cache.  **On the other shipped runtime (ROCm 7.14.1) the
+fallback is what runs and it is neutral**: the 7.14 pool advertises only 4 solutions starting at `140723`, so
+neither validated index exists, the plan takes the smallest advertised index, and the result is bit-identical
+to the base (PPL 4.0116, class `227ce92cb01c` 5/5 both arms) with `pp512 +0.5 %` / `pp2048 -0.2 %` / decode
+flat — no win, no regression.  One bug kept for the record: hipBLASLt handles are **device-bound** — a
+process-wide handle aborts with `invalid device ordinal` under `-sm tensor`.
+
 ## 261021.006 (docs) -- `wip/hipblaslt-bypass`: P0 inventory + P1 VRAM answer; the driver is correctness; arm B refuted
 
 **Docs only: no patch, no `release.json` change, no tree change; `scripts/validate-set.sh` is unaffected.**

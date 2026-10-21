@@ -1,0 +1,147 @@
+# P3 (arm G) -- a deterministic hipBLASLt solution in OUR code: implemented, deterministic, and FASTER
+# gfx1201 soar, ROCm 10.1.0 (/opt/rocm-10.1.0-gfx120X), 35B-A3B Q4_K_M unless stated, one GPU job at a
+# time, fresh process per sample.  Prototype patch (NOT delivery):
+#   tools/experiments/hipblaslt-pin-ATTEMPT.patch   (ggml-cuda.cu +202, ggml-hip/CMakeLists.txt +7)
+# It is applied to a working ~/llama.cpp, measured, and reverted after the session (same discipline as
+# the arm-B attempt).
+#
+# WHAT IT DOES
+#   ggml_cuda_mul_mat_cublas_impl(), the F32 single-matrix branch that calls cublasSgemm (rocBLAS ->
+#   hipBLASLt), first tries a direct hipblasLtMatmul with ONE solution chosen from
+#   hipblaslt_ext::getAllAlgos by a validated index (modexpr: m <= 64 -> 140219, else -> 140232), cached
+#   per (device, dtype, m, n, k, ldc).  If the shape/plan is refused (no such index, or the launch
+#   returns an error) it falls through to the rocBLAS call exactly as before.  ROCm-only
+#   (GGML_HIP_HIPBLASLT_PIN, set by an optional find_package(hipblaslt) in ggml-hip/CMakeLists.txt);
+#   CUDA/MUSA/SYCL/Vulkan/CPU are untouched.  Env: GGML_CUDA_HIPBLASLT_PIN=1 (default OFF, WIP),
+#   GGML_CUDA_HIPBLASLT_PIN_INDEX[_LARGE|_BF16] to override a pick, GGML_CUDA_HIPBLASLT_PIN_LOG=1 to
+#   print the resolved plan.  It does NOT remove hipBLASLt and does not cover BF16 (so Flash-Next is
+#   untouched -- see "Non-interference").
+
+## 1. The solution pool per shape (tools/experiments/hipblaslt-algo-classes.cpp, this session)
+# Every solution, its bit-class (hash of D) and ms/launch (20 launches, one visit -- class structure
+# and order of magnitude, not a benchmark).  "heur" = what hipblasLtMatmulAlgoGetHeuristic picks.
+#
+# 35B-A3B GDN ssm_alpha/ssm_beta   m=32  n=512 k=2048 f32
+#   140219/140220/140221/140222  0.046 ms   <-- FASTEST class; our pick for m<=64
+#   140232                       0.050 ms
+#   140215..140218 (heur 140218) 0.128 - 0.229 ms   <-- the heuristic's class, 2.8-5x slower
+# 35B-A3B GDN (decode-adjacent width) m=32 n=44 k=2048 f32
+#   140219 0.039 | 140232 0.066 | heur 140218 0.155
+# 35B-A3B MoE router              m=256 n=512 k=2048 f32
+#   140232 0.055   <-- FASTEST; our pick for m>64
+#   140229/140231 0.130-0.140 | 140215..140218 (heur) 0.129-0.239 | 140219..140222 0.194-0.282
+# 35B-A3B MoE router (real width)  m=256 n=256 k=2048 f32
+#   140232 0.047 | heur 140218 0.127 | 140219 0.143
+# 35B-A3B MoE router (narrow)      m=256 n=44 k=2048 f32
+#   140219 0.042 | 140232 0.051 | heur 0.131
+# Gemma4-26B-A4B router            m=128 n=375 k=2816 f32   (the GREEDY-PURITY 44 call site)
+#   140232 0.066 | 140221 0.102 | 140219 0.147 | heur 140217/140218 0.174-0.289
+# Gemma4-26B-A4B router (n=256)    m=128 n=256 k=2816 f32
+#   140232 0.063 | 140219 0.100 | heur 0.170-0.245
+#
+# => one solution is NOT optimal for every shape: 140219 wins on the skinny m<=64 GEMMs and 140232 on the
+#    wider ones, which is why the prototype keys the pick on the row count.  Both are far faster than the
+#    heuristic's class on every shape measured, so the pin is a determinism fix AND a prefill win.
+
+## 2. Determinism -- llama-perplexity -c 512 --chunks 1, logits-dump hash, 1 GPU
+# base (no pin)                       10 starts -> 2 classes  3629d90733a1 x5, 6d32945460bd x5
+# pin 140219 on both shapes           12 starts -> 1 class    6d32945460bd x12
+# pin 140215 on both shapes            4 starts -> 1 class    227ce92cb01c x4   (a DIFFERENT class)
+# pin 140232 on both shapes            4 starts -> 1 class    d83bc068d84b x4   (a THIRD class)
+# final rule (m<=64:140219, m>64:140232) 12 starts -> 1 class fc9f0af5d260 x12
+#
+# The index-override arms are the control that makes this evidence about the MECHANISM and not luck: a
+# different pinned solution gives a different but equally stable logits class, i.e. the class is decided
+# exactly by the solution we hand hipBLASLt.
+#
+# 2 GPU -sm tensor (HIP_VISIBLE_DEVICES=0,1), same config:
+#   pin   8 starts -> 1 class  f1378ad243ba x8
+#   base  6 starts -> 1 class  9e225a2e30ff x6   (this config does not flip here -- no evidence either way,
+#                                                recorded so the difference from 1 GPU is not misread)
+#
+# (First attempt aborted at 2 GPU with "invalid device ordinal": the prototype used one process-wide
+#  hipBLASLt handle.  Handles are device-bound -> per-device handle + per-device plan cache.  Recording it
+#  because a delivery must not repeat it: under -sm tensor every device reaches this path.)
+
+## 3. Throughput -- llama-bench -p 512,2048 -n 128 -r 3 -fa 1 -ub 512 -b 2048 -ngl 99, 1 GPU, 3 visits
+# 35B-A3B Q4_K_M                       pp512            pp2048          tg128
+#   pin (140219 / 140232 rule) v1   5120.18 +- 82.5   5051.42 +- 5.8   107.91
+#   pin                        v2   5050.14 +-173.9   5011.50 +-10.9   107.91
+#   pin                        v3   5094.33 +-135.5   5013.57 +-15.5   107.88
+#   base (hipBLASLt default)   v1   4867.11 +- 91.7   4808.69 +-17.9   107.91
+#   base                       v2   4840.92 +-106.4   4803.14 +-14.5   107.87
+#   base                       v3   4816.53 +- 95.7   4776.49 +- 7.1   107.80
+#   => +5.2 % pp512 (5088 vs 4842), +4.8 % pp2048 (5026 vs 4796), decode flat (+0.03 %).
+#
+# Single-index arms (2 visits each, same command): 140219-only 5111.8/5079.7 pp512, 5071.5/5026.4 pp2048;
+# 140232-only 5021.9/4972.9 pp512, 4983.2/4945.3 pp2048; ROCBLAS_USE_HIPBLASLT=0 4886.7/4876.3 pp512,
+# 4840.4/4811.7 pp2048.  So the "disable hipBLASLt" arm is ~+0.8 % over the default, and the pin is ~+4.4 %
+# over the disable arm: the current path loses to BOTH because the heuristic lands in the slow class.
+#
+# Gemma4-26B-A4B QAT UD-Q4_K_XL, 1 GPU (2 visits, same command):
+#   base 4835.9/4551.8/120.4   pin 4810.2/4554.8/120.4   rocblas-only 4818.7/4547.3/120.4
+#   => no measurable change: in this config the router GEMM is ONE hipBLASLt dispatch per run (the rest of
+#      the widths take mmvf/MMQ), so its 3x kernel gain does not move an end-to-end number.  Gemma4 is a
+#      correctness case, not a performance case.
+
+## 4. Prefill-logit purity (issue #113 calibration) -- 35B-A3B, -c 512 --chunks 8, 1 GPU
+# Each cell is `llama-perplexity --kl-divergence-base <base> --kl-divergence` against a logits base
+# captured from a fresh process:
+#   pinned       vs default(base)    mean KLD 0.007279 +-0.000470   same-top-p 96.618 %
+#   rocblas-only vs default(base)    mean KLD 0.007271 +-0.000701   same-top-p 96.618 %   <-- same distance
+#   pinned       vs rocblas-only     mean KLD 0.006757 +-0.000416   same-top-p 97.108 %
+#   pinned       vs pinned           mean KLD 0.000000            same-top-p 100.000 %  (determinism control)
+#   default      vs default(base)    mean KLD -0.000000           same-top-p 100.000 %  (that pair agreed)
+#
+# scripts/gate-prefill-logits.sh (base arm = GGML_CUDA_HIPBLASLT_PIN=0, candidate = pinned), --chunks 8:
+#   dense Qwen3.8-27B Q8_0 : mean KLD 0.000001 / same-top-p 100.000 %  -> PASS (the pin is unreachable: 0
+#                            intercepts, no F32 shape qualifies -- this is the "no collateral" check)
+#   35B-A3B Q4_K_M         : mean KLD 0.007279 / same-top-p 96.618 %   -> FAIL (limits 0.005 / 98 %)
+#
+# The 35B-A3B FAIL is the LOTTERY, not the change: the arm that disables hipBLASLt (currently the
+# documented determinism control) is the same distance from the same base (0.007271 vs 0.007279), and the
+# pinned-vs-pinned control is exactly 0.  The tag is therefore: **this is a kernel-FAMILY switch** (as
+# expected -- it changes the GEMM summation order), with a magnitude that a recorded base on the current
+# lottery can no longer resolve: the class spread (0.0068-0.0073 here, 0.0035 in the #75 record) straddles
+# the 0.005 gate limit, so any base recorded on an unpinned build can fail this gate by accident.  A
+# delivery that ships the pin must record the prefill base ON the pinned path (then the arm is stable and
+# the gate measures real changes again) -- that is a maintainer decision, not taken here.
+
+## 5. Non-interference
+# * Flash-Next GSQ-IQ3_XXS (BF16 only, 2790 hipBLASLt dispatches): the pin is F32-only, and the pin log shows
+#   ZERO intercepts on a 2 GPU -sm tensor -ncmoe 48 run -> the +51 % prefill advantage hipBLASLt gives that
+#   model is untouched, and so is its per-start variability (P3(i) is still the BF16 job).
+# * Dense Qwen3.8-27B Q8_0: zero intercepts (no F32 GEMM with m <= 256, n >= 17, k >= 256).
+# * Same-seed greedy text (35B-A3B, temp 0, seed 42, --reasoning off): base / pinned / rocblas-only produce
+#   the IDENTICAL text ("The capital of France is **Paris**.").  Text is a weak instrument (see
+#   FINDINGS-2026-10-21-todo-75.md §4) -- the logits-level rows above are the evidence.
+#
+# * ROCBLAS_USE_HIPBLASLT is not consulted on the pinned path: with the pin on, `ROCBLAS_USE_HIPBLASLT=0`
+#   no longer disables hipBLASLt for these shapes.  The kill switch is GGML_CUDA_HIPBLASLT_PIN=0 (which
+#   restores today's behaviour exactly).
+
+## 6. Open items a delivery has to clear
+# 1. PORTABILITY OF THE INDEX.  140219/140232 are hipBLASLt solution indices of THIS runtime (10.1.0); the
+#    pool is arch- and build-specific (see §7 for what 7.14.1 does).  A delivery needs a validated pick per
+#    ROCm line it ships, and a documented fallback -- the prototype's rules already degrade safely: an index
+#    that is not advertised -> smallest advertised index (still deterministic); a launch that errors ->
+#    refuse the shape for the rest of the process and use rocBLAS (today's behaviour).
+# 2. PER-CALL COST.  One std::map lookup + mutex per pinned GEMM after the first call.  Negligible for the
+#    ~60 calls/run measured here; it should be a per-context direct cache before it meets a model with
+#    hundreds of F32 GEMMs.
+# 3. BF16 (P3(i)).  Out of scope here: Flash-Next keeps its +51 % AND its lottery.
+# 4. The prefill-logit base policy (see §4).
+
+## 7. ROCm 7.14.1 (/opt/rocm-7.14.1-gfx120X) -- the fallback is what runs, and it is neutral
+# 35B-A3B Q4_K_M, llama-perplexity -c 512 --chunks 1, 1 GPU, same source tree (build-rocm-714):
+#   * The 7.14 pool advertises only FOUR solutions and starts at index 140723, so neither 140219 nor 140232
+#     exists -> the plan falls back to the smallest advertised index (140723) for BOTH shapes.  Deterministic
+#     by the same rule, so the mechanism still holds.
+#   * Result is NOT garbage and is bit-identical to the base arm here: base PPL 4.0116 class 227ce92cb01c
+#     x5, pin PPL 4.0116 class 227ce92cb01c x5.  (The 7.14 default does not flip in this config either --
+#     consistent with the #75 record that the lottery reproduces on 10.x, not 7.14.)
+#   * llama-bench (2 visits): base pp512 4808.8/4768.3, pin 4832.6/4783.1 (within noise); pp2048 base
+#     4790.0/4764.6, pin 4774.4/4754.6 (-0.2 %); tg128 flat.  So on 7.14 the pin is a no-op -- no win, no
+#     regression -- which is the safe direction for a fallback that ships unvalidated per runtime.
+#   => A delivery still owes an explicit, validated pick per ROCm line (7.14's pool is small enough that this
+#      is cheap), but shipping the 10.1 rule does not break 7.14.
