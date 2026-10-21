@@ -1012,6 +1012,11 @@ per arm.)**
 | in-domain text `-c 512 --chunks 30` | 13.7 | 0.036654 / 93.660 % | 0.022562 / 96.000 % | 0.011303 / 97.451 % |
 | in-domain text `-c 2048 --chunks 10` (`prompts/fa-family-switch-gemma4-26B-A4B.txt`) | **2.65** | 0.013962 / 97.221 % | 0.005994 / 98.324 % | **0.001778 / 98.967 %** |
 
+Per switch at that point (`--candidate-env`): head-512 marginal **0.001778 / 98.967 % → PASS**; head-256
+alone vs fully tile **0.005994 / 98.324 % → FAIL** (20 % over the KLD limit, top-p passing, and 2.3x better
+than the control); the whole set vs fully tile 0.006150 / 98.227 % → FAIL.  So the remaining
+delivery-relevant residual is the **r5 head-256 rows**, not the head-512 ones.
+
 So the head-512 rows **pass the absolute limits at a calibrated point** (0.00178 / 98.967 %, 2.8x inside
 the KLD limit and 8x better than the same-kernel control), and at every point they are more faithful than
 the head-256 rows shipped default-on since r5 — which are the bigger *total* contributor only because

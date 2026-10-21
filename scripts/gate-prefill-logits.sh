@@ -77,6 +77,19 @@
 #                                    whose base PPL is above this)
 #   --control-ub N    CONTROL_UB     default 256     (ubatch of the control base;
 #                                    must differ from the default ubatch)
+#   --candidate-env S CAND_ENV       env for the candidate arm (default: none, i.e. the
+#                                    build's own default).  Use it to judge one switch of
+#                                    a set, e.g. --candidate-env
+#                                    "GGML_CUDA_FA_WMMA_256=0" for "both off",
+#                                    "GGML_CUDA_FA_RDNA3_WMMA_512=0" for the head-256 rows
+#                                    alone against a fully-tile base.
+#   --allow-control-pass  ALLOW_CONTROL_PASS default 0.  By default the ABSOLUTE limits are
+#                                    the criterion and the control is evidence; with this
+#                                    flag a candidate that is no worse than the control
+#                                    passes even if the limits are missed (the §46
+#                                    calibration, for a switch that provably cannot meet
+#                                    them).  Off by default so a bad change cannot pass
+#                                    just because the point is insensitive.
 #   --device N        DEVICE         HIP_VISIBLE_DEVICES (default 0; single card)
 #   --timeout N       TIMEOUT        per-run seconds (default 1800)
 #   --keep            KEEP=1         keep the per-run logs
@@ -107,6 +120,8 @@ MIN_TOPP="${MIN_TOPP:-98.0}"
 FAMILY_SWITCH="${FAMILY_SWITCH:-0}"
 FAMILY_MAX_PPL="${FAMILY_MAX_PPL:-10}"
 CONTROL_UB="${CONTROL_UB:-256}"
+CAND_ENV="${CAND_ENV:-}"
+ALLOW_CONTROL_PASS="${ALLOW_CONTROL_PASS:-0}"
 DEVICE="${DEVICE:-0}"
 TIMEOUT="${TIMEOUT:-1800}"
 KEEP="${KEEP:-0}"
@@ -118,7 +133,7 @@ BASE="${BASE:-}"
 MODEL="${MODEL:-}"
 MODEL_GIVEN=0
 
-usage() { sed -n '2,85p' "$0"; exit "${1:-0}"; }
+usage() { sed -n '2,101p' "$0"; exit "${1:-0}"; }
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -138,6 +153,8 @@ while [ $# -gt 0 ]; do
         --family-switch)        FAMILY_SWITCH=1; shift ;;
         --family-max-ppl)       FAMILY_MAX_PPL="$2"; shift 2 ;;
         --control-ub)           CONTROL_UB="$2"; shift 2 ;;
+        --candidate-env)        CAND_ENV="$2"; shift 2 ;;
+        --allow-control-pass)   ALLOW_CONTROL_PASS=1; shift ;;
         --device)               DEVICE="$2"; shift 2 ;;
         --timeout)              TIMEOUT="$2"; shift 2 ;;
         --keep)                 KEEP=1; shift ;;
@@ -391,8 +408,8 @@ fi
 # ---------------------------------------------------------------------------
 cmp_log="$LOGDIR/candidate-compare.log"
 echo
-echo "==> comparing candidate (default${RECORD_ENV:+ vs base arm '$RECORD_ENV'})"
-if ! run_ppl "" "$cmp_log" --kl-divergence-base "$BASE" --kl-divergence; then
+echo "==> comparing candidate (${CAND_ENV:-default}${RECORD_ENV:+ vs base arm '$RECORD_ENV'})"
+if ! run_ppl "$CAND_ENV" "$cmp_log" --kl-divergence-base "$BASE" --kl-divergence; then
     echo "--- tail of $cmp_log ---" >&2; tail -20 "$cmp_log" >&2
     fail "candidate run failed (see $cmp_log)"
 fi
@@ -449,11 +466,18 @@ if [ "$FAMILY_SWITCH" -eq 1 ]; then
     [ -n "$C_KLD" ] && [ -n "$C_TOPP" ] || fail "could not parse the control result"
     echo "    control (same-kernel reordering): mean KLD = $C_KLD   same top p = $C_TOPP %"
     if [ "$rc" -ne 0 ]; then
-        # Absolute limits missed: the switch may still be no worse than the control.
+        # Absolute limits missed.  The control says whether that is the candidate's fault or
+        # the point's; it only decides the verdict when the caller opts in.
         if le "$KLD" "$C_KLD" && ge "$TOPP" "$C_TOPP"; then
-            echo "    NOTE: absolute limits missed, but the candidate is no worse than the" 
-            echo "          same-kernel reordering control on both metrics (GREEDY-PURITY.md §46)."
-            rc=0
+            if [ "$ALLOW_CONTROL_PASS" -eq 1 ]; then
+                echo "    NOTE: absolute limits missed, but the candidate is no worse than the"
+                echo "          same-kernel reordering control on both metrics (GREEDY-PURITY.md §46)."
+                rc=0
+            else
+                echo "    NOTE: the candidate is no worse than the same-kernel control, so the excess" >&2
+                echo "          is the point's, not the switch's — but the absolute limits are the" >&2
+                echo "          criterion.  Re-run with --allow-control-pass to accept the calibration." >&2
+            fi
         fi
     fi
     rc=$(( rc | family_rc ))

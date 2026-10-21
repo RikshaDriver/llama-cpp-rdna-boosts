@@ -150,7 +150,10 @@ zero by any row parameter. The gate's absolute limits therefore need two extra g
 2. **The control must be measured on the spot.**  The same kernel at a different ubatch is the floor of
    what a reordering costs at that point; a candidate no worse than it carries no evidence of a defect.
    The mode records the control base next to the fallback base (same arm, `--control-ub`, default 256)
-   and always prints it.  The absolute limits stay authoritative whenever they are met.
+   and always prints it.  **The absolute limits stay the criterion**: the control explains *whose* excess a
+   miss is (the switch's or the point's), and `--allow-control-pass` is an explicit opt-in for the narrow
+   case of a switch that provably cannot meet them — by default a candidate cannot pass just because the
+   point is insensitive.
 
 `--record --family-switch --ab "<feature-off env>"` records both bases and refuses a point whose base PPL
 is above `--family-max-ppl` (default 10).  The **op-level accuracy reference** is the second leg, and it

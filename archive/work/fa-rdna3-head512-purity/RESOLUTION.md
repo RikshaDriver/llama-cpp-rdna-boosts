@@ -37,6 +37,21 @@ criterion has been replaced with a decidable one (`--family-switch` mode) and `T
    (±0.3 %), and throughput is untouched (**+34.3 %** over the feature-off arm: 2570.07 vs 1913.30 t/s
    pp2048 @ d32768; tg128 127.37 vs 127.19).
 
+   **Strict per-switch verdicts at the calibrated point** (gate defaults, no opt-in pass):
+
+   | switch (candidate vs fully-tile base) | mean KLD | top-p | verdict |
+   |---|---|---|---|
+   | head-512 rows (r102) — marginal, vs the delivery without them | **0.001778** | **98.967 %** | **PASS** |
+   | head-256 rows alone (r5) | 0.005994 | 98.324 % | **FAIL** (20 % over KLD; 2.3x better than the control) |
+   | the whole WMMA set (256+512) | 0.006150 | 98.227 % | FAIL (23 % over KLD; top-p passes) |
+
+   So the *only* remaining delivery-relevant residual is the **r5 head-256 switch** — the one that predates
+   PR #199 — at 20 % over the KLD limit while passing top-p.  That is the quantified form of "the core issue
+   it is building on top of", and it is a code question, not an instrument question: no row parameter tested
+   here moves the number (see the ruled-out table below), so closing it needs a different lever (e.g. a
+   narrower sweep of the head-256 row set, or an accuracy-shaped change to the PV path) and a fresh
+   measurement — it was **not** attempted in this campaign.
+
 ## What was ruled out (so nobody re-runs it)
 
 | hypothesis | measurement | verdict |

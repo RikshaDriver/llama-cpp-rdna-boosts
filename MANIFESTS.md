@@ -76,7 +76,9 @@ in CI.  The model-level gates are manual:
    calibrated domain** and always prints a same-kernel reordering control measured on the spot:
    `--record --ab "<feature-off env>" --family-switch --model <head-256/512 model> --corpus
    prompts/fa-family-switch-gemma4-26B-A4B.txt --ctx 2048 --chunks 10`, then the same command without
-   `--record`.  The mode refuses a point whose base PPL is above `--family-max-ppl` (default 10): at a
+   `--record` (`--candidate-env` selects the arm, so a single switch can be judged against a fully-tile
+   base).  The absolute limits stay the criterion; `--allow-control-pass` is an explicit opt-in for a
+   switch that provably cannot meet them, so an insensitive point cannot pass a bad change.  The mode refuses a point whose base PPL is above `--family-max-ppl` (default 10): at a
    point the model is not confident about, *every* reordering measures far outside the limits (a benign
    `-ub 512` vs `-ub 256` same-kernel change measures 0.105 / 85.0 %, so such a point cannot decide the
    question — `GREEDY-PURITY.md` §46, `archive/work/fa-rdna3-head512-purity/RESOLUTION.md`).
