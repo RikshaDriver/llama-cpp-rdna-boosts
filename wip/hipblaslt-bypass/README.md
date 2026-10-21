@@ -221,6 +221,26 @@ precisely the layer arm G bypasses.  Two prototype bugs worth keeping: hipBLASLt
 `hipblasLtMatmulAlgoCheck` does not exist in 10.1.0 — support is learned from the launch's return status,
 not from a pre-check.
 
+**Arm G — promotion decisions (maintainer, 2026-10-21).**  Two questions were put to the maintainer and both
+are settled; they are what a promoted block must implement, not measurements.
+
+* **Prefill-logit base = re-record (option A).**  When the pin becomes a default-on path, the prefill-logit
+  base for every model it reaches is re-recorded **from the pinned build**, and the old-vs-new KLD
+  (35B-A3B: 0.007279 / 96.618 %) is recorded as the **family-switch magnitude**, in the same sense as issue
+  #113's family switches.  The general rule now lives in `benchmarks/prefill-logit-methodology.md` §5b: *a base
+  is only valid for the arm it was recorded on*, and a deliberate family switch re-establishes it instead of
+  being scored against the old one.
+* **Solution index = a per-ROCm-version table (option A).**  The patched code carries a small table of
+  validated `(ROCm version, arch) -> index` picks (10.1.0/gfx1201: `m <= 64 -> 140219`, else `140232`), plus
+  the fallback that is already implemented and measured: an index the runtime does not advertise -> the
+  smallest advertised index (still deterministic); a launch that errors -> refuse the shape and use rocBLAS
+  (today's behaviour).  **The table is a measured artefact, not a constant:** it is established and validated
+  per ROCm release we ship (run the probe + the determinism gate, ~10 min), and a new ROCm version means
+  **re-establishing** it, never inheriting it — 7.14.1 is the worked example (4 solutions from `140723`, so
+  the fallback runs and is neutral).  When this is cut into a block, that list belongs in `patches/README.md`
+  (block note: which versions were measured, and that an unlisted one falls back), `ENVIRONMENT.md` (the
+  variable and the table) and the release checklist.
+
 **B. Raise the native-GEMM cap (`mmf.cu`: `src1_ncols > 16`) — REFUTED as a cheap arm (2026-10-21).**  Tried
 it (`GGML_CUDA_MMF_MAX_COLS`, patch kept as `tools/experiments/mmf-max-cols-ATTEMPT.patch`).  Two blockers:
 (a) the F32 branch of `ggml_cuda_should_use_mmf` requires `amd_mfma_available`, which is **CDNA-only**, and
@@ -314,7 +334,10 @@ lottery and has a low bar (the F32 path is free on 35B-A3B today); the BF16 job 
 first, against a **+51 %** hipBLASLt prefill advantage.
 
 **P4 — default.**  Whichever arm wins becomes **default-on with a kill switch** (`default-on policy` in
-`AGENTS.md`), the old path is the kill switch value, and `ENVIRONMENT.md` gains the variable.
+`AGENTS.md`), the old path is the kill switch value, and `ENVIRONMENT.md` gains the variable.  For arm G the
+promotion obligations are already decided (see §2 arm G, "promotion decisions"): the prefill-logit base is
+**re-recorded on the pinned path** (methodology §5b) and the solution-index table is **re-established per ROCm
+release** we ship, with the fallback covering anything not listed.
 
 ## 5. Reproduce the #75 witness (also the P3/flip gate)
 

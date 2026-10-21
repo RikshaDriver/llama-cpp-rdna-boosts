@@ -164,6 +164,30 @@ tile kernel are within a factor 1.3 of each other there (f16 5.99e-5 vs 5.71e-5,
 1.64e-5, threshold 5e-4), i.e. neither is an accuracy regression; at smaller query widths WMMA is 1.1-2.8x
 closer to the CPU reference.
 
+### A base is only valid for the arm it was recorded on (2026-10-21)
+
+§5 above says a noisy self-KLD means the model is not a gate model.  It does not say why, and two
+obligations follow once the cause is known.  Both are now decided policy (maintainer, 2026-10-21):
+
+1. **Find the cause before you drop the model.**  35B-A3B's run-to-run prefill variation is not inherent
+   rounding: on gfx1201 / ROCm 10.1.0 it is the **hipBLASLt per-process solution choice** on the F32
+   `ssm_alpha`/`ssm_beta` and MoE-router GEMMs (`GREEDY-PURITY.md` §44, `wip/hipblaslt-bypass/`).  Measured
+   at `-c 512 --chunks 8`, 1 GPU: a candidate against a base recorded on the **same unpinned build** gave
+   mean KLD **0.007279** / same-top-p **96.618 %**, and the *reference* arm `ROCBLAS_USE_HIPBLASLT=0` gave
+   **0.007271** / 96.618 % from that same base — i.e. the gate was reading the lottery, not the candidate,
+   and its spread (0.0068-0.0073 here) straddles the 0.005 limit.  Pinning the solution in our own code makes
+   this model's self-KLD exactly **0.000000 / 100.000 %** (`wip/hipblaslt-bypass/evidence/p3-arm-g-pin-implemented.txt`).
+2. **Record the base on the arm that will ship, and treat a deliberate family switch as a new baseline**
+   (with `scripts/gate-prefill-logits.sh --family-switch` for the judgement itself: a point the model is
+   confident about, and the on-the-spot same-kernel control above as the floor).
+   When a default change moves the prefill arithmetic into a different kernel family — a new GEMM family, a
+   pinned solution, a different accumulator precision — the old base is no longer the reference.  Re-record it
+   **from the new default**, and log the old-vs-new KLD in the release entry as the **family-switch magnitude**
+   (for a hipBLASLt pin on 35B-A3B: ~0.0073 / 96.6 %).  Do not compare a new family against an old-family
+   base and report the difference as a regression: that is §46's "an absolute gate cannot decide a family
+   switch" in its prefill form.  The pinned-vs-pinned control must still read exactly 0.000000, which is what
+   makes the number interpretable.
+
 ## Scope: when the gate is required
 
 Run it before a release (and after any change to `patches/`) whenever the block set touches:

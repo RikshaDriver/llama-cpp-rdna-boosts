@@ -74,6 +74,34 @@ point-sensitivity table), `MANIFESTS.md` (gate 3 + the block-05 verification row
 
 ## 261021.009 (wip) -- `wip/hipblaslt-bypass` arm G: a deterministic hipBLASLt solution in our code is deterministic AND +5 % prefill
 
+## 261021.010 (docs) -- hipBLASLt-bypass promotion decisions: bases are arm-scoped, solution indices are a per-ROCm-release table
+
+**Docs only: no patch, no `release.json` change, no tree change.**  Records the maintainer's answers to the
+two open questions from 261021.007, so a future session does not re-litigate them.
+
+**Q1 -- the prefill-logit base (answer: re-record it).**  A default change that moves the prefill arithmetic
+into a different kernel family does not get scored against the old family's base: the base is **re-recorded
+from the arm that ships**, and the old-vs-new KLD is logged as the **family-switch magnitude**.  For the
+hipBLASLt pin on 35B-A3B that number is **0.007279 mean KLD / 96.618 % same-top-p** (and `ROCBLAS_USE_HIPBLASLT=0`
+measures **0.007271 / 96.618 %** from the same base, which is why the old comparison was reading the lottery).
+The general rule is now written into `benchmarks/prefill-logit-methodology.md` **§5b**: *a base is only valid for
+the arm it was recorded on*, with the 2026-10-21 measurement as its evidence and the pinned-vs-pinned control
+(0.000000 / 100.000 %) as the interpretability requirement.  This extends §5's existing "a noisy self-KLD is a
+measurement result, not a gate result" with the two obligations: find the cause (here: the library's per-start
+solution pick), and re-baseline deliberately rather than tune the threshold.
+
+**Q2 -- solution-index portability (answer: a per-ROCm-release table, re-established per release).**  The
+patched code keeps a small validated `(ROCm version, arch) -> index` table (10.1.0/gfx1201: `m <= 64 -> 140219`,
+else `140232`) and the fallback that is already measured: an unadvertised index -> the smallest advertised one
+(still deterministic), a failed launch -> refuse the shape and use rocBLAS.  **The table is a measured artefact:**
+each ROCm release we ship gets it established and validated (probe + determinism gate, ~10 min) instead of
+inheriting it, and the versions that were measured are listed with the block.  ROCm 7.14.1 is the worked example
+of the fallback (4 solutions from `140723`, bit-identical to its base, `pp512 +0.5 %` / `pp2048 -0.2 %`, decode
+flat).  Recorded in `wip/hipblaslt-bypass/README.md` §2 arm G ("promotion decisions") and §4 P4; when this is cut
+into a block it lands in `patches/README.md`, `ENVIRONMENT.md` and the release checklist.
+
+## 261021.007 (wip) -- `wip/hipblaslt-bypass` arm G: a deterministic hipBLASLt solution in our code is deterministic AND +5 % prefill
+
 **WIP only: no patch, no `release.json` change, no tree change** (the prototype lives in
 `wip/hipblaslt-bypass/tools/experiments/hipblaslt-pin-ATTEMPT.patch`, was applied to a working `~/llama.cpp`,
 measured, and reverted).  Record: `wip/hipblaslt-bypass/evidence/p3-arm-g-pin-implemented.txt`; campaign
