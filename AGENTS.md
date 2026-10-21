@@ -222,8 +222,12 @@ stub alive to serve them, and treat a `wip/` path in an old record as a historic
   uniform prefill shift. Run `scripts/gate-prefill-logits.sh` before shipping any change to a prefill
   kernel (GDN/SSM chunked, FA, MMQ/MMVF/MMB, MoE prefill) or a default-on approximate path: it compares
   against a recorded known-good base and requires mean KLD <= 0.005 and same-top-p >= 98 %. The r29
-  example: the default-on BF16 chunked GDN measured 0.032 / 93.6 % and was flipped off. Protocol:
-  `benchmarks/prefill-logit-methodology.md`.
+  example: the default-on BF16 chunked GDN measured 0.032 / 93.6 % and was flipped off.  A
+  **kernel-family switch** (a tile→WMMA head cap) uses `--family-switch` instead: it refuses a point
+  outside the gate's calibrated domain (base PPL > 10; at a point the model finds hard even a benign
+  same-kernel ubatch change measures 0.105 / 85 %) and always prints a same-kernel control, so the
+  absolute limits stay the criterion without an insensitive point waving a bad change through.
+  Protocol: `benchmarks/prefill-logit-methodology.md`, `GREEDY-PURITY.md` §46.
 - **Mixed K/V cache types are HARD-REJECTED** at context creation (`params.type_k != params.type_v`);
   every mixed pair measured 1.7-3.6x slower and never smaller. Pass matching `-ctk`/`-ctv`.
 - **`--spec-draft-n-max` is capped at 15** (the recurrent snapshot bound); purity is promised only to

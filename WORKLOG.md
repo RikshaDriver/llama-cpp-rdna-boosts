@@ -36,7 +36,7 @@ experimental arm as a patch under `variants/`).
 
 ### The delivery changes (why r103 exists)
 
-1. **gemma-4 bf16 K/V prefill no longer aborts (block 10, `rope.cu`).**  TODO #83.  `rope.cu` instantiated
+1. **gemma-4 bf16 K/V prefill no longer aborts (block 10, `rope.cu`).**  #83 (filed and closed in r103).  `rope.cu` instantiated
    float/f16 destinations for the NORMAL and NEOX modes but not **bf16**, and since r101 the iSWA `k_cur`/
    `v_cur` reorder lets the ROPE -> VIEW -> SET_ROWS fusion fire for Gemma's K, so `-ctk bf16 -ctv bf16`
    prefill died at `rope.cu:672` (`ggml_cuda_op_rope_impl<true>`).  Reproduced here on r102 first.  The four

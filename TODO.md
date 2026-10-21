@@ -29,7 +29,6 @@ top of `WORKLOG.md` is the newest record.
 | **79** | RDNA3_0 verify-band fusions: no multi-device measurement, and gfx1101/gfx1102 untested | platform validation | open (shipped default-on in r95; needs a 2+ card gfx1100 box) |
 | **80** | meta split-state cache: 30+ lookups per node per re-allocation | performance | parked (`archive/work/issue-184-meta-r80r82/RESOLUTION.md` `§` headroom) |
 | **82** | stop calling hipBLASLt entirely (bypass the rocBLAS dispatch) — correctness first | correctness | open, scoping (`wip/hipblaslt-bypass/`); P0+P1 done 2026-10-21, arm B refuted, next is arm G (deterministic algo, API-level prototype done) then the F32 skinny GEMM |
-| **83** | gemma-4 prefill aborted with `-ctk bf16 -ctv bf16` (`rope.cu` had no bf16 destination case) | correctness | **fixed in r103** (block 10): bf16 NORMAL/NEOX destinations instantiated, bit-identical to the unfused chain; repro + record in `WORKLOG.md` 261021.007 |
 
 Accepted limitations that are deliberately **not** fixed are listed at the end — do not re-report them.
 
