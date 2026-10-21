@@ -326,6 +326,16 @@ on `=0`; at 16384..131072 context and 896..256 headroom it is clean here.
 solution indices are per-runtime) and the **prefill-base policy** above; both are maintainer calls, not
 measurements.
 
+**P3(ii) is in flight and PAUSED (2026-10-21): see
+[`STATUS-2026-10-21-p3ii-paused.md`](STATUS-2026-10-21-p3ii-paused.md).**  A SIMT F32 kernel with a
+deterministic k-split (`tools/experiments/mmf32-splitk-WIP.patch`) is correct (NMSE 1e-13, 16 shapes +
+`test-backend-ops` 2444/2444), deterministic (one logits class, 8/8 at 1 GPU and 6/6 at 2 GPU `-sm tensor`)
+and **+4.4 % pp512 / +4.3 % pp2048** — within ~0.8 % of arm G's pin while needing no hipBLASLt, no solution
+index and no per-runtime table.  It is paused on one open question: its **self-KLD control reads 99.951 %
+while the logits dumps of the same runs are byte-identical**, which must be resolved (it is either the
+compare path or the kernel) before any prefill base is recorded on this arm — and a parallel agent is
+changing the perplexity scripts that whole instrument runs on.
+
 **P3 — the real kernels.**  Two separate jobs: **(i) BF16/f16 wide N** = port the column tiling the
 `mul_mat_id` MMF launch already has to the non-ids launch (WMMA exists on RDNA for f16/bf16) for Flash-Next;
 **(ii) F32 wide N** = a SIMT tiled GEMM for 35B-A3B alpha/beta + the gemma4 router (no MMA form exists on
@@ -377,6 +387,9 @@ CSV).  Both take the arm from the environment, so the `=0` control is the same c
 | `tools/hbl-shapes.sh` | aggregate the hipBLASLt shape inventory from a log |
 | `tools/experiments/mmf-max-cols-ATTEMPT.patch` | the arm-B attempt (env knob on `mmf.cu`'s 16-column cap); refuted, kept so nobody repeats it |
 | `tools/experiments/hipblaslt-pin-ATTEMPT.patch` | the arm-G prototype (deterministic `hipblasLtMatmul` for the F32 skinny shapes in `ggml_cuda_mul_mat_cublas_impl`, `GGML_CUDA_HIPBLASLT_PIN=1`); works and wins, NOT in `patches/` |
+| `STATUS-2026-10-21-p3ii-paused.md` | where P3(ii) stopped: what is proven, the open self-KLD anomaly, the layout facts, and the interlock with the perplexity-script work |
+| `tools/experiments/mmf32-splitk-WIP.patch` | the P3(ii) prototype (our own F32 SIMT GEMM, split-K, env-gated `GGML_CUDA_MMF32=1`); works and wins, NOT in `patches/` |
+| `tools/experiments/mmf32-standalone/` | the kernel's numerical oracle (16 shapes vs a double reference) and the tile/k-split bench harness |
 | `evidence/p3-arm-g-pin-implemented.txt` | arm G implemented: per-shape solution classes, the 12/12 determinism gate, the interleaved `llama-bench` visits, the KLD matrix and the prefill-base finding |
 | `tools/experiments/hipblaslt-algo-classes.cpp` | arm-G probe: every solution of a shape, its bits and its cost, vs what the heuristic picks (standalone; needs `-isystem<rocm>/include`) |
 | `evidence/` | the dated measurement summaries quoted in §1 — `p0-inventory-all-models.txt`, `p0-shapes-flash-next.txt`, `p1-hipblaslt-outside-slab.txt`, `p2-mmf-cap-attempt.txt` are this session's; `p2-arm-g-algo-classes.txt` and `p2-arm-a-pinning-attempts.txt` close out P2 |

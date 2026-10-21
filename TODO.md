@@ -28,7 +28,7 @@ top of `WORKLOG.md` is the newest record.
 | **78** | DFlash2 `-sm tensor`: the real Meta distributed `TOP_K` fix | correctness | open, scoping (`wip/dflash-meta-split-impl/`) |
 | **79** | RDNA3_0 verify-band fusions: no multi-device measurement, and gfx1101/gfx1102 untested | platform validation | open (shipped default-on in r95; needs a 2+ card gfx1100 box) |
 | **80** | meta split-state cache: 30+ lookups per node per re-allocation | performance | parked (`archive/work/issue-184-meta-r80r82/RESOLUTION.md` `§` headroom) |
-| **82** | stop calling hipBLASLt entirely (bypass the rocBLAS dispatch) — correctness first | correctness | open, **arm G implemented as a WIP prototype 2026-10-21: deterministic (12/12) and +5 % prefill on 35B-A3B; promotion decided — base re-recorded on the pinned path, solution index from a per-ROCm-release table re-established per release (not inherited)** (`wip/hipblaslt-bypass/`, `WORKLOG.md` 261021.010); arms B/A refuted; P3(ii) F32 SIMT kernel prototyped (+4.4 %, paused on a self-KLD question), P3(i) BF16 untouched |
+| **82** | stop calling hipBLASLt entirely (bypass the rocBLAS dispatch) — correctness first | correctness | open, **arm G implemented as a WIP prototype 2026-10-21: deterministic (12/12) and +5 % prefill on 35B-A3B; promotion decided — base re-recorded on the pinned path, solution index from a per-ROCm-release table re-established per release (not inherited)** (`wip/hipblaslt-bypass/`, `WORKLOG.md` 261021.009); arms B/A refuted; P3(ii) F32 SIMT kernel prototyped (+4.4 %, paused on a self-KLD question), P3(i) BF16 untouched |
 
 Accepted limitations that are deliberately **not** fixed are listed at the end — do not re-report them.
 
