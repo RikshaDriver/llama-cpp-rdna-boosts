@@ -1,5 +1,44 @@
 # WORKLOG - dated delivery records
 
+## 261021.013 (docs) -- session close: RDNA3_5 `mmf32` default + issue #201 bundled into r105; campaign seeded with a handover
+
+**Docs only: no patch, no `release.json` change, no default flipped yet.**  Records the two decisions this
+session ends on and the work that now owns them.
+
+**1. `mmf32` default for RDNA3_5 — decided, deliberately NOT shipped alone.**  The gfx1151 validation
+(261021.012) qualifies on the same four legs RDNA4 was admitted on: `test-backend-ops` 2444/2444 with NMSE
+**6.11e-14 vs rocBLAS 6.83e-13** on the intercepted cases, **12/12** fresh starts one logits class,
+**+1.0 % pp512 / +1.6 % pp2048** with decode flat, and a `--family-switch` **PASS** at the shipped confident
+point (**0.013016 / 98.673 %** against a same-kernel control of 0.019125 / 97.975 %).  The change is one
+predicate (`IS_RDNA4 || IS_RDNA3_5` in `ggml_cuda_mmf32_enabled`).  The maintainer's decision is to **bundle it
+with issue #201 into one release** rather than cut a release for a single line — so it is staged in the campaign
+handover, not applied.  RDNA3 (gfx1100) stays opt-in: −1.3…−2.2 % at `pp2048`, one visit a tie.
+
+**2. New campaign: `wip/async-input-per-origin/` (issue #201, `TODO` #84).**  The finding, re-verified against
+the r104 tree rather than quoted: the async-input ring keys its per-origin map on `cudaStreamPerThread`, which is
+the sentinel `((hipStream_t)2)` in every thread (`hip_runtime_api.h:1160`), so there is exactly one origin per
+device and r101's per-origin ordering does not exist.  Still open in r104: a foreign-thread drain issues another
+thread's queued uploads on the caller's stream while the owner's graph has nothing left to wait on; the wrap
+path's "every OTHER origin" sync loop is empty; `o.stream` means "the calling thread's stream", not the origin's
+(the r101 comment's *"a stream is a `llama_context`"* is the wrong model — an origin is a host thread).  A
+secondary gap survives a correct key: `if (o.q.empty()) continue;` skips the `has_flush` wait, so a queue drained
+by another thread leaves the owner unordered behind that flush.  The campaign README carries the fix design (key
+on `std::this_thread::get_id()`, keep issuing on `cudaStreamPerThread`, consume `flush_ev` on the empty-queue
+path, `GGML_CUDA_ASYNC_INPUT_DEBUG` proving >1 origin), the full gate list, and the release shape (r105 = block
+**10** for the ring + block **06** for the RDNA3_5 predicate).  `NEXT-SESSION-PROMPT.md` is the cold-start prompt.
+
+**Record correction to carry, not to inherit:** r101 (261021.003) and `archive/work/fix-gemma-4/` credit this
+patch with taking the gemma4 MTP arm from *unstable in every sample* to 8/10 "by removing a genuine
+cross-context ordering defect".  A patch that cannot produce more than one origin cannot have done that, and the
+residual was subsequently attributed to the hipBLASLt lottery (§44, which already says the ring is not the
+residual) — so the 0 → 8/10 step is **unexplained**.  The campaign re-derives it after the fix and, if it does
+not reproduce, adds a correcting `WORKLOG` entry and points the fix-gemma-4 resolution at it.  The old entry is
+not edited.
+
+**Also corrected this session:** `fingon` is **single-RDNA3** (its second `rocm-smi` entry is a gfx1036 iGPU),
+so it does **not** provide the 2-card box `TODO` #79 needs; `wip/CAMPAIGNS.md` lost the stale
+`fa-rdna3-head512-purity` row (closed at r103, directory archived) and gained the new campaign row.
+
 ## 261021.012 (docs) -- `mmf32` cross-arch validation: RDNA3_5 wins and is a promotion candidate, RDNA3 does not
 
 **Docs only: no patch, no `release.json` change, no default flipped — the RDNA3_5 default awaits a decision.**

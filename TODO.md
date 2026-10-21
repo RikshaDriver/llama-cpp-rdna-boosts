@@ -28,6 +28,7 @@ top of `WORKLOG.md` is the newest record.
 | **78** | DFlash2 `-sm tensor`: the real Meta distributed `TOP_K` fix | correctness | open, scoping (`wip/dflash-meta-split-impl/`) |
 | **79** | RDNA3_0 verify-band fusions: no multi-device measurement, and gfx1101/gfx1102 untested | platform validation | open (shipped default-on in r95; needs a 2+ card gfx1100 box).  `ssh fingon` is single-RDNA3 (`ROCm0`; its second rocm-smi entry is an iGPU and is not a HIP device), so it does **not** cover the multi-device arm — it validates single-GPU gfx1100 only.  gfx1101/gfx1102 still have no hardware |
 | **80** | meta split-state cache: 30+ lookups per node per re-allocation | performance | parked (`archive/work/issue-184-meta-r80r82/RESOLUTION.md` `§` headroom) |
+| **84** | issue #201: the async-input ring's per-origin state is keyed on the `cudaStreamPerThread` sentinel (constant `2`), so r101's per-origin ordering does not exist | correctness | open, campaign `wip/async-input-per-origin/` (fix + the bundled RDNA3_5 `mmf32` default) |
 
 Accepted limitations that are deliberately **not** fixed are listed at the end — do not re-report them.
 
