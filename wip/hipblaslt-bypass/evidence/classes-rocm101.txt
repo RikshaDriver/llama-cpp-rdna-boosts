@@ -1,0 +1,59 @@
+# ROCm 10.1.0 arm (release runtime) -- gfx1201 soar, r102 build 7fa283979, 35B-A3B Q4_K_M, 1 GPU
+# collected 2026-10-21. Each line = ONE fresh process.
+
+## test-logits-width-probe, 1 GPU, recall.txt P=256 ub=512, default (hipBLASLt on)
+run1: W=1 rows=1 hash=a5589707a12dea4f maxdiff_vs_W8=0 width_purity=PASS (worst maxdiff 0) 
+run2: W=1 rows=1 hash=a5589707a12dea4f maxdiff_vs_W8=0 width_purity=PASS (worst maxdiff 0) 
+run3: W=1 rows=1 hash=a5589707a12dea4f maxdiff_vs_W8=0 width_purity=PASS (worst maxdiff 0) 
+run4: W=1 rows=1 hash=a5589707a12dea4f maxdiff_vs_W8=0 width_purity=PASS (worst maxdiff 0) 
+run5: W=1 rows=1 hash=a5589707a12dea4f maxdiff_vs_W8=0 width_purity=PASS (worst maxdiff 0) 
+run6: W=1 rows=1 hash=a5589707a12dea4f maxdiff_vs_W8=0 width_purity=PASS (worst maxdiff 0) 
+run7: W=1 rows=1 hash=a5589707a12dea4f maxdiff_vs_W8=0 width_purity=PASS (worst maxdiff 0) 
+run8: W=1 rows=1 hash=a5589707a12dea4f maxdiff_vs_W8=0 width_purity=PASS (worst maxdiff 0) 
+run9: W=1 rows=1 hash=a5589707a12dea4f maxdiff_vs_W8=0 width_purity=PASS (worst maxdiff 0) 
+run10: W=1 rows=1 hash=a5589707a12dea4f maxdiff_vs_W8=0 width_purity=PASS (worst maxdiff 0) 
+
+## test-logits-width-probe, 1 GPU, P=256, ROCBLAS_USE_HIPBLASLT=0
+hblaslt-OFF run1: W=1 rows=1 hash=81277fdef6573a2e maxdiff_vs_W8=0 width_purity=PASS (worst maxdiff 0) 
+hblaslt-OFF run2: W=1 rows=1 hash=81277fdef6573a2e maxdiff_vs_W8=0 width_purity=PASS (worst maxdiff 0) 
+hblaslt-OFF run3: W=1 rows=1 hash=81277fdef6573a2e maxdiff_vs_W8=0 width_purity=PASS (worst maxdiff 0) 
+
+## test-logits-width-probe, 2 GPU -sm tensor, P=256, default
+2gpu-tensor run1: W=1 rows=1 hash=68b41f06a5c1ec35 maxdiff_vs_W8=0 width_purity=PASS (worst maxdiff 0) 
+2gpu-tensor run2: W=1 rows=1 hash=68b41f06a5c1ec35 maxdiff_vs_W8=0 width_purity=PASS (worst maxdiff 0) 
+2gpu-tensor run3: W=1 rows=1 hash=68b41f06a5c1ec35 maxdiff_vs_W8=0 width_purity=PASS (worst maxdiff 0) 
+2gpu-tensor run4: W=1 rows=1 hash=68b41f06a5c1ec35 maxdiff_vs_W8=0 width_purity=PASS (worst maxdiff 0) 
+2gpu-tensor run5: W=1 rows=1 hash=68b41f06a5c1ec35 maxdiff_vs_W8=0 width_purity=PASS (worst maxdiff 0) 
+2gpu-tensor run6: W=1 rows=1 hash=68b41f06a5c1ec35 maxdiff_vs_W8=0 width_purity=PASS (worst maxdiff 0) 
+2gpu-tensor run7: W=1 rows=1 hash=68b41f06a5c1ec35 maxdiff_vs_W8=0 width_purity=PASS (worst maxdiff 0) 
+2gpu-tensor run8: W=1 rows=1 hash=68b41f06a5c1ec35 maxdiff_vs_W8=0 width_purity=PASS (worst maxdiff 0) 
+
+## test-logits-width-probe, 1 GPU, prose-rdna-boosts.txt P=1024 ub=2048, default
+1gpu-P1024 run1: W=1 rows=1 hash=5dcdfb5b5a4e3167 maxdiff_vs_W8=0 width_purity=PASS (worst maxdiff 0) 
+1gpu-P1024 run2: W=1 rows=1 hash=5dcdfb5b5a4e3167 maxdiff_vs_W8=0 width_purity=PASS (worst maxdiff 0) 
+1gpu-P1024 run3: W=1 rows=1 hash=5dcdfb5b5a4e3167 maxdiff_vs_W8=0 width_purity=PASS (worst maxdiff 0) 
+1gpu-P1024 run4: W=1 rows=1 hash=5dcdfb5b5a4e3167 maxdiff_vs_W8=0 width_purity=PASS (worst maxdiff 0) 
+1gpu-P1024 run5: W=1 rows=1 hash=5dcdfb5b5a4e3167 maxdiff_vs_W8=0 width_purity=PASS (worst maxdiff 0) 
+1gpu-P1024 run6: W=1 rows=1 hash=5dcdfb5b5a4e3167 maxdiff_vs_W8=0 width_purity=PASS (worst maxdiff 0) 
+1gpu-P1024 run7: W=1 rows=1 hash=5dcdfb5b5a4e3167 maxdiff_vs_W8=0 width_purity=PASS (worst maxdiff 0) 
+1gpu-P1024 run8: W=1 rows=1 hash=5dcdfb5b5a4e3167 maxdiff_vs_W8=0 width_purity=PASS (worst maxdiff 0) 
+
+## llama-perplexity logits dump (c 512, chunks 1, fa on) -- default
+rocm10.1.0 run1 3629d90733a1
+rocm10.1.0 run2 3629d90733a1
+rocm10.1.0 run3 6d32945460bd
+rocm10.1.0 run4 a855c2000912
+rocm10.1.0 run5 3629d90733a1
+rocm10.1.0 run6 3629d90733a1
+rocm10.1.0 run7 3629d90733a1
+rocm10.1.0 run8 a855c2000912
+
+## llama-perplexity logits dump -- ROCBLAS_USE_HIPBLASLT=0  (the control)
+rocm10.1.0 HBLASLT-OFF run1 2d9ed9ce03cb
+rocm10.1.0 HBLASLT-OFF run2 2d9ed9ce03cb
+rocm10.1.0 HBLASLT-OFF run3 2d9ed9ce03cb
+rocm10.1.0 HBLASLT-OFF run4 2d9ed9ce03cb
+rocm10.1.0 HBLASLT-OFF run5 2d9ed9ce03cb
+rocm10.1.0 HBLASLT-OFF run6 2d9ed9ce03cb
+rocm10.1.0 HBLASLT-OFF run7 2d9ed9ce03cb
+rocm10.1.0 HBLASLT-OFF run8 2d9ed9ce03cb

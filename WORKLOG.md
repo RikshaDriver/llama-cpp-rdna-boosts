@@ -1,5 +1,50 @@
 # WORKLOG - dated delivery records
 
+## 261021.005 (docs) -- TODO #75 closed: the 35B-A3B per-start flip is the hipBLASLt solution lottery; `wip/hipblaslt-bypass` seeded
+
+**Docs only: no patch, no `release.json` change, no tree change; `scripts/validate-set.sh` is unaffected.**
+TODO #75 ("35B-A3B greedy text is not run-to-run deterministic with `GGML_CUDA_ASYNC_INPUT=0`", filed
+2026-10-19 at r90) is **CLOSED as external** — it is the same ROCm hipBLASLt per-process solution selection
+that closed #67, on the GDN F32 `ssm_alpha`/`ssm_beta` GEMM rather than on a router.  Record and reproducers:
+`wip/hipblaslt-bypass/FINDINGS-2026-10-21-todo-75.md`.
+
+**The witness, on the release runtime (gfx1201 `soar`, r102 build `7fa283979`, 35B-A3B Q4_K_M, 1 GPU, one
+fresh process per sample).**  `llama-perplexity -c 512 --chunks 1 -fa on`, logits-dump hash: ROCm **10.1.0
+default -> 3 classes in 8 starts** (`3629d90733a1` x5, `a855c2000912` x2, `6d32945460bd` x1);
+**`ROCBLAS_USE_HIPBLASLT=0` -> 1 class in 8/8** (`2d9ed9ce03cb`); ROCm 10.0.0 libs -> 2 classes in 10 and 1 in
+6/6 off.  `rocprofv3 --kernel-trace` names the mechanism: the class *is* the TensileLite spine hipBLASLt
+picked for that one F32 shape (`MT128x64x8` / `MT64x32x32` / `MT128x128x8` -> three different logit hashes,
+61 dispatches each), and `HIPBLASLT_LOG_LEVEL=4` shows `getAllSolutions()` returning the same 18 candidates
+(`140215`..`140232`) in **7 different orders in 8 fresh starts** — the heap-order defect
+[rocm-libraries#11340](https://github.com/ROCm/rocm-libraries/pull/11340) fixes and no release we run contains.
+Between two classes: **mean KLD 0.003479, same-top-p 98.431 %** — i.e. *just inside* the prefill-logit gate's
+`0.005` / `98 %`, so the gate cannot see it by construction.
+
+**Two method notes, both learned the hard way this session.**  (1) **A config that does not flip proves
+nothing.**  `test-logits-width-probe` was single-valued on 10.1.0 (10/10 at 1 GPU, 8/8 at 2-GPU `-sm tensor`,
+8/8 at P=1024) and still flips on the *perplexity* config — the instability is per-shape and per-run, so
+validate on a config known to flip, with 8-12+ fresh starts.  (2) **A greedy-text hash is the wrong
+instrument**: with the logits demonstrably class-varying, 200- and 500-token greedy text was identical 10/10
+and 12/12.  Same lesson as #151; judge at the logits level.
+
+**Why this is not the end of the story, and what replaced it.**  Chasing #75 exposed how little of our hot
+path actually depends on hipBLASLt: `ggml-cuda` never calls it, rocBLAS dispatches to it only for a
+**non-quantized `mul_mat` wider than `mmf`'s 16-column cap**, and on this set that is just the GDN F32
+`ssm_alpha`/`ssm_beta` GEMM (`A[F32 2048x32]`) and the F32 MoE router (`A[F32 2048x256]`, 256 experts) —
+the same pair structure on gemma4 — while a dense quantized 27B never reaches it at all (159 hipBLASLt
+dispatches per 35B-A3B CLI prefill+32-token run).  On 35B-A3B/1 GPU `ROCBLAS_USE_HIPBLASLT=0` is
+**free** (+1-3 % prefill, flat `tg128`, two interleaved visits) and saves **~70 MiB** of peak VRAM, not the
+~2 GiB assumed in discussion #196 (that number, if it is real at all, is slab *headroom*, not hipBLASLt's
+footprint — campaign step P1).  So the maintainer's follow-on is now a campaign rather than a TODO note:
+**`wip/hipblaslt-bypass/`** (indexed in `wip/CAMPAIGNS.md`, tracked as **TODO #82**), with the design space
+ranked cheap-to-structural (pin the solution via `HIPBLASLT_TUNING_OVERRIDE_FILE`; raise the `mmf` cap; a
+native skinny-F32 GEMM; requantize the F32 weights), the gates for any candidate, and `tools/hbl-classes.sh`
+/ `hbl-kernels.sh` / `hbl-shapes.sh` so the next session starts from an instrument rather than a hunch.
+
+**Docs.**  `TODO.md` loses #75 (row + body) and gains #82 (row + scoping body); `wip/CAMPAIGNS.md` gains the
+campaign row; `GREEDY-PURITY.md` §44 gains the second call site and the Linux cost measurement; `README.md`'s
+issue-#67 section notes that the GDN call site reproduces on 35B-A3B too.
+
 ## 261021.004 (r102) -- PR #199 (gfx1100 head-512 WMMA FA rows) and PR #200 (GDN / attention-gate decode fusions) promoted
 
 Two contributor PRs folded as **two block amendments** (no new block): **v12-097cf33d9-r102**, 12 blocks,

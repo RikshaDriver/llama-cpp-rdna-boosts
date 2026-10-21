@@ -1,0 +1,14 @@
+# hipBLASLt shape inventory -- 35B-A3B Q4_K_M, llama-cli, 551-token prompt + 32 decode tokens,
+# -ngl 99, 1 GPU, ROCm 10.1.0, r102. HIPBLASLT_LOG_LEVEL=4 HIPBLASLT_LOG_MASK=1.
+# A = the weight (rows x cols as hipBLASLt sees it, transA=T), B = the activations.
+# Model metadata (GGUF): n_embd = 2048, ssm.time_step_rank = 32, expert_count = 256, block_count = 41.
+# => A[2048 x 32]  = the GDN ssm_alpha / ssm_beta F32 projections
+# => A[2048 x 256] = the F32 MoE router (ffn_gate_inp, [n_embd x n_expert]) -- the GREEDY-PURITY 44 site
+# N (B cols) = 512 (one prefill ubatch) / 44 (the tail) -> only prefill widths reach hipBLASLt.
+# (Confirm the tensor identity from the graph in campaign step P0; the numbers only suggest it.)
+
+159 hipBLASLt dispatches, 3 distinct shapes   (/var/tmp/hip75/cli2.log)
+  calls  A[type rows x cols]        B[type rows x cols]        op           epilogue
+     60  A[R_32F   2048 x   32]   B[R_32F   2048 x   44]   OP_T,OP_N  EPILOGUE_DEFAULT
+     60  A[R_32F   2048 x   32]   B[R_32F   2048 x  512]   OP_T,OP_N  EPILOGUE_DEFAULT
+     39  A[R_32F   2048 x  256]   B[R_32F   2048 x   44]   OP_T,OP_N  EPILOGUE_DEFAULT

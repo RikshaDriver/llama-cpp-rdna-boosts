@@ -426,7 +426,11 @@ once `ROCBLAS_USE_HIPBLASLT=0`).  The fix is `rocm-libraries` `c50ea60130f` (The
 `ROCBLAS_USE_HIPBLASLT=0` for a run that must be reproducible.  The r24 rope-fusion kill switches
 (`GGML_CUDA_DISABLE_ROPE_SET_ROWS=1`, `GGML_CUDA_DISABLE_RMS_NORM_MUL_ROPE=1`) and r25's fix remain
 shipped for bisection and for the real defect above.  Full record: [`GREEDY-PURITY.md`](GREEDY-PURITY.md)
-§44.
+§44.  **Second call site (2026-10-21, closes `TODO #75`):** on **35B-A3B** the same lottery rides the GDN F32
+`ssm_alpha`/`ssm_beta` GEMM (`F32 2048x32 x N`): 3 logit classes in 8 fresh starts on ROCm 10.1.0, 1 class in
+8/8 with `ROCBLAS_USE_HIPBLASLT=0`, the class being the TensileLite spine hipBLASLt picked — and there the
+workaround is **free** (+1-3 % prefill, flat decode, ~70 MiB less peak VRAM).  Removing the hipBLASLt dispatch
+rather than pinning it is now a campaign: [`wip/hipblaslt-bypass/`](wip/hipblaslt-bypass/README.md).
 
 ## Concurrent serving with `--kv-unified` is not deterministic (issue #134)
 

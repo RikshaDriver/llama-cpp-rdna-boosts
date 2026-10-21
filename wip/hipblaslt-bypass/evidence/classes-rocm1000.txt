@@ -1,0 +1,60 @@
+# ROCm 10.0.0 arm (the reporter's runtime; same r102 binary, 10.0.0 libs via LD_LIBRARY_PATH)
+# gfx1201 soar, 35B-A3B Q4_K_M, 1 GPU, fresh process per line, 2026-10-21.
+
+## test-logits-width-probe, P=256, default (hipBLASLt on) -- TWO classes
+rocm10.0.0 run1: W=1 rows=1 hash=a5589707a12dea4f maxdiff_vs_W8=0 width_purity=PASS (worst maxdiff 0) 
+rocm10.0.0 run2: W=1 rows=1 hash=458b3989e8aecedc maxdiff_vs_W8=0 width_purity=PASS (worst maxdiff 0) 
+rocm10.0.0 run3: W=1 rows=1 hash=458b3989e8aecedc maxdiff_vs_W8=0 width_purity=PASS (worst maxdiff 0) 
+rocm10.0.0 run4: W=1 rows=1 hash=458b3989e8aecedc maxdiff_vs_W8=0 width_purity=PASS (worst maxdiff 0) 
+rocm10.0.0 run5: W=1 rows=1 hash=458b3989e8aecedc maxdiff_vs_W8=0 width_purity=PASS (worst maxdiff 0) 
+rocm10.0.0 run6: W=1 rows=1 hash=a5589707a12dea4f maxdiff_vs_W8=0 width_purity=PASS (worst maxdiff 0) 
+rocm10.0.0 run7: W=1 rows=1 hash=a5589707a12dea4f maxdiff_vs_W8=0 width_purity=PASS (worst maxdiff 0) 
+rocm10.0.0 run8: W=1 rows=1 hash=a5589707a12dea4f maxdiff_vs_W8=0 width_purity=PASS (worst maxdiff 0) 
+rocm10.0.0 run9: W=1 rows=1 hash=458b3989e8aecedc maxdiff_vs_W8=0 width_purity=PASS (worst maxdiff 0) 
+rocm10.0.0 run10: W=1 rows=1 hash=458b3989e8aecedc maxdiff_vs_W8=0 width_purity=PASS (worst maxdiff 0) 
+
+## test-logits-width-probe, P=256, ROCBLAS_USE_HIPBLASLT=0 -- one class
+rocm10.0.0 HBLASLT-OFF run1: W=1 rows=1 hash=81277fdef6573a2e maxdiff_vs_W8=0
+rocm10.0.0 HBLASLT-OFF run2: W=1 rows=1 hash=81277fdef6573a2e maxdiff_vs_W8=0
+rocm10.0.0 HBLASLT-OFF run3: W=1 rows=1 hash=81277fdef6573a2e maxdiff_vs_W8=0
+rocm10.0.0 HBLASLT-OFF run4: W=1 rows=1 hash=81277fdef6573a2e maxdiff_vs_W8=0
+rocm10.0.0 HBLASLT-OFF run5: W=1 rows=1 hash=81277fdef6573a2e maxdiff_vs_W8=0
+rocm10.0.0 HBLASLT-OFF run6: W=1 rows=1 hash=81277fdef6573a2e maxdiff_vs_W8=0
+
+## llama-perplexity logits dump (c 512, chunks 1) -- default, TWO classes
+run1 227ce92cb01c 126647308
+run2 227ce92cb01c 126647308
+run3 227ce92cb01c 126647308
+run4 227ce92cb01c 126647308
+run5 227ce92cb01c 126647308
+run6 227ce92cb01c 126647308
+run7 227ce92cb01c 126647308
+run8 6d32945460bd 126647308
+run9 227ce92cb01c 126647308
+run10 6d32945460bd 126647308
+
+## greedy TEXT, 200 tokens (--ignore-eos, seed 42, temp 0, recall.txt) -- 10/10 identical
+rocm10.0.0 text run1: 1254 chars  sha=c9d08f421d23
+rocm10.0.0 text run2: 1254 chars  sha=c9d08f421d23
+rocm10.0.0 text run3: 1254 chars  sha=c9d08f421d23
+rocm10.0.0 text run4: 1254 chars  sha=c9d08f421d23
+rocm10.0.0 text run5: 1254 chars  sha=c9d08f421d23
+rocm10.0.0 text run6: 1254 chars  sha=c9d08f421d23
+rocm10.0.0 text run7: 1254 chars  sha=c9d08f421d23
+rocm10.0.0 text run8: 1254 chars  sha=c9d08f421d23
+rocm10.0.0 text run9: 1254 chars  sha=c9d08f421d23
+rocm10.0.0 text run10: 1254 chars  sha=c9d08f421d23
+
+## greedy TEXT, 500 tokens -- 12/12 identical  (a text compare is the wrong instrument)
+rocm10.0.0 text500 run1: 2300 chars  sha=f30e655b054f
+rocm10.0.0 text500 run2: 2300 chars  sha=f30e655b054f
+rocm10.0.0 text500 run3: 2300 chars  sha=f30e655b054f
+rocm10.0.0 text500 run4: 2300 chars  sha=f30e655b054f
+rocm10.0.0 text500 run5: 2300 chars  sha=f30e655b054f
+rocm10.0.0 text500 run6: 2300 chars  sha=f30e655b054f
+rocm10.0.0 text500 run7: 2300 chars  sha=f30e655b054f
+rocm10.0.0 text500 run8: 2300 chars  sha=f30e655b054f
+rocm10.0.0 text500 run9: 2300 chars  sha=f30e655b054f
+rocm10.0.0 text500 run10: 2300 chars  sha=f30e655b054f
+rocm10.0.0 text500 run11: 2300 chars  sha=f30e655b054f
+rocm10.0.0 text500 run12: 2300 chars  sha=f30e655b054f

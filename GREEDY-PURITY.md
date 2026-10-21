@@ -884,6 +884,25 @@ draft-candidate-logit fingerprint, one fresh process per sample):
 hipBLASLt disabled (partly offset by a prefill gain — the gemma4-MTP number above).  Hence: keep hipBLASLt
 **enabled** by default, set `ROCBLAS_USE_HIPBLASLT=0` only for a run that must be reproducible |
 
+**Second call site — the GDN F32 `ssm_alpha`/`ssm_beta` GEMM (2026-10-21, closes `TODO #75`).**  The
+same lottery, on a different op: Qwen3.6-35B-A3B Q4_K_M, `llama-perplexity -c 512 --chunks 1 -fa on`, fresh
+process per sample on **this box with ROCm 10.1.0** — **3 logit classes in 8 starts** (`3629d90733a1` x5,
+`a855c2000912` x2, `6d32945460bd` x1) vs **1 class in 8/8** with `ROCBLAS_USE_HIPBLASLT=0` (`2d9ed9ce03cb`).
+One hipBLASLt shape in the whole run, `A[F32 2048x32] x B[F32 2048xN] T,N` (1080 dispatches; the
+`llama-cli` prefill+decode arm serves two shapes, that one and the `ffn_gate_inp` router's
+`A[F32 2048x256]`, 159 dispatches total), and the class is
+the TensileLite spine it picked: `MT128x64x8` / `MT64x32x32` / `MT128x128x8` -> three different logit hashes.
+Mean KLD between two classes **0.003479**, same-top-p **98.431 %** — *inside* the prefill-logit gate, so the
+gate cannot flag this by construction.  Also: the ordering is **stable in some configs** (`test-logits-width-
+probe` was 10/10 single-valued on the same build), so a config that does not flip is no evidence about the
+mechanism; and greedy text was identical 12/12 across class-varying starts — judge at the logits level.
+**Cost here is nil** (35B-A3B, 1 GPU, two interleaved `llama-bench` visits): `ROCBLAS_USE_HIPBLASLT=0` measures
+**+1-3 % prefill** (pp512 4749.7/4840.9 -> 4899.8/4887.2, pp2048 4804.5/4798.1 -> 4841.9/4830.3) and flat
+decode (tg128 108.2/108.0 vs 107.9/108.0), and peak VRAM 21822 -> 21752 MiB.  It is the model- and
+runtime-dependence of that number that makes `ROCBLAS_USE_HIPBLASLT=0` a tester's control and not a shipping
+default: on gemma4 above it is a real prefill+decode *win*, elsewhere it is the -15 % decode cost.  Removing
+the dispatch instead of pinning it is `wip/hipblaslt-bypass/` (`TODO #82`).
+
 ROCm 10.1.0 does **not** have the fix (its `rocm-libraries` pin branched 2026-09-09); it is in
 `c50ea60130f`, develop 2026-10-02, TheRock nightlies from 2026-10-06.  So this *does* reproduce on **Linux**
 with 10.x — §41's "Linux / 7.14 does not reproduce it" holds for 7.14 only.

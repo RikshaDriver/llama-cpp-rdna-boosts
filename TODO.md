@@ -25,11 +25,11 @@ top of `WORKLOG.md` is the newest record.
 | **64** | MoE heat-map residuals | minor | open |
 | **65** | IQ4_NL field (MTP) + `--host-experts pool` decode collapses | memory | parked (maintainer 2026-10-15; the "after r67" condition is long past — never picked up, still parked) |
 | **70** | harden the expert-cache re-arm / wide-aux growth against a starved arena | robustness | open |
-| **75** | 35B-A3B greedy text is not run-to-run deterministic with async **off** | correctness | open (filed 2026-10-19 when #73 closed) — gfx1151 cannot reproduce it (2026-10-20); needs the gfx1201 A/B |
 | **78** | DFlash2 `-sm tensor`: the real Meta distributed `TOP_K` fix | correctness | open, scoping (`wip/dflash-meta-split-impl/`) |
 | **79** | RDNA3_0 verify-band fusions: no multi-device measurement, and gfx1101/gfx1102 untested | platform validation | open (shipped default-on in r95; needs a 2+ card gfx1100 box) |
 | **80** | meta split-state cache: 30+ lookups per node per re-allocation | performance | parked (`archive/work/issue-184-meta-r80r82/RESOLUTION.md` `§` headroom) |
 | **81** | gfx1100 head-512 WMMA FA rows move the prefill logits; the absolute gate cannot decide a family switch | purity / methodology | open, accepted limitation (`wip/fa-rdna3-head512-purity/`, `GREEDY-PURITY.md` §46) |
+| **82** | stop calling hipBLASLt entirely (bypass the rocBLAS dispatch) | correctness / performance | open, scoping (`wip/hipblaslt-bypass/`) |
 
 Accepted limitations that are deliberately **not** fixed are listed at the end — do not re-report them.
 
@@ -149,40 +149,6 @@ graph is now invalidated when the slab work boundary shrinks (block 10, `WORKLOG
 covers the observed #187 fault; it does **not** discharge this item, because a re-arm can still change a
 table's arena placement under a graph that is not being dropped.  Keep #70 open.
 
-## 75. 35B-A3B greedy text is not run-to-run deterministic with async **off**
-
-Filed 2026-10-19 while closing #73, then explicitly **not** that item: 35B-A3B (1 GPU and 2-GPU tensor)
-produces 2-3 different greedy texts run-to-run **with `GGML_CUDA_ASYNC_INPUT=0`**, i.e. on the plain
-default path.  Nothing here has isolated it yet.  Start from a fresh-process decode-logit probe
-(`test-logits-width-probe` / `decodestart.sh` in `archive/work/kv-cell-offset-nondeterminism/tools/`) to
-separate "different binary state" from "different kernel selection", and keep it away from the
-Windows/hipBLASLt per-start flip that closed #67 (external, and now confirmed by the reporter on decode
-logits: `archive/work/kv-cell-offset-nondeterminism/FINDINGS-2026-10-20-issue151-reporter-confirmation.md`).
-
-**gfx1151 revalidation (2026-10-20, r99 `6adf0b802`): NOT reproduced — this box cannot be the witness.**
-30 fresh-process runs on the Strix Halo box (1 device, 35B-A3B Q4_K_M, `-ngl 99`, seed 42, temp 0) are
-single-valued, both as greedy text and as decode logits: `GGML_CUDA_ASYNC_INPUT=0` at the default ubatch
-(6 runs), at `-ub 8` (3), at `-ub 1` (3), with `--ignore-eos -n 400` (3), with async **on** (4, the same
-text), the `test-logits-width-probe` W=1 hash `5e73d60b4c4df784` on 5 fresh processes with
-`width_purity=PASS` on every W=1..8 pass — and, decisively for the "did today's fix cure it" question,
-the same on a **pre-r97** build (r95 `fe1befcf7`, 3 runs) and an r94-era build (`eb81ac725`, 3 runs).  So
-the symptom is absent before and after the fix here, i.e. nothing on this box exercises it.
-
-Two method notes for the next attempt.  **(a)** Plain `-n 400` is *not* 400 tokens on this model/prompt:
-it EOS-terminates at ~1505 chars (~150 t), so a naive comparison silently tests a shorter generation than
-the original finding — use `--ignore-eos` (1895 chars) or a long prompt.  **(b)** The only async-ring
-change since #75 was filed (at r90) is **r97** (`WORKLOG.md` 261020.008), which made
-`ggml_cuda_async_input_flush_done` unconditional; r89's batched uploads and r90's snapshot fix predate the
-filing but postdate the r88 observation, so a bisect must cover r88 -> r89/r90 -> r97 -> r99.
-
-The witness is the **gfx1201 box** (stock r88 fingerprints `722063f3e28d` / `e3b891655a80` / `27d50a6d97f5`,
-400-token greedy, `ASYNC_INPUT=0`): if r88 still reproduces, run 6+ each on r88, r95 and r99 for both the
-1-GPU and the 2-GPU `-sm tensor` arm, and reuse the original harness/prompt
-(`archive/work/kv-quant-purity-followups/tools/textgen.py`, 12-hex text hashes) so it is like-for-like.
-Record of this negative result: `WORKLOG.md` 261020.013.
-
-
-
 ## 78. DFlash2 `-sm tensor`: the real Meta distributed `TOP_K` fix
 
 r54 shipped the honest interim: a `-sm tensor` + DFlash2 combination is **rejected cleanly at model load**
@@ -217,6 +183,32 @@ Two gaps, both needing hardware the fleet does not have:
    is the check if one becomes available.
 
 **Do not re-report as a bug without one of those runs.**
+
+---
+
+## 82. Stop calling hipBLASLt entirely — CORRECTNESS / PERFORMANCE (scoping)
+
+Opened 2026-10-21, in the same session that closed **#75** on the hipBLASLt per-start solution flip
+(`wip/hipblaslt-bypass/FINDINGS-2026-10-21-todo-75.md`).  hipBLASLt is not a feature we use on purpose: it is
+where rocBLAS sends a **non-quantized `mul_mat` wider than the native GEMM cap** (`mmf.cu`:
+`src1_ncols > 16 -> false`), so in this set it serves exactly the GDN F32 `ssm_alpha`/`ssm_beta` projections
+and the F32 MoE router — on 35B-A3B those are `A[F32 2048x32]` (alpha/beta) and `A[F32 2048x256]`
+(`ffn_gate_inp`, 256 experts), 159 dispatches per prefill+32-token CLI run — plus gemma4's F32 router, and
+**nothing at all** on a dense quantized 27B.  It is the last source of per-start nondeterminism in the
+set, an unaccounted allocator the slab must leave headroom for, and one more binary on the hot path.
+
+**Measured before seeding, so the next session does not re-derive it:** disabling it
+(`ROCBLAS_USE_HIPBLASLT=0`) on 35B-A3B/1 GPU costs **nothing** (+1-3 % prefill, flat `tg128`, two interleaved
+visits) and saves **~70 MiB** of peak VRAM — *not* the ~2 GiB the 2026-10-21 discussion thread assumed, so
+that motivation must be re-measured on the `-ncmoe`/slab path (campaign P1) or dropped.  Elsewhere it is not
+free: `GREEDY-PURITY.md` §44 records up to -15 % decode on other models, which is why the arms are ranked
+cheap-to-structural (pin the solution via `HIPBLASLT_TUNING_OVERRIDE_FILE`; raise the `mmf` cap; a native
+skinny-F32 GEMM; requantize the weights) rather than “just set the env”.
+
+**Gates** (any candidate): one logits class across 12 fresh `llama-perplexity -c 512` starts, prefill-logit
+KLD recorded against the §113 calibration, interleaved prefill/decode A/B per model, the 4-axis MTP +
+`none == draft-mtp` gates, and cross-backend instantiation consistency.  Working home and plan:
+[`wip/hipblaslt-bypass/`](wip/hipblaslt-bypass/README.md).
 
 ---
 

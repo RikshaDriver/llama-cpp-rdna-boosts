@@ -1,0 +1,10 @@
+# Peak VRAM, hipBLASLt on vs off -- 35B-A3B Q4_K_M, 1 GPU, ROCm 10.1.0, r102
+# llama-perplexity -c 4096 --chunks 2 -ngl 99 -fa on -t 8, rocm-smi --showmeminfo vram polled
+# every 250 ms, max over the run.  2026-10-21.
+# => hipBLASLt's own footprint here is ~70 MiB, NOT the '~2 GB per card' hypothesis.
+# If the slab really loses ~2 GiB to it, the loss is in the headroom the slab leaves for an
+# allocator it cannot account for -- campaign step P1 must measure that on the -ncmoe path.
+
+ROCBLAS_USE_HIPBLASLT=1 (default)  peak VRAM  21822 MiB
+ROCBLAS_USE_HIPBLASLT=0            peak VRAM  21752 MiB
+delta                                        70 MiB

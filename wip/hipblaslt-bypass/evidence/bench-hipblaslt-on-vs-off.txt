@@ -1,0 +1,31 @@
+# Cost of ROCBLAS_USE_HIPBLASLT=0 -- 35B-A3B Q4_K_M, 1 GPU (gfx1201), ROCm 10.1.0, r102
+# llama-bench -ngl 99 -t 8 -fa 1 -ub 512 -b 2048 -p 512,2048 -n 128 -r 3
+# Two interleaved visits (ON then OFF), same binary. 2026-10-21.
+# NOTE the sign: on THIS model/runtime the native rocBLAS path is fractionally FASTER,
+# which is the opposite of the -15 % decode cost GREEDY-PURITY.md 44 records elsewhere.
+# The cost of disabling hipBLASLt is therefore model- and runtime-dependent -- re-measure.
+
+== visit 1 hipBLASLt ON ==
+| qwen35moe 35B.A3B Q4_K - Medium |  21.10 GiB |    35.51 B | ROCm       |  99 |       8 |   1 |           pp512 |     4749.72 ± 324.21 |
+| qwen35moe 35B.A3B Q4_K - Medium |  21.10 GiB |    35.51 B | ROCm       |  99 |       8 |   1 |          pp2048 |      4804.49 ± 59.68 |
+| qwen35moe 35B.A3B Q4_K - Medium |  21.10 GiB |    35.51 B | ROCm       |  99 |       8 |   1 |           tg128 |        108.23 ± 0.71 |
+
+build: 7fa283979 (11583)
+== visit 1 hipBLASLt OFF ==
+| qwen35moe 35B.A3B Q4_K - Medium |  21.10 GiB |    35.51 B | ROCm       |  99 |       8 |   1 |           pp512 |      4899.77 ± 41.67 |
+| qwen35moe 35B.A3B Q4_K - Medium |  21.10 GiB |    35.51 B | ROCm       |  99 |       8 |   1 |          pp2048 |       4841.88 ± 1.69 |
+| qwen35moe 35B.A3B Q4_K - Medium |  21.10 GiB |    35.51 B | ROCm       |  99 |       8 |   1 |           tg128 |        107.92 ± 0.91 |
+
+build: 7fa283979 (11583)
+== visit 2 hipBLASLt ON ==
+| qwen35moe 35B.A3B Q4_K - Medium |  21.10 GiB |    35.51 B | ROCm       |  99 |       8 |   1 |           pp512 |      4840.90 ± 69.48 |
+| qwen35moe 35B.A3B Q4_K - Medium |  21.10 GiB |    35.51 B | ROCm       |  99 |       8 |   1 |          pp2048 |      4798.11 ± 16.00 |
+| qwen35moe 35B.A3B Q4_K - Medium |  21.10 GiB |    35.51 B | ROCm       |  99 |       8 |   1 |           tg128 |        108.02 ± 0.81 |
+
+build: 7fa283979 (11583)
+== visit 2 hipBLASLt OFF ==
+| qwen35moe 35B.A3B Q4_K - Medium |  21.10 GiB |    35.51 B | ROCm       |  99 |       8 |   1 |           pp512 |      4887.22 ± 88.70 |
+| qwen35moe 35B.A3B Q4_K - Medium |  21.10 GiB |    35.51 B | ROCm       |  99 |       8 |   1 |          pp2048 |       4830.28 ± 4.72 |
+| qwen35moe 35B.A3B Q4_K - Medium |  21.10 GiB |    35.51 B | ROCm       |  99 |       8 |   1 |           tg128 |        107.97 ± 0.97 |
+
+build: 7fa283979 (11583)

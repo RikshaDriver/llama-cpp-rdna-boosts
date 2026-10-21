@@ -1,0 +1,20 @@
+# ROCm 10.1.0, r102, 35B-A3B Q4_K_M, 1 GPU, llama-perplexity c512 chunks1 fa on
+# rocprofv3 --kernel-trace per fresh start. Class = sha256(logits dump)[:12].
+# The tracer perturbs the heap, so these classes differ from the untraced runs -- the point is
+# the MAPPING class -> TensileLite kernel, not the flip rate.
+
+start1  logits=83091b86d325
+       61 x  Cijk_Alik_Bljk_S_B_Bias_HA_S_SAV_UserArgs_MT128x64x8_SN_LDSB0_AFC1_AG0...  [MT128x64x8
+       61 x  Cijk_SS_BiasS_HAS_ScaleAlphaVec_PostGSU2_VW4...  [no-MT
+
+start2  logits=eafe2e3ca6cc
+       61 x  Cijk_Alik_Bljk_S_B_Bias_HA_S_SAV_UserArgs_MT64x32x32_SN_LDSB0_AFC1_AG0...  [MT64x32x32
+       61 x  Cijk_SS_BiasS_HAS_ScaleAlphaVec_PostGSU2_VW4...  [no-MT
+
+start3  logits=9dc60a34bb72
+       61 x  Cijk_Alik_Bljk_S_B_Bias_HA_S_SAV_UserArgs_MT128x128x8_SN_LDSB0_AFC1_AG...  [MT128x128x8
+
+start4  logits=eafe2e3ca6cc
+       61 x  Cijk_Alik_Bljk_S_B_Bias_HA_S_SAV_UserArgs_MT64x32x32_SN_LDSB0_AFC1_AG0...  [MT64x32x32
+       61 x  Cijk_SS_BiasS_HAS_ScaleAlphaVec_PostGSU2_VW4...  [no-MT
+
