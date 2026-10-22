@@ -369,6 +369,295 @@ def score(tables, passes, slots_by_layer=None, arena_bytes=0, period=32, admit="
     }
 
 
+# ---------------------------------------------------------------------------------------------
+# two-tier model (TODO #87): arena (L1) + pinned host pool (L2) + mapping/disk (L3)
+# ---------------------------------------------------------------------------------------------
+
+class TwoTier:
+    """Per-table arena + host pool.  Mirrors the C++ slot maps so the copy/read accounting is literal:
+    every expert that reaches the arena crosses the host link once (pool->arena, or L3->pool->arena),
+    and a hand-over is whatever extra copies the policy needs to move the arena victim into the pool."""
+
+    __slots__ = ("slots_a", "slots_p", "a_slot", "a_map", "a_count", "a_ghost", "a_last",
+                 "p_slot", "p_map", "p_last", "clock", "pclock", "last_decay",
+                 "hits", "misses", "p_hits", "l3", "promote", "handover", "evictions", "p_evict")
+
+    def __init__(self, t, slots_a, slots_p):
+        self.slots_a = min(slots_a, t.n_experts)
+        self.slots_p = min(slots_p, t.n_experts)
+        self.a_slot = [-1] * self.slots_a
+        self.a_map = {}
+        self.a_count = collections.Counter()
+        self.a_ghost = collections.Counter()
+        self.a_last = collections.Counter()
+        self.clock = 0
+        self.p_slot = [-1] * self.slots_p
+        self.p_map = {}
+        self.p_last = collections.Counter()
+        self.pclock = 0
+        self.last_decay = 0
+        self.hits = self.misses = self.p_hits = self.l3 = self.promote = 0
+        self.handover = self.evictions = self.p_evict = 0
+
+    # -- pool helpers ---------------------------------------------------------
+    def p_free(self):
+        for s in range(self.slots_p):
+            if self.p_slot[s] < 0:
+                return s
+        return -1
+
+    def p_weakest(self):
+        s_best, e_best = -1, None
+        for s in range(self.slots_p):
+            e = self.p_slot[s]
+            if e < 0:
+                continue
+            if e_best is None or self.p_last[e] < self.p_last[e_best]:
+                s_best, e_best = s, e
+        return s_best
+
+    def p_put(self, slot, expert):
+        old = self.p_slot[slot]
+        if old >= 0:
+            self.p_map.pop(old, None)
+        self.p_slot[slot] = expert
+        self.p_map[expert] = slot
+        self.p_last[expert] = self.pclock
+
+    def p_drop(self, expert):
+        slot = self.p_map.pop(expert, None)
+        if slot is not None and self.p_slot[slot] == expert:
+            self.p_slot[slot] = -1
+
+    # -- one routed expert ------------------------------------------------
+    def access(self, e, policy, protect, period, admit, touch):
+        self.clock += 1
+        if self.clock - self.last_decay >= period:
+            for d in (self.a_count, self.a_ghost):
+                for k in list(d.keys()):
+                    d[k] >>= 1
+            self.last_decay = self.clock - (self.clock % period)
+        if e in self.a_map:
+            self.hits += 1
+            self.a_count[e] += 1
+            self.a_last[e] = self.clock
+            return
+        self.misses += 1
+        self.a_ghost[e] += 1
+        if self.slots_a <= 0:
+            self.l3 += 1                    # served cold straight from L3
+            return
+        slot = -1
+        for s in range(self.slots_a):
+            if self.a_slot[s] < 0:
+                slot = s
+                break
+        victim = None
+        if slot < 0:
+            for s in range(self.slots_a):
+                v = self.a_slot[s]
+                if v < 0 or v in protect:
+                    continue
+                if victim is None or self.a_count[v] < self.a_count[victim] or \
+                        (self.a_count[v] == self.a_count[victim] and self.a_last[v] < self.a_last[victim]):
+                    victim, slot = v, s
+            if slot < 0:
+                self.l3 += 1                # every arena slot is protected: served cold
+                return
+            if admit == "value" and self.a_ghost[e] <= self.a_count[victim]:
+                self.l3 += 1
+                return
+            if admit == "touch" and self.a_ghost[e] < touch:
+                self.l3 += 1
+                return
+        # ---- where do the incoming bytes come from?
+        if self.slots_p > 0 and e in self.p_map:
+            self.p_hits += 1
+            self.promote += 1               # pool -> arena
+            self.p_last[e] = self.pclock
+        else:
+            self.l3 += 1                    # mapping / disk
+            self.promote += 1               # whatever filled it is copied into the arena
+            if self.slots_p > 0:
+                free = self.p_free()
+                if free >= 0:
+                    self.pclock += 1
+                    self.p_put(free, e)     # an L3 read fills an EMPTY slot, never evicts
+        # ---- what happens to the arena victim?
+        if victim is not None:
+            self.a_map.pop(victim, None)    # the victim leaves the arena (its bytes are overwritten below)
+            self.evictions += 1
+            if self.slots_p <= 0:
+                pass
+            elif policy == "pool-none":
+                pass                        # the pool keeps whatever it had
+            elif policy == "pool-shipped":
+                self.handover += 1          # the victim is re-read into the pool (1.0 copy equivalent)
+                if self.p_free() < 0:
+                    w = self.p_weakest()
+                    if w >= 0:
+                        self.p_evict += 1
+                        self.p_slot[w] = -1
+                free = self.p_free()
+                if free >= 0:
+                    self.pclock += 1
+                    self.p_put(free, victim)
+            elif policy == "pool-retire":
+                # No copies at all: a promoted expert leaves the pool (its slot is freed), the arena victim
+                # is simply dropped, and a later L3 read fills a free slot.  The pool drifts toward "the
+                # experts the arena does not hold plus what was demanded from L3".
+                self.p_drop(e)
+            elif policy == "pool-swap-slot":
+                if e in self.p_map:          # the slot the incoming just left takes the victim
+                    s_in = self.p_map.pop(e)
+                    self.p_slot[s_in] = -1
+                    self.pclock += 1
+                    self.p_put(s_in, victim)
+                    self.handover += 2        # staged out through a pinned bounce, then in
+                else:
+                    free = self.p_free()
+                    if free >= 0:
+                        self.pclock += 1
+                        self.p_put(free, victim)
+                        self.handover += 1
+            elif policy == "pool-swap-weakest":
+                if e in self.p_map:
+                    self.p_drop(e)            # retire the incoming's slot (it is in VRAM now)
+                if victim not in self.p_map:
+                    w = self.p_weakest()
+                    if w >= 0:
+                        self.p_evict += 1
+                        self.pclock += 1
+                        self.p_put(w, victim)
+                        self.handover += 1
+        self.a_slot[slot] = e
+        self.a_map[e] = slot
+        self.a_count[e] += 1
+        self.a_last[e] = self.clock
+
+
+def load_heat_sidecar(path):
+    """Read a real `MHT1` `.moe-heatmap` sidecar: {(layer, role): [heat per expert]}.
+
+    Same layout as `heat_map_save_locked` in `ggml/src/ggml-cuda/moe-expert-cache.cu`: a 32-byte header
+    ("MHT1", version, n_tables, reserved, model_bytes, n_tensors, reserved) then, per table, an 80-byte
+    record (int32 layer, char role[64], uint32 n_experts, uint64 host_bytes) followed by `n_experts`
+    uint32 counters.  A truncated/corrupt file is ignored (a cold start), never fatal.
+    """
+    import struct
+    out = {}
+    with open(path, "rb") as f:
+        hdr = f.read(32)
+        if len(hdr) != 32 or hdr[:4] != b"MHT1":
+            return out
+        _magic, version, n_tables, _r0, _mb, _nt, _r1 = struct.unpack("<4sIIIQII", hdr)
+        if version != 1:
+            return out
+        for _ in range(n_tables):
+            rec = f.read(80)
+            if len(rec) != 80:
+                break
+            layer, role, n_exp, _hb = struct.unpack("<i64sIQ", rec)
+            role = role.split(b"\0", 1)[0].decode("utf-8", "replace")
+            if n_exp == 0 or n_exp > (1 << 22):
+                break
+            data = f.read(4 * n_exp)
+            if len(data) != 4 * n_exp:
+                break
+            out[(layer, role)] = list(struct.unpack("<%dI" % n_exp, data))
+    return out
+
+
+def score_pool(tables, passes, slots_a, slots_p, policy, pool_init="heat", period=32, admit="touch",
+               touch=2, decode_only=True, sidecar=None):
+    states = {}
+    for key, t in tables.items():
+        states[key] = TwoTier(t, slots_a, slots_p.get(key, 0) if isinstance(slots_p, dict) else slots_p)
+
+    # Initial pool content: the load-time prewarm.  `heat` is the ORACLE prior (ranked by the whole
+    # trace's routing), `id` is what a prewarm with no tally does, `none` starts empty (the prefill
+    # then fills it in staging order, which is expert id order).
+    if pool_init != "none":
+        complement = pool_init.endswith("-complement")
+        base_init = pool_init[:-len("-complement")] if complement else pool_init
+        for key, t in tables.items():
+            st = states[key]
+            if st.slots_p <= 0:
+                continue
+            prior = None
+            if base_init in ("heat", "sidecar"):
+                prior = (sidecar or {}).get(key) if base_init == "sidecar" else None
+                if base_init == "sidecar" and (prior is None or len(prior) != t.n_experts):
+                    prior = None
+            if base_init == "heat" or (base_init == "sidecar" and prior is None):
+                order = [e for e, _ in sorted(t.freq.items(), key=lambda kv: -kv[1])]
+                order += [e for e in range(t.n_experts) if t.freq.get(e, 0) == 0]
+            elif prior is not None:
+                # ranked by the persisted counter, ties by expert id (exactly `pool_prepopulate_locked`)
+                order = sorted(range(t.n_experts), key=lambda e: (-prior[e], e))
+            else:
+                order = list(range(t.n_experts))
+            if complement:
+                # The real system heat-seeds the ARENA at sizing, so the pool's job is the complement of
+                # the arena, ranked by the same prior: that is what makes arena U pool cover the set.
+                for s_, e_ in enumerate(order[:st.slots_a]):
+                    st.a_slot[s_] = e_
+                    st.a_map[e_] = s_
+                order = [e for e in order if e not in st.a_map]
+            for s, e in enumerate(order[:st.slots_p]):
+                st.p_slot[s] = e
+                st.p_map[e] = s
+                st.p_last[e] = 0
+
+    tokens = 0
+    for p in passes:
+        band_tokens = p[0].n_tok if p else 0
+        is_decode = band_tokens <= 64
+        if is_decode:
+            tokens += band_tokens
+        for r in p:
+            key = (r.layer, r.role)
+            st = states.get(key)
+            t = tables.get(key)
+            if st is None or t is None:
+                continue
+            if decode_only and not is_decode:
+                continue
+            protect = set(r.ids)
+            for e in r.ids:
+                if 0 <= e < t.n_experts:
+                    st.access(e, policy, protect, period, admit, touch)
+
+    hits = sum(s.hits for s in states.values())
+    misses = sum(s.misses for s in states.values())
+    p_hits = sum(s.p_hits for s in states.values())
+    l3 = sum(s.l3 for s in states.values())
+    promote = sum(s.promote for s in states.values())
+    handover = sum(s.handover for s in states.values())
+    evict = sum(s.evictions for s in states.values())
+    bytes_of = lambda k: tables[k].expert_bytes
+    l3_mib = sum(s.l3 * bytes_of(k) for k, s in states.items()) / 1048576.0
+    promote_mib = sum(s.promote * bytes_of(k) for k, s in states.items()) / 1048576.0
+    handover_mib = sum(s.handover * bytes_of(k) for k, s in states.items()) / 1048576.0
+    reaches = hits + misses
+    resident = sum(len(s.a_map) * bytes_of(k) for k, s in states.items()) / 1048576.0
+    pool_res = sum(len(s.p_map) * bytes_of(k) for k, s in states.items()) / 1048576.0
+    total_mass = sum(sum(t.freq.values()) for t in tables.values())
+    covered = sum(t.freq[e] for k, t in tables.items() for e in states[k].a_map)
+    return {
+        "policy": policy, "hits": hits, "misses": misses, "reaches": reaches,
+        "h": (hits / reaches) if reaches else 0.0,
+        "pool_h": (p_hits / misses) if misses else 0.0,
+        "l3": l3, "l3_mib": l3_mib, "l3_mib_per_tok": (l3_mib / tokens) if tokens else 0.0,
+        "promote_mib": promote_mib, "handover_mib": handover_mib,
+        "hostlink_mib": promote_mib + handover_mib,
+        "handover_per_miss": (handover / misses) if misses else 0.0,
+        "evictions": evict, "tokens": tokens,
+        "resident_mib": resident, "pool_resident_mib": pool_res,
+        "covered_mass_pct": (100.0 * covered / total_mass) if total_mass else 0.0,
+    }
+
+
 def static_bound(tables, arena_bytes):
     """Routed-mass coverage of a GLOBAL top-f resident set of the same total slot count."""
     flat = []
@@ -405,6 +694,23 @@ def main(argv=None):
                          "experts per layer in one pass, and a prefill pass can also lose one table to "
                          "the staged path, which would distort the ranking)")
     ap.add_argument("--policies", default="shipped,static,quota,window")
+    ap.add_argument("--pool-frac", type=int, default=None,
+                    help="model `--host-experts pool`: a pinned L2 of this %% of each table's experts in "
+                         "front of the arena.  Selects the two-tier policy family (pool-*) and is REQUIRED "
+                         "for them")
+    ap.add_argument("--pool-init", default="heat",
+                    help="initial host-pool content: 'heat' = ranked by this trace's routing (an ORACLE "
+                         "prior, the best any prior can do), 'id' = expert order (a tally-less prewarm, "
+                         "what the delivery does today without a heat map), 'none' = empty (the "
+                         "prefill/staging fills it), or 'sidecar:<path>' = rank by a REAL persisted "
+                         "`.moe-heatmap` sidecar (the achievable prior; MHT1 format).  A '-complement' "
+                         "suffix first heat-seeds the ARENA with the same prior and then gives the pool "
+                         "only the non-resident experts (the real layout, and the one that makes "
+                         "arena U pool cover the set)")
+    ap.add_argument("--decode-only", action="store_true", default=True,
+                    help="score the decode band only (the prefill stages whole tables, so it does not "
+                         "discriminate between pool policies); default on")
+    ap.add_argument("--all-bands", dest="decode_only", action="store_false")
     ap.add_argument("--measured-h", type=float, default=None,
                     help="the run's logged `MoE expert cache: h=` -- printed beside the model's own "
                          "`shipped` h so the model's error is visible (it is a model, not the cache)")
@@ -449,8 +755,29 @@ def main(argv=None):
                  max(1, sum(t.n_experts for t in tables.values()))))
         print()
 
+    sidecar = None
+    if args.pool_init.startswith("sidecar"):
+        sidecar = load_heat_sidecar(args.pool_init.split(":", 1)[1])
+        args.pool_init = args.pool_init.split(":", 1)[0]
+        if not sidecar:
+            sys.exit("could not read a heat sidecar at %s" % args.pool_init.split(":", 1)[1])
+        if not args.quiet:
+            print("heat prior : %d tables" % len(sidecar))
+
     results = {}
-    for pol in [p.strip() for p in args.policies.split(",") if p.strip()]:
+    pols = [p.strip() for p in args.policies.split(",") if p.strip()]
+    pool_pols = [p for p in pols if p.startswith("pool-")]
+    if pool_pols and args.pool_frac is None:
+        sys.exit("the pool-* policies need --pool-frac (they model --host-experts pool)")
+    if pool_pols:
+        slots_p = {k: min(int(t.n_experts * args.pool_frac / 100), t.n_experts) for k, t in tables.items()}
+        for pol in pool_pols:
+            r = score_pool(tables, passes, uni, slots_p, pol, pool_init=args.pool_init,
+                           period=args.period, admit=args.admit, touch=args.touch,
+                           decode_only=args.decode_only, sidecar=sidecar)
+            results[pol] = r
+        pols = [p for p in pols if not p.startswith("pool-")]
+    for pol in pols:
         if pol == "quota":
             mass_by_layer = collections.Counter()
             for t in tables.values():
@@ -465,12 +792,25 @@ def main(argv=None):
         results[pol] = r
 
     bound = static_bound(tables, arena_bytes)
+    if pool_pols and not args.quiet:
+        hdr = "%-17s %8s %8s %8s %11s %11s %11s" % ("pool policy", "h", "pool_h", "L3/MiB", "L3 MiB/tok",
+                                                     "handover MiB", "hostlink MiB")
+        print(hdr)
+        print("-" * len(hdr))
+        for pol in pool_pols:
+            r = results[pol]
+            print("%-17s %8.4f %8.4f %8d %11.3f %11.1f %11.1f"
+                  % (pol, r["h"], r["pool_h"], r["l3"], r["l3_mib_per_tok"], r["handover_mib"],
+                     r["hostlink_mib"]))
+        print("(L3 = experts in NEITHER tier: the disk reads a pool policy exists to remove; "
+              "handover = the extra device copies a policy pays to keep the pool useful)")
+        print()
     if not args.quiet:
         hdr = "%-8s %8s %9s %7s %9s %11s %8s" % ("policy", "h", "misses", "cold", "MiB/tok",
                                                  "resident MiB", "covered%")
         print(hdr)
         print("-" * len(hdr))
-        for pol in results:
+        for pol in pols:
             r = results[pol]
             print("%-8s %8.4f %9d %7d %9.2f %11.1f %8.2f"
                   % (pol, r["h"], r["misses"], r["cold"], r["mib_per_token"], r["resident_mib"],

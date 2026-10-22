@@ -268,6 +268,25 @@ stub alive to serve them, and treat a `wip/` path in an old record as a historic
   memcpy per staged byte on the host-expert prefill path (decode parity; prefill -1..-6 %, single-ubatch
   `pp512` on 2-GPU tensor -34 %), and `MOE_HOST_POOL_DIO=1` (nothing cached) is ~6x slower.  Record:
   `archive/work/host-expert-master-drop/`.
+- **The host pool is a LAYOUT, not a churning cache (r113, block 12; TODO #87's disk-I/O half).**  The
+  pool's **content** is what decides the disk traffic — measured offline on a real trace: pool ranked by
+  expert id = 3571 MiB of L3 reads over 451 decode tokens, ranked by the **persisted heat prior** as the
+  arena's *complement* = 237 MiB, oracle = 237 MiB — while **every** eviction/hand-over policy lands within
+  0-246 MiB of the others.  So: (1) `pool_rank_experts_locked` / `pool_rerank_from_heat_locked` lay the pool
+  out as the arena's complement, in bulk, at sizing and at the first decode-band pass (the old flat
+  prompt-tally re-rank is gone — a prefill routes every expert, so its tally cannot rank); (2) the **demand
+  path never evicts and never copies the arena victim into the pool** (`pool_peek_locked` /
+  `pool_fill_empty_locked`; the background worker and `MOE_HOST_POOL_BGFETCH` are gone) — do not reintroduce
+  one: the literal swap cost **2x decode** for 0 MiB of L3; (3) the whole-table prefill staging reads the
+  pool and fills empty slots (it used to bypass it and re-read the whole host set per ubatch); (4)
+  `MOE_HOST_POOL_RAM_PCT` (default **80**) caps the whole pinned pool at that % of `MemAvailable` — `FRAC`
+  is a percentage of the model's host expert set, not of RAM, and an oversized pool fails each table's
+  `cudaHostAlloc` *silently*.  Field config (70K prompt, 128-token decode, 2x R9700): pool hit 0.80 -> 0.92,
+  evictions 4600 -> 0, prefill 39 -> 287 t/s (`DIO=1`) / 581 -> 733 t/s (`DIO=0`), decode 6.3 -> 23.1 /
+  30.6 -> 53.7, against `pinned` 836 / 57.5.  The tool that decided it (`scripts/moe-trace-replay.py
+  --pool-frac`, two-tier, reads a real `.moe-heatmap`): use it before proposing another pool policy.  Record:
+  `archive/work/host-pool-layout/`; still open: `DIO` auto-selection, a pool-aware staging kernel,
+  long-session adaptation (`wip/host-pool-swap-and-prefill/` §7).
 - **MTP gates must be long and reasoning-pinned.** Use `-n 3000` (`-n 2000` floor), `--reasoning on`
   for R and `--reasoning off` for P/C/K. Short runs are a correctness smoke test only. Rule 0 in
   `benchmarks/mtp-adaptive-methodology.md`.

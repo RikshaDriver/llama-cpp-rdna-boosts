@@ -12,100 +12,61 @@ Details never live here: they live in `AGENTS.md`, `patches/README.md`, `MANIFES
 still means the same subject after that item is closed and removed from this file.  New items append.
 
 **Current state:** the **14-block V2.1 set** (block 00 + blocks 01-13) at fork point **`097cf33d9`**,
-release **`v14-097cf33d9-r111`**.  `release.json` is the source of truth for the tip/tree and hashes; the
+release **`v14-097cf33d9-r113`**.  `release.json` is the source of truth for the tip/tree and hashes; the
 top of `WORKLOG.md` is the newest record.
 
 | # | subject | kind | status |
 |---|---|---|---|
-| **36** | genuine CPU/GPU overlap for the MoE misses | performance | open, scoping (`wip/moe-cpu-overlap/`) |
-| **51** | 3-GPU decode is slower than 2-GPU | performance | open (`wip/three-gpu-performance/`).  2026-10-22 datapoint (dense 27B Q8_0, `wip/three-gpu-performance/FINDING-2026-10-22-dense-27b-and-mirrored-draft-subset.md`): it is **width**-dependent, not direction-dependent — 3 GPU wins +9.2 % at mean verify len 2.9 and loses **−14.4 %** at mean len 29.2 with *bit-identical* acceptance, and at depth 16384 it loses 8.5 %.  The MoE/field-config arm is still the campaign's target |
-| **87** | `--host-experts pool` follow-ups (gfx1100 field data): (a) **DEFECT** SIGSEGV in the background pool worker at high `MOE_HOST_POOL_FRAC` on a memory-tight box, (b) prefill must not evict pool entries, (c) arena-evict ⟷ pool-admit swap and the FRAC optimum is inverted between "set fits in RAM" and "it does not" | robustness + performance | open (`wip/host-pool-swap-and-prefill/`) |
-| **59** | `ngram-mod` + `draft-mtp-adaptive` halves decode with host-resident experts | performance | open (`wip/ngram-mod-host-experts/`) |
+| **87** | `--host-experts pool` follow-ups: what is left after r113 (DIO auto-selection, a pool-aware prefill staging kernel, long-session adaptation) | performance + tuning | open (`wip/host-pool-swap-and-prefill/` §7).  The disk-I/O half shipped in **r113** (record `archive/work/host-pool-layout/`): the pool is laid out as the arena's complement ranked by the persisted heat prior, the demand path never evicts, the prefill staging reads it, `MOE_HOST_POOL_RAM_PCT=80` bounds the pinned total, and the background worker whose SIGSEGV was (a) is gone.  On the field config that took the pool hit rate 0.80 -> 0.92 and 70K-prompt prefill from 39 -> 287 t/s (`DIO=1`) / 581 -> 733 t/s (`DIO=0`) |
 | **86** | MoE expert-cache *admission quality*: the shipped policy is ~11 pts of hit rate below a static oracle — decompose foreknowledge vs churn, then prefetch/admission candidates offline | performance | open, scoping (`wip/moe-admission-quality/`) |
-| **65** | IQ4_NL field (MTP) + `--host-experts pool` decode collapses | memory | parked (maintainer 2026-10-15; the "after r67" condition is long past — never picked up, still parked) |
-| **70** | harden the expert-cache re-arm / wide-aux growth against a starved arena | robustness | open |
+| **80** | Meta split-state cache: 30+ lookups per node per re-allocation | performance | parked (see the section at the end; the lever is the lookup COUNT, not the comparison) |
 | **79** | RDNA3_0 verify-band fusions: no multi-device measurement, and gfx1101/gfx1102 untested | platform validation | open (shipped default-on in r95; needs a 2+ card gfx1100 box).  `ssh fingon` is single-RDNA3 (`ROCm0`; its second rocm-smi entry is an iGPU and is not a HIP device), so it does **not** cover the multi-device arm — it validates single-GPU gfx1100 only.  gfx1101/gfx1102 still have no hardware |
+| **70** | harden the expert-cache re-arm / wide-aux growth against a starved arena | robustness | open |
+| **59** | `ngram-mod` + `draft-mtp-adaptive` halves decode with host-resident experts | performance | open (`wip/ngram-mod-host-experts/`) |
+| **51** | 3-GPU decode is slower than 2-GPU | performance | open (`wip/three-gpu-performance/`).  2026-10-22 datapoint (dense 27B Q8_0, `wip/three-gpu-performance/FINDING-2026-10-22-dense-27b-and-mirrored-draft-subset.md`): it is **width**-dependent, not direction-dependent — 3 GPU wins +9.2 % at mean verify len 2.9 and loses **−14.4 %** at mean len 29.2 with *bit-identical* acceptance, and at depth 16384 it loses 8.5 %.  The MoE/field-config arm is still the campaign's target |
+| **36** | genuine CPU/GPU overlap for the MoE misses | performance | open, scoping (`wip/moe-cpu-overlap/`) |
 
 Accepted limitations that are deliberately **not** fixed are listed at the end — do not re-report them.
 
 ---
 
-## 36. Genuine CPU/GPU overlap for the MoE misses (Strata's pipeline shape) — PERFORMANCE (scoping)
+## 87. `--host-experts pool` follow-ups — what is left after r113 — PERFORMANCE + TUNING
 
-Opened 2026-10-05.  The delivered cache-on path computes every expert on the GPU (resident from VRAM,
-misses via UVA over PCIe); the cache-off path computes them on the CPU but **serialised** with the GPU
-splits.  Our own CPU-computes-misses arm was correct and negative above a ~1.2 GiB arena (the loss is
-~600 scheduler dispatches + ~3 cross-backend copies per layer/token, not CPU compute; see
-`archive/work/moe-expert-cache/WORKLOG.md`).  Strata's custom engine runs the CPU pool *because* it is not
-under llama.cpp's serial scheduler.  **Next:** O0 — measure how much of a 52 t/s token is the UVA cold
-fraction at 43 % residency; if it is <20 %, park it.  Design space and gates:
-[`wip/moe-cpu-overlap/`](wip/moe-cpu-overlap/README.md).
 
-## 51. 3-GPU decode is slower than 2-GPU (MTP and plain, partial and fully resident) — PERFORMANCE
+Opened 2026-10-22 (r111) from the fingon (gfx1100, 24 GB VRAM, **30 GiB RAM**) session that validated the
+master drop on a model **larger than RAM**.  All configurations produced byte-identical text, so this was
+never a purity item.  **r113 closed its disk-I/O half** (record `archive/work/host-pool-layout/`, `WORKLOG.md`
+261022.008); the three items below are what remains, in priority order, with the full detail in
+[`wip/host-pool-swap-and-prefill/`](wip/host-pool-swap-and-prefill/README.md) §7.
 
-Reopened 2026-10-16; measured.  Formerly closed at r55 (a fresh A/B then found 3-GPU MTP 74.3 vs 2-GPU
-65.0 t/s).  A 2026-10-16 measurement on r73 found the opposite: 2-GPU **84.4** vs 3-GPU **56.9** t/s
-(13.8K prompt, GSQ-IQ3_XXS, `-ncmoe 48 -sm tensor`, adaptive MTP), and it is present at **100 % arena
-residency** (so not an arena-sizing artifact).  3-GPU prefill is the fastest (1258 t/s).  Broader than MTP
-(the fresh arm is MTP; the matrix must cover plain and fully-resident too).
+**Closed by r113.**  (a) the `pool_bg_worker` SIGSEGV is moot — the worker was removed (the demand path no
+longer moves an arena victim into the pool).  (b) "prefill must not evict pool entries" now holds by
+construction: nothing on the demand path evicts, the prefill staging reads the pool, and a miss takes only an
+EMPTY slot.  The measured answer to (c) replaced the design question: the pool's **content** dominates the
+disk traffic (15x between expert-id order and the heat-ranked arena complement, on a real trace through the
+new two-tier model in `scripts/moe-trace-replay.py`), while every eviction/hand-over policy measured within
+0-246 MiB of the others — so the pool is laid out in bulk and left alone, and the literal "swap with the
+entry being pulled from the pool" measured **2x slower decode** for no benefit.
 
-Working home [`wip/three-gpu-performance/`](wip/three-gpu-performance/README.md) (revived 2026-10-16 from the
-r55 `mtp-3gpu-decode` campaign; that campaign's r55 closure record moved with it and is kept beside the
-README as `RESOLUTION-2026-10-13-closed.md`).  Step 0: re-run the r55 harness on the current tree, then the full
-`{2,3}` x `{plain,MTP}` x `{partial,fully-resident}` x `{tensor,layer}` grid, then the all-reduce /
-identity-path / tensor-split-gather profile.
+**(1) `MOE_HOST_POOL_DIO` is still a hand-set default — the "inverted optimum" is unfixed.**  On the field
+config (`-ncmoe 48`, 70K prompt, 128-token decode, 2x R9700) `DIO=0` measures 733 t/s prefill / 53.7 t/s
+decode against `pinned` 836 / 57.5, while the shipped `DIO=1` measures 287 / 23.1; on the 30 GiB box the
+opposite holds (page cache thrashes).  Fix: choose at the first pool build from `MemAvailable` vs the host
+expert set — the same measurement `MOE_HOST_POOL_RAM_PCT` already takes — with a kill switch.
 
-## 87. `--host-experts pool` follow-ups from the gfx1100 field session — ROBUSTNESS + PERFORMANCE
+**(2) The pool-backed prefill issues one `cudaMemcpyAsync` per expert.**  The pinned-master path stages a
+whole table with ONE `moe_cache_stage_kernel` launch.  This is the rest of the gap to `pinned` (733 vs 836
+t/s at `DIO=0`) and needs a per-expert slot map upload (the `prs` pattern) plus a "no slot" sentinel falling
+back to the bounce.
 
-Opened 2026-10-22 (r111), from the fingon (gfx1100, 24 GB VRAM, **30 GiB RAM**) session that validated the
-master drop on a model **larger than RAM** (35B-A3B **Q8_0**, 37.8 GB).  All configurations produced
-byte-identical text, so this is not a purity item — it is one defect and two design/tuning questions.
+**(3) Long-session adaptation.**  Between the two bulk layouts the pool is static, so a single session that
+changes topic keeps its pre-prompt layout.  Do not add an eviction policy for this before re-running the
+two-tier model on a *long, topic-shifting* trace: on the short trace every policy was within noise.
 
-**(a) DEFECT — SIGSEGV in `pool_bg_worker`** with the **buffered** pool at `MOE_HOST_POOL_FRAC=75`,
-`-ncmoe 36`, on the 30 GiB box (2/2 runs, `memcpy` from the model mapping, `error 4` read of an unmapped
-page).  The DIO variant at the same FRAC ran clean (3/3), as did FRAC 25/50.  My page-aligned-`munmap`
-hypothesis (the r49 reclaim can eat a page of an adjacent host expert tensor, which r111 now *reads*) is
-**refuted** — `LLAMA_LOAD_RELEASE_MMAP=0` still crashes — though that page-alignment hazard is real and
-should be guarded cheaply.  Suspects: the one path that reads the file/mapping **outside `g_mutex`**, or the
-`cudaHostAlloc`-failure path under pressure leaving an inconsistent pool.  Needs a fix (and an r11x); the
-workaround is `MOE_HOST_POOL_DIO=1` or a lower FRAC.
-
-**r112 update:** the defaults are now `MOE_HOST_POOL_FRAC=80` + `MOE_HOST_POOL_DIO=1` (the measured knee for
-the disk tier: `-ncmoe 40` on the 30 GiB box, 2000-token runs, 78.3 t/s decode / 0.3 GiB swap), which also
-makes the (a) crash opt-in (`DIO=0` only).  The items below stay open.
-
-**(b) Prefill must not evict pool entries.**  Whole-table staging already bypasses the pool (r111: +13 %
-prefill on gfx1201), but the used-expert upload and the pre-sizing eager fills still churn it.  The rule to
-implement: a PREFILL-band access may read a pool slot but must never evict or admit one; only the
-decode/verify band owns pool residency.  Then the disk only loads what is not already in VRAM / the host
-pool.
-
-**(c) The arena eviction is already a swap with the pool** (`access_locked` enqueues the victim into the
-pool and sources the incoming expert from it), but the two LRUs are independent, the victim enqueue can be
-dropped, and nothing feeds L2 residency back into L1 admission.  Also, `MOE_HOST_POOL_FRAC`'s optimum is
-**inverted** between the two regimes: when the host set fits in RAM a small pool wins (the page cache is the
-lever: 36-45 t/s at FRAC 10 vs 7.8 at FRAC 50 on `-ncmoe 40`), while on the disk tier a large pool with
-`MOE_HOST_POOL_DIO=1` is the stable shape (`-ncmoe 36` FRAC 75: **74.4 t/s, zero swap**, vs 71.8 + swap at
-FRAC 90).  With the host remainder fitting in RAM, plain `pinned` still wins outright (`-ncmoe 32`:
-**83.7 t/s**) — as the default-on policy intends.
-
-Working home [`wip/host-pool-swap-and-prefill/`](wip/host-pool-swap-and-prefill/README.md) (full measurement
-table, repro commands, suspects).  Related: #86 (admission quality) is the same tiering question on the
-*policy* axis.
-
-## 59. `ngram-mod` + `draft-mtp-adaptive` halves decode with host-resident MoE experts — PERFORMANCE
-
-Opened 2026-10-14; scoping.  With partially or fully host-resident MoE experts (`-ncmoe`/`-cmoe`, the
-expert cache or op-offload path active), the README's recommended
-`--spec-type draft-mtp-adaptive,ngram-mod` combo roughly **halves decode throughput**; dropping
-`ngram-mod` and using plain `draft-mtp-adaptive` restores the expected rate.  The combo is the measured
-best on a fully device-resident model, so the interaction is with the host-expert serve path.  Documented
-in the README "Recommended configuration" section.  Working home
-[`wip/ngram-mod-host-experts/`](wip/ngram-mod-host-experts/README.md) (hypotheses: verify width against the
-per-op host-expert upload, the MoE cache band and verify graph recapture, the staging-ring width; bisect
-plan in that README).
+Related: #86 (admission quality) is the same tiering question on the *arena policy* axis.
 
 ## 86. MoE expert-cache admission quality — the ~11 pt gap to a static oracle — PERFORMANCE (scoping)
+
 
 Opened 2026-10-22 (r110), from the P1 instrument that closed `#61`.  On a real 35B-A3B trace (2 GPU
 `-sm tensor -ncmoe 40`, `MOE_EXPERT_CACHE_MIB=4096` = 43.8 % residency, 296-token prompt, 128 decode
@@ -126,34 +87,23 @@ already have: pass-start pre-admission (`window`) *lowers* `h` to 0.7846 while c
 prefetch is not automatically a win.  Design, invariants and gates:
 [`wip/moe-admission-quality/`](wip/moe-admission-quality/README.md).
 
-## 65. IQ4_NL field (MTP) + `--host-experts pool` decode collapses — MEMORY
-
-The Qwen3.8-Flash-Next IQ4_NL 70K field config (`--n-cpu-moe 48`, MTP n7, `--cache-ram 16384`) decodes at
-**2.1 t/s** in `--host-experts pool` against the handover's recorded 13.7, while prefill is fine (**497**),
-the H2D ring is armed and there are **0 faults**.  The non-MTP `-ncmoe 36/48` pool decode (18-40) matches
-the handover's ~2.4x pool penalty, so this reads as a **pool memory shortfall** specific to the 70K/MTP
-config.  Parked by the maintainer (2026-10-15) to be picked up after r67; that release is long superseded
-(r99 is current) and the item has not been picked up, so it stays parked until the maintainer says
-otherwise.  `WORKLOG.md` 261015.005.
+## 80. Meta split-state cache: 30+ lookups per node per re-allocation — PERFORMANCE (parked)
 
 
-## 70. Harden the expert-cache re-arm / wide-aux growth against a starved arena — ROBUSTNESS
+r100 removed the walk's heap churn (block 09, issue #184: `wstack`/`wseen` on a reused per-thread
+`monotonic_buffer_resource`).  What is left per graph re-allocation, on the reporter's 4-stream workload, is
+~165k cache hits -- **more than 30 per node** -- each a hash find on the tensor pointer plus a 336-byte
+`memcmp` of the cached `ggml_tensor` copy.
 
-Opened 2026-10-19 while fixing r87.  r87 forces the post-prefill drop, so the r86 trigger (the wide layout
-was never released and the arena decayed) is gone.  But the failure shape was: a re-arm that had to shrink
-one layer to a partial slot count (`layer=47 ... 344 requested, only 202 fit`), a starved wide-aux region
-(thousands of `SLAB_WIDE_AUX` attempts), then a GPU page fault in `k_get_rows_float` on the next graph.
-The re-arm is supposed to be layer-uniform and safe; make a partial/refused re-arm leave the cache
-**wholesale stood down** (the fuse-guard invariant) instead of running a mixed-slot layer, and make the
-wide-aux growth refuse once per pass instead of once per allocation.  Repro: the 10-prompt series against
-r86 in `WORKLOG.md` 261019.002; validation arm `MOE_EXPERT_CACHE_VALIDATE=1`.
-
-**r94 note:** the issue #187 fix adds the missing *graph* half of this stale-pointer family — a captured
-graph is now invalidated when the slab work boundary shrinks (block 10, `WORKLOG.md` 261020.004).  That
-covers the observed #187 fault; it does **not** discharge this item, because a re-arm can still change a
-table's arena placement under a graph that is not being dropped.  Keep #70 open.
+Parked, not attempted: hashing the tensor bytes to skip the `memcmp` would cost about what the `memcmp`
+costs (336 B is ~11 vector words), so the lever is the lookup **count** (the recursion/pruning structure of
+`calculate_split_state` and the pre-warm walk), not the comparison.  Any change there needs the same proof
+the r100 change used: identical states under `GGML_META_SS_VERIFY=1`, identical greedy text and prefill
+KLD, and a same-binary A/B (`GGML_META_SS_SCRATCH=0` is the adjacent switch).  Measurements and the
+reporter's numbers: `archive/work/issue-184-meta-r80r82/RESOLUTION.md`.
 
 ## 79. RDNA3_0 verify-band fusions: the multi-device arm and gfx1101/gfx1102 are unmeasured — PLATFORM VALIDATION
+
 
 **Status: open, accepted limitation.  Shipped default-on in r95 on the maintainer's decision**
 (`WORKLOG.md` 261020.006, record `archive/work/rdna3-verify-fusions/RESOLUTION.md`).  Not a suspected
@@ -182,7 +132,65 @@ Two gaps, both needing hardware the fleet does not have:
 
 ---
 
+## 70. Harden the expert-cache re-arm / wide-aux growth against a starved arena — ROBUSTNESS
+
+
+Opened 2026-10-19 while fixing r87.  r87 forces the post-prefill drop, so the r86 trigger (the wide layout
+was never released and the arena decayed) is gone.  But the failure shape was: a re-arm that had to shrink
+one layer to a partial slot count (`layer=47 ... 344 requested, only 202 fit`), a starved wide-aux region
+(thousands of `SLAB_WIDE_AUX` attempts), then a GPU page fault in `k_get_rows_float` on the next graph.
+The re-arm is supposed to be layer-uniform and safe; make a partial/refused re-arm leave the cache
+**wholesale stood down** (the fuse-guard invariant) instead of running a mixed-slot layer, and make the
+wide-aux growth refuse once per pass instead of once per allocation.  Repro: the 10-prompt series against
+r86 in `WORKLOG.md` 261019.002; validation arm `MOE_EXPERT_CACHE_VALIDATE=1`.
+
+**r94 note:** the issue #187 fix adds the missing *graph* half of this stale-pointer family — a captured
+graph is now invalidated when the slab work boundary shrinks (block 10, `WORKLOG.md` 261020.004).  That
+covers the observed #187 fault; it does **not** discharge this item, because a re-arm can still change a
+table's arena placement under a graph that is not being dropped.  Keep #70 open.
+
+## 59. `ngram-mod` + `draft-mtp-adaptive` halves decode with host-resident MoE experts — PERFORMANCE
+
+
+Opened 2026-10-14; scoping.  With partially or fully host-resident MoE experts (`-ncmoe`/`-cmoe`, the
+expert cache or op-offload path active), the README's recommended
+`--spec-type draft-mtp-adaptive,ngram-mod` combo roughly **halves decode throughput**; dropping
+`ngram-mod` and using plain `draft-mtp-adaptive` restores the expected rate.  The combo is the measured
+best on a fully device-resident model, so the interaction is with the host-expert serve path.  Documented
+in the README "Recommended configuration" section.  Working home
+[`wip/ngram-mod-host-experts/`](wip/ngram-mod-host-experts/README.md) (hypotheses: verify width against the
+per-op host-expert upload, the MoE cache band and verify graph recapture, the staging-ring width; bisect
+plan in that README).
+
+## 51. 3-GPU decode is slower than 2-GPU (MTP and plain, partial and fully resident) — PERFORMANCE
+
+
+Reopened 2026-10-16; measured.  Formerly closed at r55 (a fresh A/B then found 3-GPU MTP 74.3 vs 2-GPU
+65.0 t/s).  A 2026-10-16 measurement on r73 found the opposite: 2-GPU **84.4** vs 3-GPU **56.9** t/s
+(13.8K prompt, GSQ-IQ3_XXS, `-ncmoe 48 -sm tensor`, adaptive MTP), and it is present at **100 % arena
+residency** (so not an arena-sizing artifact).  3-GPU prefill is the fastest (1258 t/s).  Broader than MTP
+(the fresh arm is MTP; the matrix must cover plain and fully-resident too).
+
+Working home [`wip/three-gpu-performance/`](wip/three-gpu-performance/README.md) (revived 2026-10-16 from the
+r55 `mtp-3gpu-decode` campaign; that campaign's r55 closure record moved with it and is kept beside the
+README as `RESOLUTION-2026-10-13-closed.md`).  Step 0: re-run the r55 harness on the current tree, then the full
+`{2,3}` x `{plain,MTP}` x `{partial,fully-resident}` x `{tensor,layer}` grid, then the all-reduce /
+identity-path / tensor-split-gather profile.
+
+## 36. Genuine CPU/GPU overlap for the MoE misses (Strata's pipeline shape) — PERFORMANCE (scoping)
+
+
+Opened 2026-10-05.  The delivered cache-on path computes every expert on the GPU (resident from VRAM,
+misses via UVA over PCIe); the cache-off path computes them on the CPU but **serialised** with the GPU
+splits.  Our own CPU-computes-misses arm was correct and negative above a ~1.2 GiB arena (the loss is
+~600 scheduler dispatches + ~3 cross-backend copies per layer/token, not CPU compute; see
+`archive/work/moe-expert-cache/WORKLOG.md`).  Strata's custom engine runs the CPU pool *because* it is not
+under llama.cpp's serial scheduler.  **Next:** O0 — measure how much of a 52 t/s token is the UVA cold
+fraction at 43 % residency; if it is <20 %, park it.  Design space and gates:
+[`wip/moe-cpu-overlap/`](wip/moe-cpu-overlap/README.md).
+
 ## Documented, deliberately NOT fixed (accepted limitations — do not re-report)
+
 
 - **`mmf32` covers the skinny F32 shapes only (r104, `TODO` #82 closed) — accepted.**  A full-F32 model's FFN
   GEMMs (`m` ≫ 256: dense F32/F16-weights-heavy prefill) still fall through to rocBLAS/hipBLASLt, so they keep
@@ -246,21 +254,8 @@ Two gaps, both needing hardware the fleet does not have:
   draft matmul wider, so it is a non-goal, not a parked idea.  Record:
   `archive/work/spec-draft-mtp-vocab/VALIDATION-2026-10-22.md` §5.
 
-## 80. Meta split-state cache: 30+ lookups per node per re-allocation — PERFORMANCE (parked)
-
-r100 removed the walk's heap churn (block 09, issue #184: `wstack`/`wseen` on a reused per-thread
-`monotonic_buffer_resource`).  What is left per graph re-allocation, on the reporter's 4-stream workload, is
-~165k cache hits -- **more than 30 per node** -- each a hash find on the tensor pointer plus a 336-byte
-`memcmp` of the cached `ggml_tensor` copy.
-
-Parked, not attempted: hashing the tensor bytes to skip the `memcmp` would cost about what the `memcmp`
-costs (336 B is ~11 vector words), so the lever is the lookup **count** (the recursion/pruning structure of
-`calculate_split_state` and the pre-warm walk), not the comparison.  Any change there needs the same proof
-the r100 change used: identical states under `GGML_META_SS_VERIFY=1`, identical greedy text and prefill
-KLD, and a same-binary A/B (`GGML_META_SS_SCRATCH=0` is the adjacent switch).  Measurements and the
-reporter's numbers: `archive/work/issue-184-meta-r80r82/RESOLUTION.md`.
-
 ## Where the current lists live
+
 
 - **Open campaigns and scoping notes:** [`wip/CAMPAIGNS.md`](wip/CAMPAIGNS.md) (the index for `wip/`).
 - **Closed campaigns, with their evidence:** `archive/work/<campaign>/` (`RESOLUTION.md` where the campaign

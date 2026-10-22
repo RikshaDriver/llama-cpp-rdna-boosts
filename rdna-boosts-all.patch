@@ -49496,10 +49496,10 @@ index 5605bf7a4..10b689844 100644
 \ No newline at end of file
 diff --git a/ggml/src/ggml-cuda/moe-expert-cache.cu b/ggml/src/ggml-cuda/moe-expert-cache.cu
 new file mode 100644
-index 000000000..bf68f8052
+index 000000000..69d41cabd
 --- /dev/null
 +++ b/ggml/src/ggml-cuda/moe-expert-cache.cu
-@@ -0,0 +1,5917 @@
+@@ -0,0 +1,5940 @@
 +// wip/moe-expert-cache — Phase 1a foundation.  See moe-expert-cache.h for the contract.
 +
 +#include "moe-expert-cache.h"
@@ -49519,15 +49519,11 @@ index 000000000..bf68f8052
 +#if !defined(_WIN32)
 +#include <dirent.h>
 +#include <fcntl.h>
-+#include <sys/resource.h>
 +#include <sys/stat.h>
 +#include <unistd.h>
 +#endif
-+#include <condition_variable>
-+#include <deque>
 +#include <set>
 +#include <mutex>
-+#include <thread>
 +#include <string>
 +#include <tuple>
 +#include <unordered_map>
@@ -49718,10 +49714,10 @@ index 000000000..bf68f8052
 +    size_t      align       = 4096;
 +    std::vector<int32_t>                 slot_expert;   // slot -> expert, -1 empty
 +    std::unordered_map<int32_t, int32_t> expert_slot;
-+    // ADDITIVE lifecycle per slot: 0 = free, 1 = resident (the pool holds it, the arena does not),
-+    // 2 = retiring (the arena admitted it; freed once every in-flight copy drains), 3 = the low-priority
-+    // background worker is filling it (data not ready), 4 = that fill was cancelled (the arena took the
-+    // expert first) and is freed by the worker after its read.
++    // Lifecycle per slot (TODO #87): 0 = free (never filled, or handed over and retired),
++    // 1 = resident, 2 = retiring (a bulk seed copied it into the arena wholesale, so it is freed once every
++    // in-flight copy drains).  There is no reserved/background state: the demand path fills and hands over
++    // inline, never off the critical path.
 +    std::vector<uint8_t>                 slot_state;
 +    // Per (slot, device) in-flight events.  The pool is PROCESS-WIDE, so the same slot can be copied to
 +    // several devices and every copy must drain before the slot is reused or retired.  Indexed
@@ -49739,12 +49735,10 @@ index 000000000..bf68f8052
 +// Keyed by the host tensor only: the pool is PROCESS-WIDE (one copy of each whole expert for every
 +// device), and `MOE_HOST_POOL_MIB` is the total non-swappable budget, split equally over the registered
 +// host tensors.  Per-(slot, device) events make a shared slot safe to copy to several devices.
-+// Deliberately LEAKED (a heap object with no destructor) for the same reason as the background worker's
-+// mutex/cv/queue below: the pool is touched by that DETACHED worker, which can still be inside a (slow, in
-+// `MOE_HOST_POOL_DIO` mode multi-hundred-ms disk) read when the process starts tearing down.  A static map
-+// would be destroyed under it, so the worker's publish step erased a mapping in freed memory -- measured as
-+// `double free or corruption` in `pool_reap_locked` at exit, only reachable once the pool became the ONLY
-+// host source (wip/host-expert-master-drop) and therefore did real background I/O.
++// Deliberately LEAKED (a heap object with no destructor): the pool is filled on the critical path, but a
++// process-lifetime container that other threads may still be walking while the runtime tears down has
++// bitten this code before (`double free or corruption` in `pool_reap_locked` at exit, once the pool became
++// the ONLY host source in wip/host-expert-master-drop).  Leaking it costs one map.
 +std::map<const void *, host_pool_t> & g_host_pools = *new std::map<const void *, host_pool_t>();   // node-based: pointers stay valid
 +bool    g_pool_enabled     = false;
 +bool    g_pool_requested   = false;  // --host-experts pool (set by the loader before tables are registered)
@@ -49756,28 +49750,20 @@ index 000000000..bf68f8052
 +// double-caching the same bytes, which is what pushes a memory-tight box into swap thrash.  On a box where
 +// the set fits in RAM, `--host-experts pinned` (the default mode) is faster and cheaper than either.
 +int     g_pool_frac        = 80;     // MOE_HOST_POOL_FRAC: pool size as a % of the MoE host expert bytes
++int     g_pool_ram_pct     = 80;     // MOE_HOST_POOL_RAM_PCT: ceiling on the WHOLE pinned pool, as a % of
++                                     //   MemAvailable at the first pool build (0 = no ceiling).  The FRAC is
++                                     //   a percentage of the model's host expert set, which says nothing about
++                                     //   whether the box can PIN that much: on a tight box an oversized pool
++                                     //   makes each table's cudaHostAlloc fail and silently falls back to the
++                                     //   per-table bounce (disk reads), so bound it by real RAM instead.
++int64_t g_pool_ram_cap     = -1;     // bytes; -1 = not computed yet
++int64_t g_pool_ram_used    = 0;      // bytes pinned by the pools built so far
 +int64_t g_preflight_host_bytes = 0;  // Σ host expert bytes over host-expert devices (the AUTO basis)
 +bool    g_pool_prewarm     = true;   // MOE_HOST_POOL_PREWARM: fill every pool slot when it is built
 +bool    g_pool_dio         = false;  // MOE_HOST_POOL_DIO=1: O_DIRECT fill (debug fallback; bypasses the page cache)
-+bool    g_pool_bg          = true;   // MOE_HOST_POOL_BGFETCH=0: do eviction fills synchronously on the critical path
 +bool    g_pool_prefetch   = false; // MOE_HOST_POOL_PREFETCH=1: speculatively warm the pool from the routing
 +                                   //   (a net loss unless the pool nears full residency -- long-prompt sweep)
 +int64_t g_pool_total_bytes = 0;   // PROCESS-WIDE total budget (split over all registered host tensors)
-+
-+// Target 2: a LOW-PRIORITY background queue for the eviction prefetch.  An eviction no longer blocks the
-+// token on a page-cache read; it hands the expert to the worker, which fills a reserved slot off the
-+// critical path.  The worker holds `g_mutex` only to reserve/publish a slot and reads the GGUF WITHOUT
-+// it, so it never stalls an urgent load.  It re-checks `expert_slot` before reserving, so a synchronous
-+// critical-path fill that beat it makes the request a no-op.
-+// These are deliberately LEAKED (heap objects with no destructor): the detached worker blocks in
-+// `g_bg_cv.wait`, and a static `condition_variable` destructor at process exit deadlocks in
-+// `pthread_cond_destroy` (observed: `__cxa_finalize` waiting on the worker's futex).  A process-lifetime
-+// worker needs process-lifetime primitives.
-+std::mutex &              g_bg_mutex = *new std::mutex();
-+std::condition_variable & g_bg_cv    = *new std::condition_variable();
-+std::deque<std::pair<host_pool_t *, int32_t>> & g_bg_queue = *new std::deque<std::pair<host_pool_t *, int32_t>>();
-+bool                      g_bg_stop    = false;
-+bool                      g_bg_started = false;
 +
 +// An alias is keyed by a scheduler tensor address, and the graph allocator reuses those addresses across graphs - with
 +// several devices, for a split input on ANOTHER device.  A lookup that is not preceded by a registration in the same
@@ -50157,12 +50143,18 @@ index 000000000..bf68f8052
 +    if (g_pool_frac > 100) {
 +        g_pool_frac = 100;
 +    }
++    g_pool_ram_pct     = env_int("MOE_HOST_POOL_RAM_PCT", 80);
++    if (g_pool_ram_pct < 0) {
++        g_pool_ram_pct = 0;
++    }
++    if (g_pool_ram_pct > 100) {
++        g_pool_ram_pct = 100;
++    }
 +    g_pool_prewarm     = env_int("MOE_HOST_POOL_PREWARM", 1) != 0;
 +    // r112 default: bypass the page cache (see the g_pool_frac comment).  MOE_HOST_POOL_DIO=0 restores the
 +    // buffered fill, which is faster only when the whole set fits in RAM -- i.e. when `pinned` is better
 +    // anyway.
 +    g_pool_dio         = env_int("MOE_HOST_POOL_DIO", 1) != 0;
-+    g_pool_bg          = env_int("MOE_HOST_POOL_BGFETCH", 1) != 0;
 +    g_pool_prefetch    = env_int("MOE_HOST_POOL_PREFETCH", 0) != 0;
 +    g_pool_total_bytes = (g_pool_enabled && !g_pool_auto) ? moe_host_pool_mib() * 1024 * 1024 : 0;
 +    if (g_pool_enabled) {
@@ -50405,11 +50397,11 @@ index 000000000..bf68f8052
 +    const size_t aoff = off & ~(align - 1);
 +    const size_t skip = off - aoff;
 +    const size_t blen = (skip + len + align - 1) & ~(align - 1);
-+    // THREAD-LOCAL: the critical-path fill runs under `g_mutex`, but the background prefetch worker reads
-+    // the file WITHOUT it (by design, so a slow page-cache miss never stalls an urgent load), so a shared
-+    // static bounce was raced and corrupted the tail of an expert (measured as a POOLREAD MISMATCH from
-+    // ~520 KiB into a 576 KiB expert, variably).  `MOE_HOST_POOL_DIO` is the disk-tier mode, so this path
-+    // must be correct on its own.
++    // THREAD-LOCAL: fills are issued under `g_mutex`, but a caller may hold the lock on one thread while
++    // another path is inside this function (and the alignment tail copy must never share a bounce): a
++    // shared static bounce was raced once and corrupted the tail of an expert (measured as a POOLREAD
++    // MISMATCH from ~520 KiB into a 576 KiB expert, variably).  `MOE_HOST_POOL_DIO` is the disk-tier mode,
++    // so this path must be correct on its own.
 +    static thread_local void * bounce      = nullptr;
 +    static thread_local size_t bounce_size = 0;
 +    if (bounce == nullptr || bounce_size < blen) {
@@ -50472,6 +50464,83 @@ index 000000000..bf68f8052
 +    }
 +}
 +
++// TODO #87: how much can this box actually PIN?  `MOE_HOST_POOL_FRAC` is a percentage of the model's host
++// expert set, not of RAM, so on a memory-tight box it can ask for more pinned memory than exists -- and an
++// oversized pool does not degrade gracefully: each table's `cudaHostAlloc` fails, that table's pool is
++// marked failed, and its reads silently fall back to the per-table bounce (i.e. the disk).  Better to trim
++// the pool to what fits and say so.  Measured once, at the first pool build (after the model's own host
++// mapping exists, before it is faulted in), so it is stable and order-independent.
++static int64_t pool_available_ram_bytes() {
++#if defined(__linux__)
++    FILE * f = fopen("/proc/meminfo", "r");
++    if (f == nullptr) {
++        return -1;
++    }
++    char line[256];
++    int64_t kb = -1;
++    while (fgets(line, sizeof(line), f) != nullptr) {
++        long long v = 0;
++        if (sscanf(line, "MemAvailable: %lld kB", &v) == 1) {
++            kb = (int64_t) v;
++            break;
++        }
++    }
++    fclose(f);
++    return kb > 0 ? kb * 1024 : -1;
++#else
++    return -1;
++#endif
++}
++
++// Cap `slots` so the WHOLE pinned pool stays under `MOE_HOST_POOL_RAM_PCT` % of MemAvailable.  Caller holds
++// `g_mutex` (it updates the process-wide running total).
++static int pool_clamp_slots_to_ram(int slots, size_t host_bytes, const table_t & t) {
++    if (g_pool_ram_pct <= 0 || slots <= 0 || host_bytes == 0) {
++        return slots;   // ceiling disabled
++    }
++    if (g_pool_ram_cap < 0) {
++        const int64_t avail = pool_available_ram_bytes();
++        g_pool_ram_cap = avail > 0 ? (int64_t) ((double) avail * (double) g_pool_ram_pct / 100.0) : 0;
++        if (g_pool_ram_cap > 0) {
++            GGML_LOG_INFO("%s: host pool RAM ceiling: %d%% of MemAvailable = %.1f MiB (MOE_HOST_POOL_RAM_PCT)\n",
++                          __func__, g_pool_ram_pct, (double) g_pool_ram_cap / (1024.0 * 1024.0));
++        }
++    }
++    if (g_pool_ram_cap <= 0) {
++        return slots;   // no MemAvailable (non-Linux, or unreadable): keep the configured size
++    }
++    const int64_t spare = g_pool_ram_cap - g_pool_ram_used;
++    if (spare <= 0) {
++        static bool warned_full = false;
++        if (!warned_full) {
++            warned_full = true;
++            GGML_LOG_WARN("%s: the host pool is at its RAM ceiling (%.1f MiB pinned, %d%% of MemAvailable); "
++                          "layer=%d role=%s gets ONE slot and the rest of its reads take the bounce path.  "
++                          "Lower MOE_HOST_POOL_FRAC (or raise MOE_HOST_POOL_RAM_PCT) if that is not what you "
++                          "want.\n", __func__, (double) g_pool_ram_used / (1024.0 * 1024.0), g_pool_ram_pct,
++                          t.layer, t.role.c_str());
++        }
++        return 1;
++    }
++    const int fit = (int) (spare / (int64_t) host_bytes);
++    if (fit < slots) {
++        static bool warned_trim = false;
++        if (!warned_trim) {
++            warned_trim = true;
++            GGML_LOG_WARN("%s: trimming the host pool to the RAM ceiling: layer=%d role=%s would take %d "
++                          "slots (%.1f MiB) but only %.1f MiB of the %d%% MemAvailable ceiling is left; using "
++                          "%d.  MOE_HOST_POOL_FRAC=%d is a percentage of the model's HOST EXPERT SET, not of "
++                          "RAM -- lower it (or raise MOE_HOST_POOL_RAM_PCT) to size this deliberately.\n",
++                          __func__, t.layer, t.role.c_str(), slots,
++                          (double) slots * (double) host_bytes / (1024.0 * 1024.0),
++                          (double) spare / (1024.0 * 1024.0), g_pool_ram_pct, fit, g_pool_frac);
++        }
++        slots = fit < 1 ? 1 : fit;
++    }
++    g_pool_ram_used += (int64_t) slots * (int64_t) host_bytes;
++    return slots;
++}
++
 +// The pool for `t`'s host tensor, created lazily and shared by every per-device table of that tensor.
 +// Caller holds `g_mutex`.  Returns null (and every fill falls back to the full master) when the pool is
 +// off, the source is unknown, or the budget is too small for one expert.
@@ -50530,6 +50599,7 @@ index 000000000..bf68f8052
 +    if (slots > t.n_experts) {
 +        slots = t.n_experts;
 +    }
++    slots = pool_clamp_slots_to_ram(slots, t.host_bytes, t);
 +    GGML_LOG_INFO("%s: host pool (%s): %zu host tensors, %lld MiB host expert bytes; layer=%d role=%s -> "
 +                  "%d/%d slots of %zu B (%.1f MiB)\n",
 +                  __func__,
@@ -50654,10 +50724,116 @@ index 000000000..bf68f8052
 +    return ok;
 +}
 +
++// TODO #87: the DEMAND path never evicts a pool entry.  The pool and the arena are two tiers of one bounded
++// cache (pinned host RAM / VRAM), so the only way a demand miss may change the pool is by consuming an
++// EMPTY slot; a full pool means both tiers already cover what they can, and the miss is served from the
++// model mapping / the disk (or, on the decode band, swapped with the arena victim).  That is what stops the
++// old behaviour -- every miss evicting some other resident -- from turning one cold token into a storm of
++// re-reads.  The eviction-capable helper below stays for the load-time prewarm and the one-shot
++// prompt-tally re-rank (both of which build the working set once, off the demand path).
++
++// A resident slot for `expert` (state 1), or null.  No state change beyond the LRU clock.
++static char * pool_peek_locked(host_pool_t & p, int expert, int * out_slot) {
++    if (expert < 0 || expert >= p.n_experts) {
++        return nullptr;
++    }
++    const auto hit = p.expert_slot.find(expert);
++    if (hit == p.expert_slot.end()) {
++        return nullptr;
++    }
++    const int hs = hit->second;
++    if (hs < 0 || hs >= p.slots || p.slot_state[(size_t) hs] != 1) {
++        return nullptr;   // never published, or retiring (state 2)
++    }
++    p.hits++;
++    p.last[(size_t) expert] = ++p.clock;
++    if (out_slot != nullptr) {
++        *out_slot = hs;
++    }
++    return p.base + (size_t) hs * p.host_bytes;
++}
++
++// A resident-slot test that touches NO policy state (no hit counter, no LRU clock): the arena exchange
++// asks "does the pool still hold this victim?" without making the victim look demanded.
++static bool pool_resident_locked(const host_pool_t & p, int expert) {
++    if (expert < 0 || expert >= p.n_experts) {
++        return false;
++    }
++    const auto it = p.expert_slot.find(expert);
++    if (it == p.expert_slot.end()) {
++        return false;
++    }
++    const int s = it->second;
++    return s >= 0 && s < p.slots && p.slot_state[(size_t) s] == 1;
++}
++
++// The first slot that holds no expert and is not being retired/reserved (-1 when the pool is full).
++static int pool_free_slot_locked(host_pool_t & p) {
++    pool_reap_locked(p);
++    for (int s = 0; s < p.slots; s++) {
++        if (p.slot_expert[(size_t) s] < 0) {
++            return s;
++        }
++    }
++    return -1;
++}
++
++// Publish `expert` as the resident content of `slot` (replacing whatever the map said it held).  The SLOT
++// BYTES are the caller's business -- used by `pool_fill_empty_locked` (filled from the file/mapping) and by
++// the arena->pool exchange in `access_locked` (filled from the victim's arena slot).
++static void pool_slot_assign_locked(host_pool_t & p, int slot, int32_t expert) {
++    if (slot < 0 || slot >= p.slots || expert < 0) {
++        return;
++    }
++    const int32_t old = p.slot_expert[(size_t) slot];
++    if (old >= 0) {
++        const auto it = p.expert_slot.find(old);
++        if (it != p.expert_slot.end() && it->second == slot) {
++            p.expert_slot.erase(it);
++        }
++    }
++    const auto pre = p.expert_slot.find(expert);
++    if (pre != p.expert_slot.end() && pre->second != slot) {
++        p.expert_slot.erase(pre);   // never leave two indices for one expert
++    }
++    p.slot_expert[(size_t) slot] = expert;
++    p.expert_slot[expert]        = slot;
++    p.slot_state[(size_t) slot]  = 1;
++    p.last[(size_t) expert]      = ++p.clock;
++}
++
++// Fill the first EMPTY slot with `expert` and return its slot base (null when the pool is full or the read
++// failed).  Never evicts.  Caller holds `g_mutex`.
++static char * pool_fill_empty_locked(host_pool_t & p, int expert, int * out_slot) {
++    if (expert < 0 || expert >= p.n_experts || p.failed) {
++        return nullptr;
++    }
++    if (p.expert_slot.find(expert) != p.expert_slot.end()) {
++        return nullptr;   // already resident (or retiring): the caller must peek, not fill
++    }
++    const int slot = pool_free_slot_locked(p);
++    if (slot < 0) {
++        return nullptr;
++    }
++    char * dst = p.base + (size_t) slot * p.host_bytes;
++    if (!pool_fill_slot_locked(p, expert, dst)) {
++        p.failed = true;
++        return nullptr;
++    }
++    pool_slot_assign_locked(p, slot, expert);
++    p.fills++;
++    if (out_slot != nullptr) {
++        *out_slot = slot;
++    }
++    return dst;
++}
++
 +// Ensure `expert` is in the pool and return its slot base (and the slot index), or null when the pool is
 +// unusable (the caller then reads the full master / disk directly).  A miss is a memcpy out of the model
-+// mapping (or a buffered GGUF read).  Retiring slots (state 2, their arena copy is still in flight) are
-+// never reused or evicted.  Caller holds `g_mutex`.
++// mapping (or a buffered GGUF read).  This is the EVICTION-CAPABLE helper: only the load-time prewarm and
++// the one-shot prompt-tally re-rank may call it (they build the working set once); the demand path uses
++// `pool_peek_locked` + `pool_fill_empty_locked`.  Retiring slots (state 2, their arena copy is still in
++// flight) are never reused or evicted.  Caller holds `g_mutex`.
 +static char * pool_slot_locked(host_pool_t & p, int expert, int * out_slot, bool sync_on_evict) {
 +    if (expert < 0 || expert >= p.n_experts) {
 +        return nullptr;
@@ -50674,9 +50850,8 @@ index 000000000..bf68f8052
 +            }
 +            return p.base + (size_t) hs * p.host_bytes;
 +        }
-+        // State 3/4: the background worker owns this slot (its data is not ready, or its fill was
-+        // cancelled).  Do NOT duplicate the read here; return null so the caller falls back to the
-+        // master (cheap, pinned) and the background entry becomes the ready copy.
++        // State 2: retiring (its copy into the arena is still in flight).  Never duplicate the read; return
++        // null so the caller serves this miss from the bounce instead.
 +        return nullptr;
 +    }
 +    p.misses++;
@@ -50734,290 +50909,145 @@ index 000000000..bf68f8052
 +    return dst;
 +}
 +
-+// ---------------------------------------------------------------------------------------------
-+// Target 2: the low-priority background eviction prefetch
-+// ---------------------------------------------------------------------------------------------
-+
-+static void pool_bg_worker();
-+
-+// Start the worker on first use.  It is detached: it lives for the process and only touches
-+// `host_pool_t`s (stable `std::map` nodes) under `g_mutex` for the reserve/publish steps.
-+static void pool_bg_start() {
-+    if (g_bg_started) {
-+        return;
-+    }
-+    g_bg_started = true;
-+    std::thread t(pool_bg_worker);
-+    t.detach();
-+}
-+
-+// Hand an expert to the background worker.  A dropped request is only a lost prefetch, never a
-+// correctness issue (the critical path still reads it from the master on a miss).
-+static void pool_bg_enqueue(host_pool_t * p, int32_t expert) {
-+    if (!g_pool_bg || p == nullptr) {
-+        return;
-+    }
-+    pool_bg_start();
-+    std::lock_guard<std::mutex> lk(g_bg_mutex);
-+    if (g_bg_queue.size() >= 8192) {
-+        return;
-+    }
-+    g_bg_queue.emplace_back(p, expert);
-+    g_bg_cv.notify_one();
-+}
-+
-+// The background fill.  It reserves a slot and opens the fd under `g_mutex`, reads the GGUF WITHOUT it
-+// (so a slow page-cache miss never stalls an urgent load), then publishes.  If the critical path filled
-+// the same expert meanwhile, `expert_slot` already holds it and the reserve is dropped.
-+static void pool_bg_worker() {
-+#if !defined(_WIN32)
-+    // Lowest practical scheduling priority: this thread may only use the I/O the critical path is not.
-+    (void) setpriority(PRIO_PROCESS, 0, 19);
-+#endif
-+    for (;;) {
-+        host_pool_t * p  = nullptr;
-+        int32_t       ex = -1;
-+        {
-+            std::unique_lock<std::mutex> lk(g_bg_mutex);
-+            g_bg_cv.wait(lk, [] { return g_bg_stop || !g_bg_queue.empty(); });
-+            if (g_bg_stop && g_bg_queue.empty()) {
-+                return;
-+            }
-+            const auto item = g_bg_queue.front();
-+            g_bg_queue.pop_front();
-+            p  = item.first;
-+            ex = item.second;
-+        }
-+        if (p == nullptr || p->failed || ex < 0 || ex >= p->n_experts) {
-+            continue;
-+        }
-+        int    slot = -1, fd = -1;
-+        size_t off = 0, hb = 0, align = 4096;
-+        char * dst = nullptr;
-+        const char * mapped = nullptr;
-+        {
-+            std::lock_guard<std::mutex> lk(g_mutex);
-+            if (p->failed) {
-+                continue;
-+            }
-+            pool_reap_locked(*p);
-+            if (p->expert_slot.find(ex) != p->expert_slot.end()) {
-+                continue;   // already resident (the critical path won) or already in flight
-+            }
-+            for (int s = 0; s < p->slots; s++) {
-+                if (p->slot_expert[(size_t) s] < 0) { slot = s; break; }
-+            }
-+            if (slot < 0) {
-+                int victim = -1;
-+                int64_t best = 0;
-+                for (int s = 0; s < p->slots; s++) {
-+                    const int32_t e = p->slot_expert[(size_t) s];
-+                    if (e < 0 || p->slot_state[(size_t) s] != 1) {
-+                        continue;   // resident-only: never evict a retiring/reserved slot
-+                    }
-+                    if (victim < 0 || p->last[(size_t) e] < best) {
-+                        best   = p->last[(size_t) e];
-+                        victim = e;
-+                        slot   = s;
-+                    }
-+                }
-+                if (victim >= 0) {
-+                    p->expert_slot.erase(victim);
-+                    p->slot_expert[(size_t) slot] = -1;
-+                    p->slot_state[(size_t) slot]  = 0;
-+                    p->evictions++;
-+                }
-+            }
-+            if (slot < 0) {
-+                continue;   // every slot is reserved or retiring: drop the prefetch
-+            }
-+            const bool use_map = !g_pool_dio && p->src_host != nullptr;
-+            if (!use_map && p->fd < 0) {
-+                p->fd = pool_open_file(p->path.c_str(), g_pool_dio);
-+                if (p->fd < 0) {
-+                    p->failed = true;
-+                    continue;
-+                }
-+                pool_fd_align(p->fd, &p->align);
-+            }
-+            p->slot_expert[(size_t) slot] = ex;
-+            p->expert_slot[ex]            = slot;
-+            p->slot_state[(size_t) slot]  = 3;   // reserved: the arena must not read it yet
-+            p->last[(size_t) ex]          = ++p->clock;
-+            fd    = p->fd;
-+            off   = p->file_offs + (size_t) ex * p->host_bytes;
-+            hb    = p->host_bytes;
-+            align = p->align;
-+            dst   = p->base + (size_t) slot * p->host_bytes;
-+            mapped = use_map ? (const char *) p->src_host + (size_t) ex * p->host_bytes : nullptr;
-+        }
-+        const bool ok = mapped != nullptr ? (memcpy(dst, mapped, hb), true)
-+                       : g_pool_dio     ? pool_dio_read(fd, dst, hb, off, align)
-+                                        : (pool_pread(fd, dst, hb, off) == (pool_ssize_t) hb);
-+        {
-+            std::lock_guard<std::mutex> lk(g_mutex);
-+            if (p->slot_state[(size_t) slot] == 3) {
-+                if (ok) {
-+                    p->slot_state[(size_t) slot] = 1;
-+                    p->fills++;
-+                } else {
-+                    p->expert_slot.erase(ex);
-+                    p->slot_expert[(size_t) slot] = -1;
-+                    p->slot_state[(size_t) slot]  = 0;
-+                }
-+            } else if (p->slot_state[(size_t) slot] == 4) {
-+                // Cancelled: the arena took the expert while this read was in flight.  Discard it.
-+                p->expert_slot.erase(ex);
-+                p->slot_expert[(size_t) slot] = -1;
-+                p->slot_state[(size_t) slot]  = 0;
-+            }
-+        }
-+    }
-+}
-+
-+// The critical path served an expert from the master while the background worker had a reservation in
-+// flight: cancel it (state 3 -> 4) so the worker discards its read.  Caller holds `g_mutex`.
-+static void pool_cancel_bg_locked(host_pool_t & p, int32_t expert) {
-+    const auto it = p.expert_slot.find(expert);
-+    if (it != p.expert_slot.end() && it->second >= 0 && it->second < p.slots &&
-+        p.slot_state[(size_t) it->second] == 3) {
-+        p.slot_state[(size_t) it->second] = 4;
-+    }
-+}
-+
 +// Pre-warm a freshly created pool: fill every slot from the GGUF with O_DIRECT while there is no decode
 +// latency to lose.  Experts are ranked by the prefill routing (`t.prefill_count`) when it is available, so
 +// the decode's hot set is resident; otherwise experts are taken in order.  This is the whole point of a
 +// DIO tier: the SSD bandwidth is spent once, up front, not in per-token stalls.  Caller holds `g_mutex`.
-+static void pool_prepopulate_locked(host_pool_t & p, const table_t & t) {
-+    // Rank the experts to warm with.  The arena's current residents are the hot set the cache has already
-+    // learned (the prefill seed for the prompt, plus any admission), so put those first; a host prefill
-+    // tally refines the order; then everything else in id order.  This is what makes the prewarm useful:
-+    // a sequential warm would miss the prompt's experts and the decode would DIO on every token.
-+    std::vector<uint8_t> seen((size_t) p.n_experts, 0);
-+    std::vector<int32_t> rank;
-+    rank.reserve((size_t) p.n_experts);
-+    const bool have_tally = (int) t.prefill_count.size() == p.n_experts;
++// TODO #87: the ONE ranking that decides the host pool's content -- and therefore how much of the
++// decode band is served from pinned RAM instead of the mapping/disk.  Order: the persisted long-horizon
++// heat prior first (it is the only signal that has seen DECODE routing from previous sessions; a prefill
++// tally is nearly flat, because a prefill routes every expert many times), then the in-run prefill tally
++// as the tie-break, then expert id.  Measured offline on a real 10.5K-prompt trace (`scripts/moe-trace-
++// replay.py --pool-frac 80 --pool-init sidecar-complement:<sidecar>`), same arena and pool:
++//   pool ranked by expert id (the pre-r113 behaviour): h 0.9367, pool_h 0.7995, 3571 MiB L3 reads
++//   pool ranked by the persisted heat prior:            h 0.9994, pool_h 0.3923,   237 MiB L3 reads
++// i.e. the pool's CONTENT is worth ~15x the disk traffic, while every eviction/hand-over policy scores
++// within 250 MiB of the others -- which is why the demand path below never churns it (r113).
++static void pool_rank_experts_locked(const table_t & t, std::vector<int32_t> & out) {
++    out.clear();
++    out.reserve((size_t) t.n_experts);
++    for (int e = 0; e < t.n_experts; e++) {
++        out.push_back(e);
++    }
++    const bool have_heat  = (int) t.heat.size() == t.n_experts;
++    const bool have_tally = (int) t.prefill_count.size() == t.n_experts;
++    if (!have_heat && !have_tally) {
++        return;   // expert id order (a cold start: nothing to rank by)
++    }
++    std::sort(out.begin(), out.end(), [&](int32_t a, int32_t b) {
++        if (have_heat) {
++            const uint32_t ha = t.heat[(size_t) a];
++            const uint32_t hb = t.heat[(size_t) b];
++            if (ha != hb) {
++                return ha > hb;
++            }
++        }
++        if (have_tally) {
++            const int64_t ta = t.prefill_count[(size_t) a];
++            const int64_t tb = t.prefill_count[(size_t) b];
++            if (ta != tb) {
++                return ta > tb;
++            }
++        }
++        return a < b;
++    });
++}
 +
-+    std::vector<int32_t> residents;
-+    for (int32_t e : t.slot_expert) {
-+        if (e >= 0 && e < p.n_experts && !seen[(size_t) e]) {
-+            seen[(size_t) e] = 1;
-+            residents.push_back(e);
-+        }
-+    }
-+    if (have_tally) {
-+        std::sort(residents.begin(), residents.end(), [&](int32_t a, int32_t b) {
-+            if (t.prefill_count[(size_t) a] != t.prefill_count[(size_t) b]) {
-+                return t.prefill_count[(size_t) a] > t.prefill_count[(size_t) b];
-+            }
-+            return a < b;
-+        });
-+    }
-+    for (int32_t e : residents) {
-+        rank.push_back(e);
-+    }
-+    if (have_tally) {
-+        std::vector<int32_t> rest;
-+        for (int e = 0; e < p.n_experts; e++) {
-+            if (!seen[(size_t) e]) {
-+                rest.push_back(e);
-+            }
-+        }
-+        std::sort(rest.begin(), rest.end(), [&](int32_t a, int32_t b) {
-+            if (t.prefill_count[(size_t) a] != t.prefill_count[(size_t) b]) {
-+                return t.prefill_count[(size_t) a] > t.prefill_count[(size_t) b];
-+            }
-+            return a < b;
-+        });
-+        for (int32_t e : rest) {
-+            rank.push_back(e);
-+        }
-+    } else {
-+        for (int e = 0; e < p.n_experts; e++) {
-+            if (!seen[(size_t) e]) {
-+                rank.push_back(e);
-+            }
-+        }
-+    }
++static void pool_prepopulate_locked(host_pool_t & p, const table_t & t) {
++    // Load-time warm: fill every slot from the ranked order.  It runs BEFORE the arena is sized/seeded,
++    // so it can only use the persisted prior; `pool_rerank_from_heat_locked` re-derives the pool as the
++    // arena's complement once the arena content is known.  `pool_slot_locked` is the eviction-capable
++    // helper -- it is a bulk, one-shot layout decision, not demand churn.
++    std::vector<int32_t> rank;
++    pool_rank_experts_locked(t, rank);
 +    const int k = p.slots < p.n_experts ? p.slots : p.n_experts;
 +    int filled = 0;
 +    for (int i = 0; i < k; i++) {
-+        if (pool_slot_locked(p, rank[(size_t) i], nullptr, false) == nullptr) {
++        if (pool_fill_empty_locked(p, rank[(size_t) i], nullptr) == nullptr) {
 +            break;
 +        }
 +        filled++;
 +    }
 +    if (filled > 0) {
-+        GGML_LOG_INFO("%s: prewarmed host pool layer=%d role=%s: %d/%d slots (%zu arena-hot first, ranked "
-+                      "by %s)\n",
-+                      __func__, t.layer, t.role.c_str(), filled, p.slots, residents.size(),
-+                      have_tally ? "the prompt tally" : "expert id (no tally)");
++        const bool have_heat = (int) t.heat.size() == t.n_experts;
++        GGML_LOG_INFO("%s: prewarmed host pool layer=%d role=%s: %d/%d slots (ranked by %s)\n",
++                      __func__, t.layer, t.role.c_str(), filled, p.slots,
++                      have_heat ? "the persisted heat prior" :
++                      ((int) t.prefill_count.size() == t.n_experts ? "the prefill tally" : "expert id"));
 +    }
 +}
 +
-+// wip/host-expert-dio-cache Phase 2b (target 3): re-rank a table's host pool from its device prefill
-+// tally.  The pool is built at load time, before any prefill, so its warm order comes from an arena that
-+// has never seen the prompt; this replaces it with the routing the prompt actually produced.  ADDITIVE:
-+// the experts the arena already holds are EXCLUDED, so the pool is the complement of the arena (the
-+// maintainer's contract) and is ready with the next-most-wanted expert when the arena evicts one.
-+// Caller holds `g_mutex`; a no-op without a pool, a tally or a device alias to fill from.
-+static void pool_rerank_from_tally_locked(table_t & t, const std::vector<int32_t> & tally) {
-+    if ((int) tally.size() != t.n_experts || t.n_experts <= 0) {
-+        return;
++// TODO #87: put the pool where it belongs -- its slots hold the hottest experts the ARENA does not, ranked
++// by `pool_rank_experts_locked`.  This is the layout the offline model says is worth ~15x the disk traffic
++// (arena U pool then covers the set); it is a one-shot bulk decision at sizing (after the heat/prefill
++// seeds) and at the first decode-band pass (after the prompt's routing is folded into the heat vector), so
++// it may evict pool entries -- unlike the demand path, which never does.  Caller holds `g_mutex`.
++static void pool_rerank_from_heat_locked(table_t & t) {
++    if (t.n_experts <= 0 || t.identity) {
++        return;   // an identity table holds everything: its pool is the empty complement
 +    }
 +    host_pool_t * pool = table_pool_locked(t);
 +    if (pool == nullptr || pool->failed || pool->slots <= 0) {
 +        return;
 +    }
 +    std::vector<int32_t> rank;
-+    rank.reserve((size_t) t.n_experts);
-+    for (int e = 0; e < t.n_experts; e++) {
-+        if (tally[(size_t) e] <= 0) {
-+            continue;   // the prompt never touched it: not a wanted expert
++    pool_rank_experts_locked(t, rank);
++    // The complement, in rank order: an expert already in the arena needs no pool slot.
++    std::vector<int32_t> want;
++    want.reserve(rank.size());
++    for (int32_t e : rank) {
++        if (t.expert_slot.find(e) == t.expert_slot.end()) {
++            want.push_back(e);
 +        }
-+        if (t.expert_slot.find(e) != t.expert_slot.end()) {
-+            continue;   // the arena already holds it (additive: the pool is the complement)
-+        }
-+        rank.push_back(e);
 +    }
-+    if (rank.empty()) {
-+        return;
-+    }
-+    std::sort(rank.begin(), rank.end(), [&](int32_t a, int32_t b) {
-+        if (tally[(size_t) a] != tally[(size_t) b]) {
-+            return tally[(size_t) a] > tally[(size_t) b];
++    const int n = std::min((int) want.size(), pool->slots);
++    // 1. Free every slot whose expert is NOT wanted.  Freeing is bookkeeping only (no copy), and it MUST
++    //    precede the fills: `pool_slot_locked`'s eviction picks the LRU, which while filling in rank order
++    //    is the hottest entry just placed -- measured as a pool hit rate that got WORSE than expert order.
++    std::unordered_set<int32_t> keep(want.begin(), want.begin() + n);
++    int freed = 0;
++    for (int sl = 0; sl < pool->slots; sl++) {
++        const int32_t e = pool->slot_expert[(size_t) sl];
++        if (e < 0 || pool->slot_state[(size_t) sl] != 1 || keep.count(e) != 0) {
++            continue;
 +        }
-+        return a < b;
-+    });
-+    // `pool_slot_locked` evicts the LRU entry once the pool is full, so this replaces the load-time
-+    // id-order warm with the prompt order.  A miss here is a page-cache read, paid once at seed time.
-+    const int n = std::min((int) rank.size(), pool->slots);
++        pool->expert_slot.erase(e);
++        pool->slot_expert[(size_t) sl] = -1;
++        pool->slot_state[(size_t) sl]  = 0;
++        freed++;
++    }
++    // 2. Fill the wanted experts that are not resident (the pool was already prewarmed from the same
++    //    prior, so on a warm start this is a handful of reads; slots freed in 1. are reused, never evicted).
 +    int filled = 0;
 +    for (int i = 0; i < n; i++) {
-+        if (pool_slot_locked(*pool, rank[(size_t) i], nullptr, false) == nullptr) {
++        const int32_t e = want[(size_t) i];
++        if (pool->expert_slot.find(e) != pool->expert_slot.end()) {
++            continue;
++        }
++        if (pool_fill_empty_locked(*pool, e, nullptr) == nullptr) {
 +            break;
 +        }
 +        filled++;
 +    }
-+    if (filled > 0) {
-+        GGML_LOG_WARN("%s: pool re-ranked from prompt tally layer=%d role=%s: %d/%d slots (%zu wanted non-resident)\n",
-+                      __func__, t.layer, t.role.c_str(), filled, pool->slots, rank.size());
++    if (freed > 0 || filled > 0) {
++        GGML_LOG_INFO("%s: host pool laid out as the arena's complement layer=%d role=%s: "
++                      "%d filled, %d freed, %zu wanted non-resident, ranked by the heat prior\n",
++                      __func__, t.layer, t.role.c_str(), filled, freed, want.size());
 +    }
 +}
 +
-+// TODO #64.1: give the host pool the prompt's warm order.  `prefill_count` is only accumulated by the
-+// EAGER prefill path; the default staged prefill intercepts the expert upload before that hook, so the
-+// tally stayed empty, `pool_prepopulate_locked` fell back to expert-id order and
-+// `pool_rerank_from_tally_locked` above was an uncalled function.  The DEVICE prefill tally does see
-+// every prefill, so fold it in once (at the first decode-band pass after a prefill), and hand it to both
-+// consumers: a pool that already exists is re-ranked here, and one created later warms from
-+// `prefill_count` in `pool_prepopulate_locked`.  Caller holds `g_mutex`.
++
++// TODO #64.1 / #87: give the host pool the prompt's warm order.  `prefill_count` is only accumulated by
++// the EAGER prefill path; the default staged prefill intercepts the expert upload before that hook, so the
++// host tally stayed empty.  The DEVICE prefill tally does see every prefill, so fold it into the heat
++// vector once (at the first decode-band pass after a prefill) and re-derive the pool's layout from it --
++// combined with the persisted prior, which is what ranks better than a flat prompt tally (r113).  Caller
++// holds `g_mutex`.
 +static void pool_rank_from_prefill_locked() {
 +    heat_pull_locked();   // one pass over the tables: fold + zero every device mirror
 +    for (table_t & t : g_tables) {
 +        if (t.n_experts <= 0 || t.identity || (int) t.heat.size() != t.n_experts) {
-+            continue;   // an identity table holds everything already: its pool is the empty complement
++            continue;
 +        }
 +        bool any = false;
 +        for (uint32_t v : t.heat) {
@@ -51029,75 +51059,24 @@ index 000000000..bf68f8052
 +        if (!any) {
 +            continue;
 +        }
-+        std::vector<int32_t> tally((size_t) t.n_experts, 0);
-+        for (int e = 0; e < t.n_experts; e++) {
-+            const uint32_t h = t.heat[(size_t) e];
-+            tally[(size_t) e] = h > 0x7fffffffu ? 0x7fffffff : (int32_t) h;
-+        }
 +        if ((int) t.prefill_count.size() != t.n_experts) {
 +            t.prefill_count.assign((size_t) t.n_experts, 0);
 +        }
 +        for (int e = 0; e < t.n_experts; e++) {
++            const uint32_t h = t.heat[(size_t) e];
 +            if (t.prefill_count[(size_t) e] == 0) {
-+                t.prefill_count[(size_t) e] = tally[(size_t) e];
++                t.prefill_count[(size_t) e] = h > 0x7fffffffu ? 0x7fffffff : (int32_t) h;
 +            }
 +        }
-+        pool_rerank_from_tally_locked(t, tally);
++        pool_rerank_from_heat_locked(t);
 +    }
 +}
 +
-+// `protect`/`n_protect`: experts that belong to the token currently being staged and must NOT be chosen as
-+// an eviction victim.  Without this, an expert admitted earlier in the same token can be evicted by a later
-+// one (its freshly-seeded count is the smallest), which is what made the hook's `all` flag flip from token
-+// to token - and that variability is what broke CUDA graph replay.
-+// wip/host-expert-master-drop (TODO #55): resolve a PINNED, device-readable source for ONE whole host
-+// expert of `t`, so that no device copy and no kernel ever reads the pageable model mapping.
-+//
-+// * pinned master (the `pinned` default): the master itself, an H2D source.
-+// * pool-backed master (`--host-experts pool`): a pinned pool slot, a D2D source (the slot is filled from
-+//   the GGUF / page cache on a miss).
-+// * neither available (the pool is off or its slot is held by the background worker, or the split geometry
-+//   cannot be expressed in one slot): a pinned per-table BOUNCE copy of the expert.  A pageable
-+//   `cudaMemcpyAsync` is NOT a safe fallback here -- ROCm stages a pageable upload through a shared
-+//   internal bounce, so back-to-back pageable copies can tear (measured: nondeterministic output from a
-+//   pageable master while every copy path verified byte-exact).  The delivery snapshots pageable uploads
-+//   for exactly this reason elsewhere (`set_tensor_2d_async`, the async-input ring).
-+//
-+// A source is "acquired" here and "released" by `expert_src_done` once the copy has been issued, which
-+// records the drain marker: the pool slot is retired (state 2) after its per-(slot,device) event, and a
-+// bounce entry stays busy until its event signals, at which point it may be reused.
-+struct expert_src_t {
-+    const char *   base      = nullptr;   // start of the WHOLE host expert; add `t.src_off` at the copy
-+    cudaMemcpyKind kind      = cudaMemcpyHostToDevice;
-+    int            pool_slot = -1;
-+    int            bounce    = -1;
-+};
-+
-+// Caller holds `g_mutex`.
-+static bool expert_host_src(table_t & t, int32_t expert, host_pool_t * pool, bool sync_on_evict,
-+                            expert_src_t * out) {
-+    *out = expert_src_t{};
-+    if (t.host == nullptr || t.host_bytes == 0 || expert < 0 || expert >= t.n_experts) {
-+        return false;
-+    }
-+    if (!table_master_pageable(t)) {
-+        out->base = (const char *) t.host + (size_t) expert * t.host_bytes;
-+        out->kind = cudaMemcpyHostToDevice;
-+        return true;
-+    }
-+    if (pool != nullptr && t.src_off + t.expert_bytes <= t.host_bytes) {
-+        int    s = -1;
-+        char * p = pool_slot_locked(*pool, expert, &s, sync_on_evict);
-+        if (p != nullptr && s >= 0) {
-+            out->base      = (const char *) pool->base_dev + (size_t) s * pool->host_bytes;
-+            out->kind      = cudaMemcpyDeviceToDevice;
-+            out->pool_slot = s;
-+            return true;
-+        }
-+    }
-+    // Bounce: reuse an entry whose copy has drained, else grow the ring.  Copying the page-cache-backed
-+    // mapping into pinned memory is a plain host memcpy, so the transfer below is a pinned H2D.
-+    int idx = -1;
++// TODO #87: reserve a pinned per-table bounce entry (reusing one whose copy has drained, else growing the
++// ring).  Two users: the pageable-master source in `expert_host_src`, and the arena->pool hand-over in
++// `access_locked`, which stages the victim through a bounce entry because its source slot is the arena slot
++// the incoming copy is about to overwrite and its destination is the pool slot that copy is reading.
++static int bounce_acquire(table_t & t) {
 +    for (int i = 0; i < (int) t.bounce.size(); i++) {
 +        if (t.bounce[(size_t) i].busy) {
 +#if defined(GGML_USE_HIP)
@@ -51111,30 +51090,100 @@ index 000000000..bf68f8052
 +            }
 +            t.bounce[(size_t) i].busy = false;
 +        }
-+        idx = i;
-+        break;
++        return i;
 +    }
-+    if (idx < 0) {
-+        device_guard dg(t.device);
-+        void *    mem = nullptr;
-+        cudaEvent_t ev = nullptr;
-+        if (cudaHostAlloc(&mem, t.host_bytes, cudaHostAllocPortable | cudaHostAllocMapped) != cudaSuccess ||
-+            cudaEventCreateWithFlags(&ev, cudaEventDisableTiming) != cudaSuccess) {
-+            (void) cudaGetLastError();
-+            if (mem != nullptr) {
-+                (void) cudaFreeHost(mem);
-+            }
-+            if (ev != nullptr) {
-+                (void) cudaEventDestroy(ev);
-+            }
-+            return false;
++    device_guard dg(t.device);
++    void *      mem = nullptr;
++    cudaEvent_t ev  = nullptr;
++    if (cudaHostAlloc(&mem, t.host_bytes, cudaHostAllocPortable | cudaHostAllocMapped) != cudaSuccess ||
++        cudaEventCreateWithFlags(&ev, cudaEventDisableTiming) != cudaSuccess) {
++        (void) cudaGetLastError();
++        if (mem != nullptr) {
++            (void) cudaFreeHost(mem);
 +        }
-+        bounce_t b;
-+        b.host = (char *) mem;
-+        b.ev   = ev;
-+        b.busy = false;
-+        t.bounce.push_back(b);
-+        idx = (int) t.bounce.size() - 1;
++        if (ev != nullptr) {
++            (void) cudaEventDestroy(ev);
++        }
++        return -1;
++    }
++    bounce_t b;
++    b.host = (char *) mem;
++    b.ev   = ev;
++    b.busy = false;
++    t.bounce.push_back(b);
++    return (int) t.bounce.size() - 1;
++}
++
++// `protect`/`n_protect`: experts that belong to the token currently being staged and must NOT be chosen as
++// an eviction victim.  Without this, an expert admitted earlier in the same token can be evicted by a later
++// one (its freshly-seeded count is the smallest), which is what made the hook's `all` flag flip from token
++// to token - and that variability is what broke CUDA graph replay.
++// wip/host-expert-master-drop (TODO #55): resolve a PINNED, device-readable source for ONE whole host
++// expert of `t`, so that no device copy and no kernel ever reads the pageable model mapping.
++//
++// * pinned master (the `pinned` default): the master itself, an H2D source.
++// * pool-backed master (`--host-experts pool`): a pinned pool slot, a D2D source (the slot is filled from
++//   the GGUF / page cache on a miss).
++// * neither available (the pool is off, full, or the split geometry cannot be expressed in one slot): a
++//   pinned per-table BOUNCE copy of the expert.  A pageable
++//   `cudaMemcpyAsync` is NOT a safe fallback here -- ROCm stages a pageable upload through a shared
++//   internal bounce, so back-to-back pageable copies can tear (measured: nondeterministic output from a
++//   pageable master while every copy path verified byte-exact).  The delivery snapshots pageable uploads
++//   for exactly this reason elsewhere (`set_tensor_2d_async`, the async-input ring).
++//
++// A source is "acquired" here and "released" by `expert_src_done` once the copy has been issued, which
++// records the drain marker: a pool slot records its per-(slot,device) event (so a later hand-over to an
++// arena victim, or a retire, waits for every in-flight read) and a bounce entry stays busy until its event
++// signals, at which point it may be reused.
++struct expert_src_t {
++    const char *   base      = nullptr;   // start of the WHOLE host expert; add `t.src_off` at the copy
++    cudaMemcpyKind kind      = cudaMemcpyHostToDevice;
++    int            pool_slot = -1;
++    bool           pool_hit  = false;     // the slot was already resident (not newly filled from disk)
++    int            bounce    = -1;
++};
++
++// TODO #87: `allow_empty_fill` lets the demand path take an EMPTY pool slot for a miss (and then keep it --
++// the pool is the other tier, not a bounce buffer).  It never evicts: a full pool misses through the bounce.
++// Caller holds `g_mutex`.
++static bool expert_host_src(table_t & t, int32_t expert, host_pool_t * pool, bool allow_empty_fill,
++                            expert_src_t * out) {
++    *out = expert_src_t{};
++    if (t.host == nullptr || t.host_bytes == 0 || expert < 0 || expert >= t.n_experts) {
++        return false;
++    }
++    if (!table_master_pageable(t)) {
++        out->base = (const char *) t.host + (size_t) expert * t.host_bytes;
++        out->kind = cudaMemcpyHostToDevice;
++        return true;
++    }
++    if (pool != nullptr && t.src_off + t.expert_bytes <= t.host_bytes) {
++        int    s = -1;
++        char * p = pool_peek_locked(*pool, expert, &s);
++        if (p != nullptr && s >= 0) {
++            out->base      = (const char *) pool->base_dev + (size_t) s * pool->host_bytes;
++            out->kind      = cudaMemcpyDeviceToDevice;
++            out->pool_slot = s;
++            out->pool_hit  = true;
++            return true;
++        }
++        if (allow_empty_fill) {
++            p = pool_fill_empty_locked(*pool, expert, &s);
++            if (p != nullptr && s >= 0) {
++                out->base      = (const char *) pool->base_dev + (size_t) s * pool->host_bytes;
++                out->kind      = cudaMemcpyDeviceToDevice;
++                out->pool_slot = s;
++                out->pool_hit  = false;
++                return true;
++            }
++        }
++        pool->misses++;
++    }
++    // Bounce: reuse an entry whose copy has drained, else grow the ring.  Copying the page-cache-backed
++    // mapping into pinned memory is a plain host memcpy, so the transfer below is a pinned H2D.
++    const int idx = bounce_acquire(t);
++    if (idx < 0) {
++        return false;
 +    }
 +    char * buf = t.bounce[(size_t) idx].host;
 +    if (!g_pool_dio && t.host != nullptr) {
@@ -51170,18 +51219,22 @@ index 000000000..bf68f8052
 +
 +// Record the drain marker for a source acquired above, AFTER its copy has been issued.  Caller holds
 +// `g_mutex`.
-+static void expert_src_done(table_t & t, host_pool_t * pool, const expert_src_t & src, void * stream) {
++// TODO #87: `retire` is only for a source whose copy is now DUPLICATED in VRAM (the bulk sizing/seeding
++// fills, which copy a whole table in): the pool slot is freed once its in-flight reads drain, so the pool
++// stays the arena's complement.  The demand path passes false -- there the slot is the other cache tier and
++// is handed to the arena victim instead (see the exchange in `access_locked`).
++static void expert_src_done(table_t & t, host_pool_t * pool, const expert_src_t & src, void * stream,
++                            bool retire) {
 +    const cudaStream_t st = (cudaStream_t) stream;
 +    const int dev = t.device >= 0 ? t.device : 0;
 +    if (src.pool_slot >= 0 && pool != nullptr) {
-+        // Mark when this slot's copy to THIS device has drained, so a later eviction can safely overwrite
-+        // it (per-device: a process-wide slot may serve several devices).  The arena/ring now owns the
-+        // bytes, so the pool entry is retired as soon as the copy drains.
++        // Mark when this slot's copy to THIS device has drained, so a later hand-over to an arena victim
++        // can safely overwrite it (per-device: a process-wide slot may serve several devices).
 +        cudaEvent_t ev = pool_slot_event(*pool, src.pool_slot, dev);
 +        if (ev != nullptr) {
 +            (void) cudaEventRecord(ev, st);
 +        }
-+        if (src.pool_slot < (int) pool->slot_state.size()) {
++        if (retire && src.pool_slot < (int) pool->slot_state.size()) {
 +            pool->slot_state[(size_t) src.pool_slot] = 2;
 +        }
 +    } else if (src.bounce >= 0 && src.bounce < (int) t.bounce.size()) {
@@ -51190,22 +51243,47 @@ index 000000000..bf68f8052
 +    }
 +}
 +
-+// wip/fix-gemma-4 (TODO #77/C): copy ONE expert's device slot from the host side.  One place for the
-+// three geometries a table can have, so the eager fill, the identity fill and any future fill cannot
++// wip/fix-gemma-4 (TODO #77/C): copy ONE expert's device slot from a pre-acquired host source.  One place
++// for the three geometries a table can have, so the eager fill, the identity fill and any future fill cannot
 +// disagree: a FUSED table (multi-slice, concatenated in order), a strided axis-0 slice (2-D copy) and a
 +// contiguous slice (1-D copy).
 +// wip/host-expert-master-drop (TODO #55): the bytes come from `expert_host_src` (pinned master / pinned
 +// pool slot / pinned bounce), never from the pageable mapping.
++static cudaError_t copy_slot_from_src(const table_t & t, void * dst, const expert_src_t & src,
++                                      cudaStream_t stream) {
++    if (t.n_slices > 0) {
++        size_t dst_o = 0;
++        for (int k = 0; k < t.n_slices; k++) {
++            const cudaError_t err = cudaMemcpyAsync((char *) dst + dst_o, src.base + t.slice[k].src_off,
++                                                    t.slice[k].len, src.kind, stream);
++            if (err != cudaSuccess) {
++                return err;
++            }
++            dst_o += t.slice[k].len;
++        }
++        return cudaSuccess;
++    }
++    const char * s = src.base + t.src_off;
++    if (t.split_axis == 0 && t.host_pitch > 0) {
++        const int64_t rows = (int64_t) (t.host_bytes / t.host_pitch);
++        const size_t  row  = rows > 0 ? (t.expert_bytes / (size_t) rows) : 0;
++        if (row == 0) {
++            return cudaErrorInvalidDeviceFunction;
++        }
++        return cudaMemcpy2DAsync(dst, row, s, t.host_pitch, row, (size_t) rows, src.kind, stream);
++    }
++    return cudaMemcpyAsync(dst, s, t.expert_bytes, src.kind, stream);
++}
++
++// The SIZING-time bulk fill (identity table, prefill/heat seed): acquire, copy the whole table in, and
++// retire the pool copy -- a seeded expert is wholly resident, so its pool slot is dead weight and is freed
++// for a later `pool_fill_empty_locked` (the one-shot seeds are the only eviction this helper may cause).
 +static cudaError_t fill_slot_from_host(table_t & t, void * dst, size_t expert, cudaStream_t stream) {
 +    if (t.host == nullptr || t.host_bytes == 0 || t.expert_bytes == 0) {
 +        return cudaErrorInvalidDeviceFunction;
 +    }
 +    host_pool_t * pool = table_pool_locked(t);
 +    expert_src_t  src;
-+    // `sync_on_evict = true`: this helper is used by the SIZING-time bulk paths (the identity fill and the
-+    // prefill/heat seeds), which cycle the pool many times in one pass, so the slot a fill is about to
-+    // reuse may still be read by an earlier queued copy.  The eager decode path keeps its own tuned
-+    // (`n_protect`-based) decision.
 +    if (!expert_host_src(t, (int32_t) expert, pool, true, &src)) {
 +        static bool warned = false;
 +        if (!warned) {
@@ -51215,31 +51293,8 @@ index 000000000..bf68f8052
 +        }
 +        return cudaErrorInvalidDeviceFunction;
 +    }
-+    cudaError_t err = cudaSuccess;
-+    if (t.n_slices > 0) {
-+        size_t dst_o = 0;
-+        for (int k = 0; k < t.n_slices; k++) {
-+            err = cudaMemcpyAsync((char *) dst + dst_o, src.base + t.slice[k].src_off,
-+                                  t.slice[k].len, src.kind, stream);
-+            if (err != cudaSuccess) {
-+                return err;
-+            }
-+            dst_o += t.slice[k].len;
-+        }
-+    } else {
-+        const char * s = src.base + t.src_off;
-+        if (t.split_axis == 0 && t.host_pitch > 0) {
-+            const int64_t rows = (int64_t) (t.host_bytes / t.host_pitch);
-+            const size_t  row  = rows > 0 ? (t.expert_bytes / (size_t) rows) : 0;
-+            if (row == 0) {
-+                return cudaErrorInvalidDeviceFunction;
-+            }
-+            err = cudaMemcpy2DAsync(dst, row, s, t.host_pitch, row, (size_t) rows, src.kind, stream);
-+        } else {
-+            err = cudaMemcpyAsync(dst, s, t.expert_bytes, src.kind, stream);
-+        }
-+    }
-+    expert_src_done(t, pool, src, stream);
++    const cudaError_t err = copy_slot_from_src(t, dst, src, stream);
++    expert_src_done(t, pool, src, stream, /*retire*/ true);
 +    return err;
 +}
 +
@@ -51368,66 +51423,28 @@ index 000000000..bf68f8052
 +    if (g_fill && t.host != nullptr) {
 +        g_acc_fills++;
 +        g_fill_bytes += (int64_t) t.expert_bytes;
-+        void * dst = (char *) t.arena + (size_t) slot * t.expert_bytes;
++        char * dst = (char *) t.arena + (size_t) slot * t.expert_bytes;
 +        host_pool_t * pool = table_pool_locked(t);
-+        // ADDITIVE: put the expert the arena just evicted into the pool, so it is ready when the arena
-+        // needs it again (usually within a few tokens).  Target 2: unless the kill-switch is set, hand it
-+        // to the low-priority background worker instead of reading it here, so the token never blocks on
-+        // the page cache.  The worker re-checks `expert_slot` (a critical-path fill may have won).
-+        if (pool != nullptr && victim >= 0) {
-+            if (g_pool_bg) {
-+                pool_bg_enqueue(pool, victim);
-+            } else {
-+                (void) pool_slot_locked(*pool, victim, nullptr, false);
-+            }
-+        }
-+        // wip/fix-gemma-4 (TODO #77/C): a fused table's slot is assembled from several host ranges
-+        // (`[gate_slice | up_slice]`), concatenated in order; `fill_slot_from_host` is the single place
-+        // that knows every geometry (fused / strided axis-0 / contiguous), including the wip/host-expert-
-+        // master-drop source for a pageable master.
-+        if (t.n_slices > 0) {
-+            g_acc_fills++;
-+            g_fill_bytes += (int64_t) t.expert_bytes;
-+            void * dst_f = (char *) t.arena + (size_t) slot * t.expert_bytes;
-+            const cudaError_t err_f = fill_slot_from_host(t, dst_f, (size_t) expert, (cudaStream_t) stream);
-+            if (err_f != cudaSuccess) {
-+                (void) cudaGetLastError();
-+                GGML_LOG_WARN("%s: fused async fill failed table layer=%d role=%s expert=%d\n",
-+                              __func__, t.layer, t.role.c_str(), expert);
-+            }
-+            return { (char *) t.arena + (size_t) slot * t.expert_bytes, true };
-+        }
-+        // Phase 2 (invisible L2): source the fill from the bounded pinned host pool when one exists; a
-+        // pool miss is filled from the GGUF (page cache, or O_DIRECT) first, host-side.
-+        // wip/host-expert-master-drop (TODO #55): with a pool-backed master the pool (or, when it declines,
-+        // the per-table pinned bounce) is the ONLY device-readable source -- the master is a pageable model
-+        // mapping and a pageable H2D is not a safe fallback (ROCm stages it through a shared bounce).
-+        // A pass that cannot fill more experts than the pool holds cannot evict a slot it just filled, so
-+        // no per-slot copy drain is needed (the previous token's copies are already done).
-+        const bool    pool_sync = pool != nullptr && n_protect > pool->slots;
-+        expert_src_t  hsrc;
-+        cudaError_t   err = cudaSuccess;
-+        if (!expert_host_src(t, expert, pool, pool_sync, &hsrc)) {
++
++        // TODO #87 -- the pool is a LAYOUT, not a churning cache.  Its content is decided in bulk by
++        // `pool_rerank_from_heat_locked` (the arena's complement, ranked by the persisted heat prior), and
++        // the demand path only ever reads it: a resident expert is the source (one D2D copy, needed anyway),
++        // a miss takes an EMPTY slot (never evicting a resident) and otherwise falls through to the pinned
++        // bounce.  No copy is spent moving the arena victim into the pool: measured on the IQ4_NL field
++        // config, the hand-over cost 2x decode throughput while the offline model put every hand-over
++        // policy within 250 MiB of the others' L3 reads, against a 15x difference for the pool's CONTENT.
++        expert_src_t hsrc;
++        cudaError_t  err = cudaSuccess;
++        if (!expert_host_src(t, expert, pool, /*allow_empty_fill*/ true, &hsrc)) {
 +            err = cudaErrorInvalidDeviceFunction;
-+        } else if (t.split_axis != 0 || t.host_pitch == 0) {
-+            // Phase 3 slice fill.  An unsplit table (split_axis < 0) and a contiguous axis-1 slice both
-+            // copy `expert_bytes` in one 1-D transfer; an axis-0 slice is `rows` small rows strided by the
-+            // host expert pitch, so it needs a 2-D copy (the prefill campaign's §26.3 geometry).
-+            err = cudaMemcpyAsync(dst, hsrc.base + t.src_off, t.expert_bytes, hsrc.kind, (cudaStream_t) stream);
-+        } else {
-+            const int64_t rows = t.host_bytes > 0 ? (int64_t) (t.host_bytes / t.host_pitch) : 0;
-+            const size_t  row  = rows > 0 ? (t.expert_bytes / (size_t) rows) : 0;
-+            if (row > 0) {
-+                err = cudaMemcpy2DAsync(dst, row, hsrc.base + t.src_off, t.host_pitch, row, (size_t) rows,
-+                                        hsrc.kind, (cudaStream_t) stream);
-+            }
 +        }
 +        if (err == cudaSuccess) {
-+            expert_src_done(t, pool, hsrc, stream);
-+        } else if (pool != nullptr) {
-+            // No pinned source served this fill: cancel any in-flight background copy of this expert so
-+            // the pool does not keep a duplicate the arena now owns.
-+            pool_cancel_bg_locked(*pool, expert);
++            err = copy_slot_from_src(t, dst, hsrc, (cudaStream_t) stream);
++        }
++        if (err == cudaSuccess) {
++            // Keep a pool-resident source resident: the pool holds the arena's complement, and this expert
++            // being in VRAM now does not mean the pool should forget where to find it next time.
++            expert_src_done(t, pool, hsrc, stream, /*retire*/ false);
 +        }
 +        if (err != cudaSuccess) {
 +            GGML_LOG_WARN("%s: async fill failed table layer=%d role=%s expert=%d: %s\n",
@@ -52396,6 +52413,10 @@ index 000000000..bf68f8052
 +        (void) heat_dev_ensure_locked(t, t.device);
 +    }
 +    apply_prefill_seed_locked(t);
++    // TODO #87: NOW the arena content is known (heat seed + prefill seed), so lay the host pool out as its
++    // complement, ranked by the same prior.  Doing it here (not only at the first decode pass) is what
++    // makes the PREFILL's staging read from the pool instead of the file.
++    pool_rerank_from_heat_locked(t);
 +    // Account the count ACTUALLY allocated (`slots`/`t.slots`), not the requested `arena_slots`: on a
 +    // shrunk table the two differ and the old `arena_slots` accounting over-reported the arena.
 +    g_arena_bytes += (int64_t) slots * t.expert_bytes;
@@ -54435,7 +54456,7 @@ index 000000000..bf68f8052
 +        // bypassed -- see the comment in the loop).  Only the source of the bytes changes; the destination
 +        // layout is exactly the one the kernel produces, so every consumer is unchanged.
 +        if (!t.host_pinned) {
-+            host_pool_t * pool = nullptr;
++            host_pool_t * pool = table_pool_locked(t);
 +            cudaError_t   err  = cudaSuccess;
 +            {
 +                const int64_t resident = (int64_t) t.expert_slot.size();
@@ -54451,13 +54472,15 @@ index 000000000..bf68f8052
 +                                          t.expert_bytes, cudaMemcpyDeviceToDevice, (cudaStream_t) copy_stream);
 +                    continue;
 +                }
-+                // The pool is deliberately NOT used here: a whole-table staging reads EVERY expert anyway,
-+                // so a pool hit only saves the copy into pinned memory while the misses evict the decode
-+                // band's hot set (measured: prefill churn dropped the pool's decode hit rate and the
-+                // prefill did not get faster).  The per-table pinned bounce is the staging source, and it
-+                // never displaces a resident expert.
++                // TODO #87: the PREFILL band reads a pool slot but never evicts one, and a miss fills an
++                // EMPTY slot (so the next ubatch finds it there).  Only an expert in neither tier is read
++                // from the file/mapping -- which is the whole point: a prefill stages the whole host table
++                // per ubatch, so without this every ubatch re-read the entire host expert set from disk
++                // (measured on the IQ4_NL field config: 39 t/s prefill, 27 minutes of disk reads for one
++                // 68K prompt).  The copy below keeps the pool entry (retire = false) because the staging
++                // destination is a transient ring slot, not the arena.
 +                expert_src_t hsrc;
-+                if (!expert_host_src(t, e, nullptr, false, &hsrc)) {
++                if (!expert_host_src(t, e, pool, /*allow_empty_fill*/ true, &hsrc)) {
 +                    err = cudaErrorInvalidDeviceFunction;
 +                    break;
 +                }
@@ -54470,7 +54493,7 @@ index 000000000..bf68f8052
 +                                          (cudaStream_t) copy_stream);
 +                }
 +                if (err == cudaSuccess) {
-+                    expert_src_done(t, pool, hsrc, copy_stream);
++                    expert_src_done(t, pool, hsrc, copy_stream, /*retire*/ false);
 +                }
 +            }
 +            if (err != cudaSuccess) {

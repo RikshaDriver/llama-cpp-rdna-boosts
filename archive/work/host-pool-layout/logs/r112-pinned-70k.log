@@ -1,0 +1,79 @@
+0.00.016.867 I srv  llama_server: initializing ...
+0.00.016.874 I cmn  common_param: common_params_print_info: verbosity = 3 (adjust with the `-lv N` CLI arg)
+0.00.017.064 W srv  llama_server: security: no API key is set and CORS allows all origins (see https://github.com/ggml-org/llama.cpp/pull/25655)
+0.00.018.388 I srv    load_model: loading model '/llm/models/Qwen3.8/Flash-Next/IQ4_NL/Qwen3.8-Flash-Next-IQ4_NL-PROJFIX-00001-of-00009.gguf'
+0.00.050.401 I common_draft_reserve_estimate: draft reserve estimate for '/llm/models/Qwen3.8/Flash-Next/IQ4_NL/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf': weights 2647 + kv 431 (1 x 1 layers, 2 kv heads, 256/256 head dims, indexer yes) + compute 512 + slack 192 = 3782 MiB (n_ctx 131072)
+0.00.220.465 W llama_model_loader: tensor overrides to CPU are used with mmap enabled - consider using --load-mode none for better performance
+0.49.625.690 W common_init_result: slab draft reserve derived from '/llm/models/Qwen3.8/Flash-Next/IQ4_NL/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf': draft CONTEXT 1135 MiB (kv 431 + compute 512 + slack 192); the draft's 2647 MiB of weights are loaded BEFORE this slab and are measured from the free VRAM instead of reserved.  The reserve is headroom + this.
+0.49.625.710 I common_speculative_load_model: loading draft model '/llm/models/Qwen3.8/Flash-Next/IQ4_NL/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf'
+0.52.477.163 W resolve_fused_ops: derived kq mask flash attention was not used in the probe graph, set to disabled
+0.52.477.165 W resolve_fused_ops: derived kq mask flash attention not supported, set to disabled
+0.52.477.166 W resolve_fused_ops: note: the derived kq mask is implemented by the MMA and the tile flash attention kernels; it is disabled here because neither served this graph (or the node did not reach the GPU)
+0.52.495.225 W SLAB_INIT dev=0 free=27.21 GiB reserve=1.98 GiB headroom=0.88 GiB aux=1.11 GiB size(VA)=26.31 GiB mapped=25.19 GiB boundary=1.75 GiB va_spare=1.12 GiB chunk=64.0 MiB ring_req=2.11 GiB
+0.52.495.228 W ggml_cuda_slab_init_locked: device 0: slab 25.19 GiB (chunk 64.0 MiB): work 1.75 GiB + arena 23.44 GiB (1.98 GiB reserve, 1.12 GiB VA spare for `ggml_cuda_slab_extend`; ring region pending (above the narrow floor))
+0.52.504.719 W SLAB_INIT dev=1 free=26.71 GiB reserve=1.98 GiB headroom=0.88 GiB aux=1.11 GiB size(VA)=25.81 GiB mapped=24.69 GiB boundary=1.75 GiB va_spare=1.12 GiB chunk=64.0 MiB ring_req=2.11 GiB
+0.52.504.722 W ggml_cuda_slab_init_locked: device 1: slab 24.69 GiB (chunk 64.0 MiB): work 1.75 GiB + arena 22.94 GiB (1.98 GiB reserve, 1.12 GiB VA spare for `ggml_cuda_slab_extend`; ring region pending (above the narrow floor))
+0.52.509.884 I cmn          init: llama threadpool init, n_threads = 7
+0.53.650.434 W alloc_all_locked: MoE expert cache (auto): arena 46828.1 MiB of 64800.0 MiB host experts (72.3% residency).  MOE_EXPERT_CACHE_MIB=0 disables the cache; set a positive value to size it explicitly.
+0.57.772.861 W ggml_cuda_slab_narrow2_commit_locked: device 0: narrow-2 (draft compute) pinned at [25.81, 26.31] GiB (0.50 GiB, unmapped VA spare); the arena now tops out at 23.44 GiB
+0.57.774.894 W ggml_cuda_slab_narrow2_commit_locked: device 1: narrow-2 (draft compute) pinned at [25.31, 25.81] GiB (0.50 GiB, unmapped VA spare); the arena now tops out at 22.94 GiB
+0.57.775.291 I srv    load_model: initializing, n_slots = 1, n_ctx_slot = 131072, kv_unified = 'false'
+0.57.775.329 W set_sampler: backend sampling not supported with SPLIT_MODE_TENSOR; using CPU
+0.57.775.331 W spec common_specu: backend offload failed for seq_id=0; using CPU sampler
+0.57.801.025 I srv  llama_server: model loaded
+0.57.801.030 I srv  llama_server: listening on http://127.0.0.1:8035
+0.58.097.098 I slot get_availabl: id  0 | task -1 | selected slot by LRU, t_last = -1
+0.58.097.187 I slot launch_slot_: id  0 | task 0 | processing task, is_child = 0
+0.58.108.897 W moe_cache_evict_slab_range: evicted 130.0 MiB of arena tables from the taken slab chunks (arena now 46193.2 MiB)
+0.58.134.965 W moe_cache_evict_slab_range: evicted 3882.0 MiB of arena tables from the taken slab chunks (arena now 42333.0 MiB)
+0.58.135.010 W moe_cache_evict_slab_range: evicted 4348.0 MiB of arena tables from the taken slab chunks (arena now 38022.5 MiB)
+0.59.183.716 W moe_cache_evict_slab_range: evicted 194.0 MiB of arena tables from the taken slab chunks (arena now 37829.5 MiB)
+0.59.331.649 W moe_cache_evict_slab_range: evicted 194.0 MiB of arena tables from the taken slab chunks (arena now 37636.5 MiB)
+0.59.487.001 W moe_cache_evict_slab_range: evicted 194.0 MiB of arena tables from the taken slab chunks (arena now 37443.5 MiB)
+1.03.750.243 I slot print_timing: id  0 | task 0 | prompt processing, n_tokens =   4096, progress = 0.06, t =   5.46 s / 750.01 tokens per second
+1.06.055.811 I slot print_timing: id  0 | task 0 | prompt processing, n_tokens =   6144, progress = 0.09, t =   7.78 s / 790.22 tokens per second
+1.08.202.742 I slot print_timing: id  0 | task 0 | prompt processing, n_tokens =   8192, progress = 0.12, t =   9.92 s / 825.77 tokens per second
+1.10.390.405 I slot print_timing: id  0 | task 0 | prompt processing, n_tokens =  10240, progress = 0.15, t =  12.10 s / 846.15 tokens per second
+1.12.552.260 I slot print_timing: id  0 | task 0 | prompt processing, n_tokens =  12288, progress = 0.18, t =  14.26 s / 861.53 tokens per second
+1.14.722.337 I slot print_timing: id  0 | task 0 | prompt processing, n_tokens =  14336, progress = 0.21, t =  16.43 s / 872.37 tokens per second
+1.16.888.042 I slot print_timing: id  0 | task 0 | prompt processing, n_tokens =  16384, progress = 0.24, t =  18.60 s / 880.92 tokens per second
+1.19.098.357 I slot print_timing: id  0 | task 0 | prompt processing, n_tokens =  18432, progress = 0.27, t =  20.80 s / 886.04 tokens per second
+1.21.285.672 I slot print_timing: id  0 | task 0 | prompt processing, n_tokens =  20480, progress = 0.30, t =  22.99 s / 890.85 tokens per second
+1.23.478.640 I slot print_timing: id  0 | task 0 | prompt processing, n_tokens =  22528, progress = 0.33, t =  25.18 s / 894.71 tokens per second
+1.25.668.191 I slot print_timing: id  0 | task 0 | prompt processing, n_tokens =  24576, progress = 0.36, t =  27.37 s / 897.93 tokens per second
+1.25.944.472 W moe_cache_evict_slab_range: evicted 194.0 MiB of arena tables from the taken slab chunks (arena now 37250.5 MiB)
+1.27.896.310 I slot print_timing: id  0 | task 0 | prompt processing, n_tokens =  26624, progress = 0.39, t =  29.60 s / 899.39 tokens per second
+1.30.119.142 I slot print_timing: id  0 | task 0 | prompt processing, n_tokens =  28672, progress = 0.42, t =  31.83 s / 900.84 tokens per second
+1.32.338.449 I slot print_timing: id  0 | task 0 | prompt processing, n_tokens =  30720, progress = 0.45, t =  34.05 s / 902.30 tokens per second
+1.34.551.470 I slot print_timing: id  0 | task 0 | prompt processing, n_tokens =  32768, progress = 0.48, t =  36.26 s / 903.61 tokens per second
+1.36.809.501 I slot print_timing: id  0 | task 0 | prompt processing, n_tokens =  34816, progress = 0.51, t =  38.52 s / 903.88 tokens per second
+1.39.046.304 I slot print_timing: id  0 | task 0 | prompt processing, n_tokens =  36864, progress = 0.54, t =  40.76 s / 904.49 tokens per second
+1.41.283.403 I slot print_timing: id  0 | task 0 | prompt processing, n_tokens =  38912, progress = 0.57, t =  42.99 s / 905.05 tokens per second
+1.43.526.944 I slot print_timing: id  0 | task 0 | prompt processing, n_tokens =  40960, progress = 0.60, t =  45.24 s / 905.46 tokens per second
+1.45.798.973 I slot print_timing: id  0 | task 0 | prompt processing, n_tokens =  43008, progress = 0.63, t =  47.51 s / 905.33 tokens per second
+1.48.055.077 I slot print_timing: id  0 | task 0 | prompt processing, n_tokens =  45056, progress = 0.66, t =  49.76 s / 905.43 tokens per second
+1.50.315.262 I slot print_timing: id  0 | task 0 | prompt processing, n_tokens =  47104, progress = 0.69, t =  52.02 s / 905.51 tokens per second
+1.52.571.717 I slot print_timing: id  0 | task 0 | prompt processing, n_tokens =  49152, progress = 0.72, t =  54.28 s / 905.58 tokens per second
+1.54.842.781 I slot print_timing: id  0 | task 0 | prompt processing, n_tokens =  51200, progress = 0.75, t =  56.54 s / 905.48 tokens per second
+1.57.113.578 I slot print_timing: id  0 | task 0 | prompt processing, n_tokens =  53248, progress = 0.78, t =  58.82 s / 905.35 tokens per second
+1.59.395.102 I slot print_timing: id  0 | task 0 | prompt processing, n_tokens =  55296, progress = 0.81, t =  61.09 s / 905.13 tokens per second
+2.01.642.808 I slot print_timing: id  0 | task 0 | prompt processing, n_tokens =  57344, progress = 0.84, t =  63.35 s / 905.20 tokens per second
+2.03.952.019 I slot print_timing: id  0 | task 0 | prompt processing, n_tokens =  59392, progress = 0.87, t =  65.65 s / 904.61 tokens per second
+2.06.229.594 I slot print_timing: id  0 | task 0 | prompt processing, n_tokens =  61440, progress = 0.90, t =  67.93 s / 904.44 tokens per second
+2.08.518.319 I slot print_timing: id  0 | task 0 | prompt processing, n_tokens =  63488, progress = 0.93, t =  70.22 s / 904.13 tokens per second
+2.10.817.131 I slot print_timing: id  0 | task 0 | prompt processing, n_tokens =  65536, progress = 0.96, t =  72.52 s / 903.72 tokens per second
+2.15.049.283 I slot print_timing: id  0 | task 0 | prompt processing, n_tokens =  66170, progress = 0.97, t =  76.92 s / 860.28 tokens per second
+2.17.466.288 I slot print_timing: id  0 | task 0 | prompt processing, n_tokens =  68214, progress = 1.00, t =  79.16 s / 861.74 tokens per second
+2.17.828.887 W alloc_table_locked: layer=47 role=blk.47.ffn_down_exps.weight: 366 slots requested, only 95 fit; sizing the arena to 95 slots
+2.17.829.960 W moe_cache_rearm: re-armed 66 stood-down expert-cache tables after a compute-buffer drop (arena now 45607.3 MiB)
+2.17.834.956 W moe_cache_evict_slab_range: evicted 68.0 MiB of arena tables from the taken slab chunks (arena now 45540.5 MiB)
+2.18.915.200 I slot print_timing: id  0 | task 0 | prompt eval time =   79928.40 ms / 68218 tokens (    1.17 ms per token,   853.49 tokens per second)
+2.18.915.202 I slot print_timing: id  0 | task 0 |        eval time =     889.49 ms /    32 tokens (   28.69 ms per token,    34.85 tokens per second)
+2.18.915.203 I slot print_timing: id  0 | task 0 |       total time =   80817.89 ms / 68250 tokens
+2.18.915.205 I slot print_timing: id  0 | task 0 |    graphs reused =         29
+2.18.915.206 I slot print_timing: id  0 | task 0 |   graph reallocs =          9    /     1        (same size) / (changed size)
+2.18.915.209 I slot print_timing: id  0 | task 0 | draft acceptance = 0.66667 (   22 accepted /    33 generated), mean len =  3.44
+2.18.928.360 I slot print_timing: id  0 | task 0 |   MoE arena = 0.9303 (122428 hit / 131600 reaches this turn), arena 45540.5 MiB
+2.18.929.147 I slot      release: id  0 | task 0 | stop processing: n_tokens = 68249, truncated = 0
+2.18.931.993 I srv    operator(): operator(): cleaning up before exit...
+2.19.364.981 W ~llama_context:     Meta() compute buffer size of 2304.0000 MiB, does not match expectation of 1792.0000 MiB

@@ -851,11 +851,36 @@ had no other home.
   (16 GiB of swap) for `pinned`.  80 % is the knee (90 % → 71.8 t/s *and* swapping).  A buffered-fill
   defect at high FRAC on a memory-tight box is tracked as `TODO.md` #87 (DIO is the default, so it is
   opt-in).
+* **The host pool is a LAYOUT, not a churning cache (r113, TODO #87).**  Two changes to POOL mode, both in
+  `moe-expert-cache.cu`:
+  1. **Content: the pool holds the arena's complement, ranked by the persisted heat prior**
+     (`pool_rank_experts_locked` / `pool_rerank_from_heat_locked`).  It is laid out in bulk at sizing
+     (after `apply_heat_seed_locked`/`apply_prefill_seed_locked`) and again at the first decode-band pass,
+     replacing the old flat prompt-tally re-rank (which ranked by prefill routing — nearly uniform, because
+     a prefill routes every expert).  Measured offline on a real 10.5K-prompt trace with the model's own
+     `.moe-heatmap` (`scripts/moe-trace-replay.py --pool-frac`, new two-tier model), arena 369/pool 409
+     slots per table: expert-id pool content = 3571 MiB of L3 reads over 451 decode tokens, heat-ranked
+     complement = **237 MiB**; every eviction/hand-over policy measured within 0–246 MiB of that.
+  2. **The demand path never evicts and never copies the arena victim into the pool.**  A resident expert
+     is the source, a miss takes an EMPTY slot (`pool_peek_locked` / `pool_fill_empty_locked`), otherwise
+     the per-table pinned bounce serves it.  The whole-table prefill staging (`moe_cache_stage_table`) now
+     reads the pool too — it used to bypass it and re-read the entire host expert set from the file on
+     every ubatch — and it fills empty slots, so a later ubatch finds them.  The background
+     eviction-prefetch worker and its `MOE_HOST_POOL_BGFETCH` knob are gone with the eviction they served;
+     `MOE_HOST_POOL_RAM_PCT` (default 80) caps the whole pinned pool at that % of `MemAvailable`.
+     Measured on the gfx1201 field config (IQ4_NL Flash-Next, 2 GPU tensor, `-ncmoe 48`, MTP n7, 70K
+     prompt, 128-token decode): pool hit **0.7999 → 0.9183**, evictions **4600 → 0**; 581→733 t/s prefill
+     and 30.6→53.7 t/s decode at `DIO=0`, and a prefill that could not finish in 27 min (39 t/s) → 287 t/s
+     at `DIO=1` (decode 23.1), against `pinned` 836 / 57.5.  Greedy text byte-identical old vs new.
+     The measured-and-dropped candidates (a bounce-staged swap with the incoming's slot: 2x decode cost for
+     0 MiB of L3; write-over-the-weakest-candidate: 105 MiB for 1 copy/eviction) are recorded in
+     `archive/work/host-pool-layout/`.
 
 **Knobs.**  `LLAMA_OUTPUT_PINNED`, `MTP_DRAFT_N_UBATCH`, `GGML_LF_DFLASH_DEV`, `GGML_LF_FAST_TOPK`,
 `LLAMA_STATE_GET_MERGE_GAP`, `LLAMA_STATE_ASYNC`, `LLAMA_STATE_ASYNC_MAX_MIB`,
-`GGML_CPU_MOE_OFFLOAD_THREADS`, `GGML_CUDA_SLAB_RING_MIB`, and (r111, POOL mode) `MOE_HOST_POOL_MIB` /
-`MOE_HOST_POOL_FRAC` / `MOE_HOST_POOL_DIO` / `MOE_HOST_POOL_VERIFY` / `LLAMA_HOST_MASTER_PINNED`.
+`GGML_CPU_MOE_OFFLOAD_THREADS`, `GGML_CUDA_SLAB_RING_MIB`, and (r111+, POOL mode) `MOE_HOST_POOL_MIB` /
+`MOE_HOST_POOL_FRAC` / `MOE_HOST_POOL_DIO` / `MOE_HOST_POOL_VERIFY` / `LLAMA_HOST_MASTER_PINNED`, plus
+(r113) `MOE_HOST_POOL_RAM_PCT`; `MOE_HOST_POOL_BGFETCH` was removed in r113.
 
 **Notes.**  A backend-iface entry is a compile-time contract: adding one to the struct means adding it to
 **every** backend's initializer, or the build breaks for that backend.  Keep the difference documented when

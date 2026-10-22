@@ -171,6 +171,42 @@ buffered (decode parity; `llama-cli` prefill −1…−6 %, a single-ubatch `pp5
 −34 %).  A non-mapped load (`--load-mode none/dio`) has no mapping to place the tensors in and keeps the
 pinned master (warned); use the default mmap load mode.  r111.
 
+**r113 — the pool is a LAYOUT, not a churning cache, and it is ranked by the persisted heat prior.**
+`MOE_HOST_POOL_FRAC` is a percentage of the **model's host expert set** (`-ncmoe`/`-cmoe` bytes), *not* of
+system RAM, and it is inherently capped there (FRAC 100 = each table's pool is exactly its expert count,
+i.e. the whole set pinned once — a pool can never be larger than the model needs).  Two consequences drive
+the r113 change:
+
+1. **What the pool HOLDS decides the disk traffic; the eviction policy barely matters.**  Measured offline
+   on a real 10.5K-prompt routing trace with the model's own persisted `.moe-heatmap`
+   (`scripts/moe-trace-replay.py --pool-frac 80 --pool-init sidecar-complement:<sidecar>`; arena 369 and pool
+   409 slots per table, the field config's real geometry): pool content ranked by expert id (the pre-r113
+   behaviour) = 3571 MiB of L3 (disk) reads over 451 decode tokens; the same pool ranked by the persisted
+   heat prior as the arena's *complement* = **237 MiB**; an oracle prior = 237 MiB.  Every
+   eviction/hand-over policy (no-evict, retire-on-promote, evict-LRU-and-admit, swap with a weak candidate,
+   swap with the incoming's own slot) lands within **0–246 MiB** of that — i.e. noise next to the content
+   effect, while each costs host↔device copies.  So the pool is laid out in bulk — as the arena's
+   complement, ranked by the heat prior — at sizing (after the heat/prefill seeds), and again at the first
+   decode-band pass (after the prompt's routing is folded into the heat vector).  The **demand path never
+   evicts**: a resident expert is the source, a miss takes an EMPTY slot, otherwise it falls through to the
+   per-table pinned bounce.  The background eviction-prefetch worker is gone with that (see
+   `MOE_HOST_POOL_BGFETCH`).
+2. **A pool that does not fit is worse than a small one.**  `MOE_HOST_POOL_RAM_PCT` (r113, default **80**)
+   caps the *whole* pinned pool at that percentage of `MemAvailable`, measured once at the first pool build.
+   Without it, `frac %` of a large host set can exceed what the box can pin, and the failure is silent: each
+   table's `cudaHostAlloc` fails, that pool is marked `failed`, and its reads take the bounce path (the
+   disk).  The cap trims per table (with one WARN naming both knobs) and keeps the one-slot floor.
+
+Measured on the gfx1201 field config (Qwen3.8-Flash-Next **IQ4_NL**, 2× R9700, `-ncmoe 48` = 64 800 MiB of
+host experts, MTP `--spec-draft-n-max 7`, `--cache-ram 16384`, 70K-token prompt, 128-token decode, all on
+the same build): the pool's hit rate went **0.7999 → 0.9183** and its evictions **4600 → 0**, and against the
+`pinned` reference (836 t/s prefill / 57.5 t/s decode) the pool arm went from 581 / 30.6 (**DIO=0**) and
+a prefill that could not finish in 27 minutes (**DIO=1**, 39 t/s) to **733 / 53.7** and **287 / 23.1**.  The
+remaining `DIO=1` gap is the fraction of each table no pool tier holds (FRAC 80 leaves 20 %), which a prefill
+ubatch re-reads per ubatch; it disappears under `DIO=0` (page cache) or FRAC 100.  Purity is unchanged: the
+pool only chooses which byte-identical copy fills a slot (greedy text byte-identical old vs new, and
+`MOE_HOST_POOL_VERIFY=1` is clean).
+
 **r112 — the defaults are tuned for the case the mode exists for.**  `MOE_HOST_POOL_FRAC` defaults to
 **80 %** and `MOE_HOST_POOL_DIO` to **1** (O_DIRECT, no page cache).  A memory-tight box cannot afford two
 copies of the same weights (pinned pool *and* page cache), and a page cache that cannot hold the set only
@@ -186,14 +222,15 @@ prompt measures 49 t/s).  On a box where the set fits in RAM, stay on `--host-ex
 |---|---|---|---|
 | `--host-experts pool` | `pinned` | option | select the bounded host pool and **drop the pinned master** (r111).  `pinned`/`auto` = full pinned master, no pool; `mmap` was removed in r33. |
 | `MOE_HOST_POOL_MIB` | `auto` | tuning | process-wide pool budget: unset/`auto` = `MOE_HOST_POOL_FRAC` % of the MoE host expert bytes (`moe_host_expert_bytes`), split over the host tensors in proportion to their size; `N` = explicit MiB; `0` = disable the pool (with `--host-experts pool` the master is then still dropped and every miss takes the pageable-free bounce path). |
-| `MOE_HOST_POOL_FRAC` | **`80`** (r112; `25` in r111) | tuning | the auto percentage (1–100).  This is the **whole** non-swappable host footprint, not a tier beside it.  80 % is the measured knee for the "set does not fit in RAM" case (90 % was slower *and* swapped); lower it when RAM is needed elsewhere. |
+| `MOE_HOST_POOL_FRAC` | **`80`** (r112; `25` in r111) | tuning | the auto percentage (1–100) of the **model's host expert set** (`moe_host_expert_bytes`), per table, capped at that table's expert count — *not* a percentage of RAM.  This is the **whole** non-swappable host footprint, not a tier beside it.  80 % is the measured knee for the "set does not fit in RAM" case (90 % was slower *and* swapped); lower it when RAM is needed elsewhere.  The pool's *content* is chosen by the heat prior (r113), so a bigger pool is not automatically a better one. |
+| `MOE_HOST_POOL_RAM_PCT` | **`80`** (r113) | kill-switch / tuning | ceiling on the **whole** pinned pool, as a percentage of `MemAvailable` measured once at the first pool build.  Bounded (1–100); `0` disables the ceiling (the pre-r113 behaviour, which can silently fail every `cudaHostAlloc` for a table and drop it to the bounce path).  The clamp trims per table and WARNs once, naming both knobs; the one-slot floor per table is kept, so the pinned total can exceed the ceiling by ~`n_tables x host_bytes`. |
 | `MOE_HOST_POOL_VERIFY` | unset | diagnostic | `1` byte-compares every pool fill against the model mapping and logs the first mismatching expert (`POOLREAD MISMATCH`).  The instrument that found the O_DIRECT bounce race; costs a memcmp per fill, never default-on. |
 | `LLAMA_HOST_MASTER_PINNED` | unset | A/B only | force the pinned master even with `--host-experts pool` — the control arm for a measured comparison. |
 | `MOE_HOST_POOL_POLICY` | — | **removed (r40)** | the pooled-table device-policy selector.  The device-policy fill (and the whole device-remap family) was deleted 2026-10-10; pooled tables always fill from the pinned pool (a master fallback only exists in `pinned` mode).  The variable is ignored. |
 | `MOE_HOST_POOL_PREFETCH` | `0` | opt-in | routing-driven speculative pool prefill; **off** because a long-prompt sweep showed it hurts until the pool nears full residency (`1` enables). |
-| `MOE_HOST_POOL_PREWARM` | `1` | kill-switch | one-shot slot fill when a pool is built (ranked by the prefill tally / arena residents). |
-| `MOE_HOST_POOL_BGFETCH` | `1` | kill-switch | low-priority background eviction prefetch; `0` is the synchronous path. |
-| `MOE_HOST_POOL_DIO` | **`1`** (r112; `0` in r111) | kill-switch | `1` = every fill (and the staging bounce) reads the GGUF with O_DIRECT, so the page cache is never populated and cannot compete with the pool for RAM.  `0` restores the buffered fill (a `memcpy` out of the model mapping), which is only better when the set fits in RAM — i.e. when `pinned` is the right mode anyway.  **`0` also carries a known defect** (SIGSEGV in the background pool worker at high FRAC on a memory-tight box): `TODO.md` #87. |
+| `MOE_HOST_POOL_PREWARM` | `1` | kill-switch | one-shot slot fill when a pool is built, ranked by the persisted heat prior (then the prefill tally, then expert id — r113).  The layout is re-derived as the arena's complement once the arena is seeded, so the prewarm's order is only a warm start. |
+| `MOE_HOST_POOL_BGFETCH` | — | **removed (r113)** | the low-priority background eviction-prefetch worker.  The demand path no longer moves an arena victim into the pool (measured: the hand-over cost 2x decode for no L3 benefit, because the pool's CONTENT is what decides the disk traffic), so there is no eviction to prefetch.  The variable is ignored. |
+| `MOE_HOST_POOL_DIO` | **`1`** (r112; `0` in r111) | kill-switch | `1` = every fill (and the staging bounce) reads the GGUF with O_DIRECT, so the page cache is never populated and cannot compete with the pool for RAM.  `0` restores the buffered fill (a `memcpy` out of the model mapping), which is only better when the set fits in RAM — i.e. when `pinned` is the right mode anyway.  **The `0`-mode SIGSEGV it used to carry (in the background worker) went away with that worker in r113**; what remains is the "inverted optimum" (`TODO.md` #87c): the right choice depends on whether the host set fits in RAM.  On the field config a 70K-token prompt measures 287/23.1 t/s at `DIO=1` vs 733/53.7 at `DIO=0` and 836/57.5 for `pinned`. |
 
 ### 1.3 The movable-boundary slab (block 06) — `GGML_CUDA_SLAB`, default **on**
 

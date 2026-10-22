@@ -1,5 +1,82 @@
 # WORKLOG - dated delivery records
 
+## 261022.008 (r113) -- the host pool is a LAYOUT, not a churning cache; TODO #65 retired
+
+**Shipped:** `v14-097cf33d9-r113` (**block 12** amended; blocks 00-11 byte-identical to r112, block 13 re-cut
+with a new `From` line and an unchanged body).  Canonical tip `74d6310a0`, net tree `186cf7019…`.
+Campaign record, the offline model and the measured-and-dropped candidates:
+`archive/work/host-pool-layout/` (`README.md`, `RESOLUTION.md`, the harness and the logs).  This closes
+**TODO #87**'s disk-I/O half and **retires TODO #65**.
+
+**What was wrong.**  `--host-experts pool` was making the disk serve bytes that were already in pinned RAM.
+Two independent causes.  (1) The pool's **content** was expert-id order: it was prewarmed before any tally
+existed, then re-ranked by the *prefill* tally — which is nearly uniform, because a prefill routes every
+expert.  (2) The **whole-table prefill staging bypassed the pool** entirely (so every ubatch re-read the
+entire host expert set from the file) and the demand path evicted a pool resident on every arena fill and
+re-read the evicted arena expert back into the pool.
+
+**The one instrument that decided it.**  `scripts/moe-trace-replay.py` grew a **two-tier** model (arena +
+pinned pool + mapping/disk, `--pool-frac`, five pool policies, and `--pool-init sidecar:<file>` which reads a
+real `MHT1` `.moe-heatmap` prior — the `#86` step-0 instrument).  Replaying a real `MOE_EXPERT_TRACE` of the
+field config (10.5K prompt, 512-token decode, 144 tables) at the run's own geometry (arena 369 and pool 409
+slots per table) put a **15x** difference on the pool's content — expert-id 3571 MiB of L3 reads over 451
+decode tokens, heat-ranked arena-complement **237 MiB**, oracle 237 MiB — and only **0-246 MiB** across
+every eviction/hand-over policy.  That is why the fix is a layout, not a policy.
+
+**What shipped (block 12, `moe-expert-cache.cu`).**
+
+1. **Layout**: `pool_rank_experts_locked` (heat prior > prefill tally > expert id) and
+   `pool_rerank_from_heat_locked` place the pool as the **arena's complement**, in bulk, at sizing (after the
+   heat/prefill seeds) and at the first decode-band pass.  The old flat tally re-rank
+   (`pool_rerank_from_tally_locked`) is gone.
+2. **No churn on the demand path**: `pool_peek_locked` + `pool_fill_empty_locked` — a resident expert is the
+   source, a miss takes an EMPTY slot, otherwise the per-table pinned bounce serves it.  The arena victim is
+   never copied into the pool, so the background eviction-prefetch worker and `MOE_HOST_POOL_BGFETCH` are
+   gone.
+3. **The prefill staging reads the pool** and fills empty slots, so later ubatches find them there.
+4. **`MOE_HOST_POOL_RAM_PCT`** (new, default **80**): the pool is a percentage of the model's HOST EXPERT SET,
+   which says nothing about what the box can pin — an oversized pool fails every table's `cudaHostAlloc`
+   silently and falls back to the bounce path.  This caps the whole pinned pool at 80 % of `MemAvailable`
+   (measured once at the first pool build), trimming per table with one WARN; `0` disables.
+
+**Measured (gfx1201, 2x R9700, IQ4_NL Flash-Next field config `-ncmoe 48`, MTP n7, `--cache-ram 16384`,
+70K-token prompt, 128-token decode, one build).**
+
+| arm | prefill t/s | decode t/s | pool h |
+|---|---:|---:|---:|
+| pre-change, `DIO=1` (the default) | 39 (still prefill at 27 min) | -- | 0.2609 |
+| pre-change, `DIO=0` (128 tok, HEAD) | 447 (10.5K) / 581 (70K) | 46.6 (10.5K) / 30.6 (70K) | -- |
+| **post-change, `DIO=1` (default)** | **218 (10.5K) / 287 (70K)** | **22.7 / 23.1** | 0.9183 / 0.9044 |
+| **post-change, `DIO=0`** | **579 / 733** | **53.7 / 53.7** | 0.9183 / 0.9044 |
+| `pinned` (reference, unaffected) | 853 (10.5K) / 836 (70K) | n/a / 57.5 | -- |
+
+Pool evictions 4600 -> **0**.  The `DIO=1` remainder is the fraction of each table no tier holds (FRAC 80
+leaves 20 %), which a prefill ubatch re-reads; `DIO=0` (page cache) or FRAC 100 removes it.
+
+**Dropped after measuring (kept in the campaign record).**  `pool-swap-slot` — the literal "the victim takes
+the pool slot the incoming left" — was implemented and cost **2x decode** (25.9 vs 52.8 t/s, identical text
+and acceptance, 6259 swaps x 2 extra strided copies) for 0 MiB of L3.  Write-over-the-weakest-candidate (the
+maintainer's proposal) is the cheapest moving policy (1 copy, 105 MiB of L3 saved in the model) and is still
+a copy per arena eviction for a gain the layout makes irrelevant.
+
+**TODO #65 retired.**  The r67 residual ("IQ4_NL field (MTP) + `--host-experts pool` decode collapses", 2.1
+t/s, never re-picked-up) does not reproduce: the config decodes at 30.6 t/s (70K, 32-token arm) with buffered
+fills on r112 and 53.7 t/s after this change, against `pinned` 34.9 then 57.5.  What it was reading as a
+pool memory shortfall is the layout + `DIO` interaction above.
+
+**Gates.**  `validate-set.sh` green (fresh tarball, strict 14/14 `git am`, applied tree `186cf701…`);
+`gate-per-block-build.sh --changed-from c9b12e988` (blocks 12/13); `gate-prefill-logits.sh` **PASS**
+(0.000000 / 100.000 %); 96-token greedy continuation **byte-identical** between the pre- and post-change
+binaries on 35B-A3B Q8_0 `-ncmoe 20 --host-experts pool` with `MOE_HOST_POOL_VERIFY=1` clean; the RAM clamp
+verified by forcing `MOE_HOST_POOL_RAM_PCT=5`.
+
+**Known follow-ups (TODO #87 keeps them separate from the closed disk-I/O half).**  `DIO` auto-selection from
+`MemAvailable`; a pool-aware prefill staging kernel (one launch instead of one copy per expert — the rest of
+the prefill gap to `pinned`); long-session pool adaptation.
+
+**Docs with it:** `ENVIRONMENT.md` §1.2.1 + the variable table, `patches/README.md` block 12,
+`archive/work/host-pool-layout/`, `TODO.md` (#65 removed, #87 updated and the list re-ordered).
+
 ## 261022.007 (r112) -- POOL-mode defaults: `MOE_HOST_POOL_FRAC=80`, `MOE_HOST_POOL_DIO=1`
 
 **Shipped:** `v14-097cf33d9-r112`, **block 12** amended (blocks 00-11 byte-identical to r111; block 13

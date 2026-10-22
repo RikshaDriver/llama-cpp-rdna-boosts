@@ -1,0 +1,51 @@
+0.00.017.395 I srv  llama_server: initializing ...
+0.00.017.401 I cmn  common_param: common_params_print_info: verbosity = 3 (adjust with the `-lv N` CLI arg)
+0.00.017.591 W srv  llama_server: security: no API key is set and CORS allows all origins (see https://github.com/ggml-org/llama.cpp/pull/25655)
+0.00.018.853 I srv    load_model: loading model '/llm/models/Qwen3.8/Flash-Next/IQ4_NL/Qwen3.8-Flash-Next-IQ4_NL-PROJFIX-00001-of-00009.gguf'
+0.00.047.887 I common_draft_reserve_estimate: draft reserve estimate for '/llm/models/Qwen3.8/Flash-Next/IQ4_NL/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf': weights 2647 + kv 431 (1 x 1 layers, 2 kv heads, 256/256 head dims, indexer yes) + compute 512 + slack 192 = 3782 MiB (n_ctx 131072)
+0.00.212.386 W llama_model_loader: tensor overrides to CPU are used with mmap enabled - consider using --load-mode none for better performance
+0.01.236.586 W common_init_result: slab draft reserve derived from '/llm/models/Qwen3.8/Flash-Next/IQ4_NL/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf': draft CONTEXT 1135 MiB (kv 431 + compute 512 + slack 192); the draft's 2647 MiB of weights are loaded BEFORE this slab and are measured from the free VRAM instead of reserved.  The reserve is headroom + this.
+0.01.236.608 I common_speculative_load_model: loading draft model '/llm/models/Qwen3.8/Flash-Next/IQ4_NL/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf'
+0.02.659.471 W resolve_fused_ops: derived kq mask flash attention was not used in the probe graph, set to disabled
+0.02.659.473 W resolve_fused_ops: derived kq mask flash attention not supported, set to disabled
+0.02.659.474 W resolve_fused_ops: note: the derived kq mask is implemented by the MMA and the tile flash attention kernels; it is disabled here because neither served this graph (or the node did not reach the GPU)
+0.02.679.412 W SLAB_INIT dev=0 free=27.21 GiB reserve=1.98 GiB headroom=0.88 GiB aux=1.11 GiB size(VA)=26.31 GiB mapped=25.19 GiB boundary=1.75 GiB va_spare=1.12 GiB chunk=64.0 MiB ring_req=2.11 GiB
+0.02.679.415 W ggml_cuda_slab_init_locked: device 0: slab 25.19 GiB (chunk 64.0 MiB): work 1.75 GiB + arena 23.44 GiB (1.98 GiB reserve, 1.12 GiB VA spare for `ggml_cuda_slab_extend`; ring region pending (above the narrow floor))
+0.02.690.580 W SLAB_INIT dev=1 free=26.71 GiB reserve=1.98 GiB headroom=0.88 GiB aux=1.11 GiB size(VA)=25.81 GiB mapped=24.69 GiB boundary=1.75 GiB va_spare=1.12 GiB chunk=64.0 MiB ring_req=2.11 GiB
+0.02.690.583 W ggml_cuda_slab_init_locked: device 1: slab 24.69 GiB (chunk 64.0 MiB): work 1.75 GiB + arena 22.94 GiB (1.98 GiB reserve, 1.12 GiB VA spare for `ggml_cuda_slab_extend`; ring region pending (above the narrow floor))
+0.02.695.710 I cmn          init: llama threadpool init, n_threads = 7
+0.03.834.447 W alloc_all_locked: MoE expert cache (auto): arena 46828.1 MiB of 64800.0 MiB host experts (72.3% residency).  MOE_EXPERT_CACHE_MIB=0 disables the cache; set a positive value to size it explicitly.
+0.19.893.174 W ggml_cuda_slab_narrow2_commit_locked: device 0: narrow-2 (draft compute) pinned at [25.81, 26.31] GiB (0.50 GiB, unmapped VA spare); the arena now tops out at 23.44 GiB
+0.19.894.724 W ggml_cuda_slab_narrow2_commit_locked: device 1: narrow-2 (draft compute) pinned at [25.31, 25.81] GiB (0.50 GiB, unmapped VA spare); the arena now tops out at 22.94 GiB
+0.19.895.133 I srv    load_model: initializing, n_slots = 1, n_ctx_slot = 131072, kv_unified = 'false'
+0.19.895.177 W set_sampler: backend sampling not supported with SPLIT_MODE_TENSOR; using CPU
+0.19.895.178 W spec common_specu: backend offload failed for seq_id=0; using CPU sampler
+0.19.910.903 I srv  llama_server: model loaded
+0.19.910.908 I srv  llama_server: listening on http://127.0.0.1:8035
+0.19.982.530 I slot get_availabl: id  0 | task -1 | selected slot by LRU, t_last = -1
+0.19.982.592 I slot launch_slot_: id  0 | task 0 | processing task, is_child = 0
+0.19.993.870 W moe_cache_evict_slab_range: evicted 130.0 MiB of arena tables from the taken slab chunks (arena now 46193.2 MiB)
+0.20.018.460 W moe_cache_evict_slab_range: evicted 3882.0 MiB of arena tables from the taken slab chunks (arena now 42333.0 MiB)
+0.20.018.551 W moe_cache_evict_slab_range: evicted 4348.0 MiB of arena tables from the taken slab chunks (arena now 38022.5 MiB)
+0.20.593.346 W moe_cache_evict_slab_range: evicted 194.0 MiB of arena tables from the taken slab chunks (arena now 37829.5 MiB)
+0.20.730.834 W moe_cache_evict_slab_range: evicted 194.0 MiB of arena tables from the taken slab chunks (arena now 37636.5 MiB)
+0.20.930.153 W moe_cache_evict_slab_range: evicted 194.0 MiB of arena tables from the taken slab chunks (arena now 37443.5 MiB)
+0.25.671.249 I slot print_timing: id  0 | task 0 | prompt processing, n_tokens =   4096, progress = 0.39, t =   5.56 s / 736.71 tokens per second
+0.28.301.566 I slot print_timing: id  0 | task 0 | prompt processing, n_tokens =   6144, progress = 0.58, t =   8.18 s / 751.31 tokens per second
+0.30.873.157 I slot print_timing: id  0 | task 0 | prompt processing, n_tokens =   8192, progress = 0.78, t =  10.75 s / 762.24 tokens per second
+0.34.373.615 I slot print_timing: id  0 | task 0 | prompt processing, n_tokens =   8464, progress = 0.81, t =  14.38 s / 588.56 tokens per second
+0.37.080.066 I slot print_timing: id  0 | task 0 | prompt processing, n_tokens =  10508, progress = 1.00, t =  16.94 s / 620.28 tokens per second
+0.37.692.293 W alloc_table_locked: layer=47 role=blk.47.ffn_down_exps.weight: 366 slots requested, only 95 fit; sizing the arena to 95 slots
+0.37.693.957 W moe_cache_rearm: re-armed 66 stood-down expert-cache tables after a compute-buffer drop (arena now 45607.3 MiB)
+0.37.698.380 W moe_cache_evict_slab_range: evicted 68.0 MiB of arena tables from the taken slab chunks (arena now 45540.5 MiB)
+0.40.495.523 I slot print_timing: id  0 | task 0 | prompt eval time =   18147.51 ms / 10512 tokens (    1.73 ms per token,   579.25 tokens per second)
+0.40.495.525 I slot print_timing: id  0 | task 0 |        eval time =    2365.38 ms /   128 tokens (   18.63 ms per token,    53.69 tokens per second)
+0.40.495.526 I slot print_timing: id  0 | task 0 |       total time =   20512.89 ms / 10640 tokens
+0.40.495.528 I slot print_timing: id  0 | task 0 |    graphs reused =         28
+0.40.495.528 I slot print_timing: id  0 | task 0 |   graph reallocs =          3    /     1        (same size) / (changed size)
+0.40.495.532 I slot print_timing: id  0 | task 0 | draft acceptance = 0.80165 (   97 accepted /   121 generated), mean len =  4.23
+0.40.495.553 I slot print_timing: id  0 | task 0 |   MoE arena = 0.9492 (420816 hit / 443340 reaches this turn), arena 45540.5 MiB
+0.40.495.736 I slot      release: id  0 | task 0 | stop processing: n_tokens = 10639, truncated = 0
+0.40.497.957 I srv    operator(): operator(): cleaning up before exit...
+0.40.918.907 W ~llama_context:     Meta() compute buffer size of 2304.0000 MiB, does not match expectation of 1792.0000 MiB
+0.41.751.284 W moe_cache_report: host pool (L2): 144 tensors, 58896 slots, 51764.1 MiB pinned; h=0.9183 (349421/380518), fills=131346 evictions=0

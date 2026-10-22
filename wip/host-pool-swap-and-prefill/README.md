@@ -1,7 +1,13 @@
 # `host-pool-swap-and-prefill` — the pool as the arena's swap partner, and why prefill must not touch it
 
-**Status: OPEN (seeded 2026-10-22, r111).  Scoping + measurements + one defect to fix.  Nothing here is part
-of the delivery; the defect in §2 is the release-relevant part.**
+**Status: OPEN (seeded 2026-10-22, r111) — re-scoped 2026-10-22 (r113).  The release-relevant halves are
+DONE: §2 (the SIGSEGV) is moot (the background worker was removed), §3 (prefill must not evict) is satisfied
+by construction (the demand path never evicts at all), and the "one shared LRU" question in §1 was answered
+by a measurement rather than a design: the pool's CONTENT dominates the disk traffic (15x) and every
+eviction/hand-over policy is within 0-246 MiB of the others, so r113 lays the pool out in bulk from the
+persisted heat prior and leaves it alone.  Record: `../../archive/work/host-pool-layout/`.  What is still
+OPEN is the remainder in §7: `DIO` auto-selection, a pool-aware prefill staging kernel, and long-session
+adaptation.**
 
 Seeded from the gfx1100 (fingon, 7900 XTX 24 GB / **30 GiB RAM** / ROCm 10.1.0) session that validated
 `--host-experts pool` on a model **larger than RAM** (Qwen3.6-35B-A3B **Q8_0**, 37.8 GB file, host expert
@@ -178,3 +184,29 @@ MOE_HOST_POOL_FRAC=75 llama-cli -m $M -ngl 99 -ncmoe 36 --host-experts pool \
   `expert_host_src` / `expert_src_done` / `access_locked` in `ggml/src/ggml-cuda/moe-expert-cache.cu`.
 * Admission quality (the sibling question, different axis): `../moe-admission-quality/` (TODO #86).
 * Issue #139 (why a smaller pinned footprint matters at all): `../../archive/work/issue-139-ar-spin-timeout/`.
+
+## 7. What is still open after r113 (2026-10-22)
+
+r113 (`archive/work/host-pool-layout/`) closed the disk-I/O half of this campaign: the pool is laid out as
+the arena's complement ranked by the persisted heat prior, the demand path never evicts, the prefill staging
+reads the pool, `MOE_HOST_POOL_RAM_PCT` bounds the pinned total, and the background worker (and therefore
+the §2 SIGSEGV) is gone.  Remaining, in priority order:
+
+1. **`MOE_HOST_POOL_DIO` is still a hand-set default** (the "inverted optimum" this campaign named).  On the
+   field config (`-ncmoe 48`, 70K prompt, 128-token decode, 2x R9700) `DIO=0` measures 733 t/s prefill /
+   53.7 t/s decode against `pinned` 836 / 57.5, while `DIO=1` measures 287 / 23.1 -- on a box whose RAM
+   holds the set.  On the 30 GiB field box the opposite holds.  The obvious fix is to choose at the first
+   pool build from `MemAvailable` vs the host expert set (the same measurement `MOE_HOST_POOL_RAM_PCT`
+   already takes), with a kill switch.
+2. **The pool-backed prefill issues one `cudaMemcpyAsync` per expert.**  The pinned-master path stages a
+   whole table with ONE `moe_cache_stage_kernel` launch; the pool path loops the host, which is the rest of
+   the gap to `pinned` (733 vs 836 t/s at `DIO=0`).  A pool-aware staging kernel needs a per-expert slot map
+   upload (the `prs` pattern already exists) and a "no slot" sentinel that falls back to the bounce.
+3. **Long-session adaptation.**  Between the two bulk layouts the pool's content is static, so a single
+   session that changes topic keeps its pre-prompt layout.  Do not add an eviction policy for this before
+   re-running the two-tier model (`scripts/moe-trace-replay.py --pool-frac`) on a *long, topic-shifting*
+   trace: on the short trace every eviction policy was within noise, and the one that looked most "correct"
+   (`pool-swap-slot`) cost 2x decode for 0 MiB of L3.
+4. **§4's gfx1100 numbers predate the layout fix** -- re-measure the 30 GiB box with r113 before quoting
+   them anywhere; the pinned-footprint and swap conclusions still hold (they are about `FRAC` and `DIO`),
+   but the decode figures should move.
