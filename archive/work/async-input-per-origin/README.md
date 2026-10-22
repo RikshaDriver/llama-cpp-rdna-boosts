@@ -1,8 +1,6 @@
-# wip/async-input-per-origin — make the async-input ring's "per-origin" state actually per-origin (issue #201)
+# archive/work/async-input-per-origin — make the async-input ring's "per-origin" state actually per-origin (issue #201)
 
-**Status: OPEN (seeded 2026-10-21, r104).**  Nothing here is in `patches/`; nothing has been applied.  This
-directory is the campaign handover: the finding, the fix design, the gates, and the **one promotion this
-campaign also owns** (RDNA3_5 default-on for `mmf32`, deliberately bundled into the same release — see §6).
+**Status: CLOSED (promoted 2026-10-21, r105) — see [`RESOLUTION.md`](RESOLUTION.md) and `repro/`.**  Block 10's ring now keys its ordering state on the host thread (the `cudaStreamPerThread` sentinel is `2` in every thread, so r101's per-origin state held one origin), and block 06 extends `mmf32`'s default to RDNA3_5; both shipped in `v12-097cf33d9-r105` (`WORKLOG.md` 261021.015).  The record correction this campaign owed is `WORKLOG.md` 261021.014.  This directory is the campaign handover as it was written (the finding, the fix design, the gate list, the release shape); nothing here is part of the delivery.
 
 Subject: <https://github.com/stew675/llama-cpp-rdna-boosts/issues/201> — *"block 10: the async-input ring keys
 its 'per-origin' state on the cudaStreamPerThread sentinel (constant `2`), so the map holds one origin and
