@@ -60,7 +60,8 @@
 #                                    single card has >= 28 GiB, else the first
 #                                    available 24-GiB-class quant)
 #   --corpus FILE     CORPUS         default /llm/models/wikitext-2-raw/wiki.test.raw
-#   --ppl FILE        LLAMA_PPL      default ~/llama.cpp/build-rocm-hybrid/bin/llama-perplexity
+#   --ppl FILE        LLAMA_PPL      default ~/llama.cpp/build-rocm/bin/llama-perplexity (the canonical
+#                                    ~/bin/build-llama-rocm tree)
 #   --ctx N           CTX            default 512
 #   --chunks N        CHUNKS         default 40
 #   --ub N            UB             pass `-ub N` (default: the tool's own ubatch, i.e. moot)
@@ -106,7 +107,7 @@ set -uo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-LLAMA_PPL="${LLAMA_PPL:-$HOME/llama.cpp/build-rocm-hybrid/bin/llama-perplexity}"
+LLAMA_PPL="${LLAMA_PPL:-$HOME/llama.cpp/build-rocm/bin/llama-perplexity}"
 CORPUS="${CORPUS:-/llm/models/wikitext-2-raw/wiki.test.raw}"
 BASE_DIR="${BASE_DIR:-$HOME/.cache/rdna-boosts/gates}"
 CTX="${CTX:-512}"
