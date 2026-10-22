@@ -1,83 +1,79 @@
 # spec-draft-mtp-vocab — `--spec-draft-mtp-vocab N`: the MTP draft scores a trimmed LM-head row subset
 
-**Status: IMPORTED (2026-10-21), partial gate done here, NOT part of the delivery.**  Nothing here may be
-applied to the fork or folded into `patches/` without the maintainer's explicit go-ahead (see the WIP and
-promotion rules in `AGENTS.md`).  Origin: discussion **#202** (martino2k6), branch
+**Status: IMPORTED (2026-10-21) + 3 campaign patches, gated on this box, NOT part of the delivery.**  Nothing
+here may be applied to the fork or folded into `patches/` without the maintainer's explicit go-ahead (see the
+WIP and promotion rules in `AGENTS.md`).  Origin: discussion **#202** (martino2k6), branch
 [`martino2k6/llama-cpp-rdna-boosts:wip/spec-draft-mtp-vocab`](https://github.com/martino2k6/llama-cpp-rdna-boosts/tree/wip/spec-draft-mtp-vocab)
-at commit `4534e32` (`007da0f4`), six format-patches cut on `v12-097cf33d9-r101` (r101 tree `4df89305`,
-applied tree `c4391f33`).  Reporter's box: gfx1151 / Strix Halo, ROCm 7.2.4.
+at commit `4534e32` (`007da0f4`): six format-patches cut on `v12-097cf33d9-r101`.  Patches **0007-0009** are
+this campaign's own (see §2).  Reporter's box: gfx1151 / Strix Halo, ROCm 7.2.4.
 
-**Where it stands on this box (gfx1201, 2x R9700, 2026-10-21):** the series applies to **r106** with
-`git am -3` (no conflict) and builds clean; the trim is **active and greedy-identical**, and it reproduces
-the reporter's win — **+5.7…+7.1 % decode** on `Qwen3.8-27B-Q8_0` (`-sm layer`, 2 GPU) and **+6…+14 %** on
-the 4B, with the greedy text hash equal to the r106 delivery build's own.  **It hard-aborts under
-`-sm tensor`** (`ggml-backend-meta.cpp:2319`, F2) because the LM head is vocabulary-split there — that
-finding, not the speed, decides this campaign.  Detail: §3.1 (numbers), §5 (findings).
+**Where it stands (gfx1201, 2x R9700, ROCm 10.1.0, 2026-10-21).**  Nine patches apply to **r106** with
+`git am -3`, no conflict, and build clean.  Summary:
 
-> **Cold start.**  Read `AGENTS.md` (WIP and promotion rules; the default-on policy; the adaptive-MTP gate
-> and the prefill-logit gate), then `benchmarks/mtp-adaptive-methodology.md`.  This is a **decode-side,
-> draft-only** change: the prefill-logit gate does not apply, the adaptive-MTP gate and the greedy-purity
-> grid do.
+| question | answer |
+|---|---|
+| 27B Q8_0 `-sm tensor` (the config that must work) | **works** — the abort was a `ggml-backend-meta` limitation on reading a row range out of a vocabulary-split tensor, fixed by **0007** |
+| `--spec-type draft-mtp-adaptive --spec-draft-n-max 9`, 27B Q8_0 2 GPU `-sm tensor` | **+3.4…+5.5 %** decode on the delivery's phase-switching prompt (69.7 -> 72.1 t/s); +5.5 % on a short synthetic prompt |
+| gemma4 (`gemma4-assistant` sidecar) | **supported** (0008 + 0009) — but **not beneficial**: its useful cutoff is 245760 of 262144 rows, i.e. a no-op; below that acceptance halves and it is a 30 % *loss* |
+| greedy purity | identical text when the acceptance trajectory is the same; across trajectories it can differ — and the **untrimmed delivery build already differs between `--spec-draft-n-max 3` and `9`**, so that is a schedule effect, not the trim (F9) |
+| trim off | inert: the patched build reproduces the r106 delivery build's text exactly at n-max 1, 9 and adaptive-9 |
+
+Detail: §3 (numbers), §4 (gate plan), §5 (findings).  Scratch tree used for every number below:
+`/tmp/lc-vocab` (= the 9-patch tree, `tree 60fc64c6d21cacd58542d3a5fc2c1860092d0442`).
+
+> **Cold start.**  Read `AGENTS.md` (WIP and promotion rules; the default-on policy; the adaptive-MTP gate and
+> the prefill-logit gate), then `benchmarks/mtp-adaptive-methodology.md`.  This is a **decode-side, draft-only**
+> change: the prefill-logit gate does not apply, the adaptive-MTP gate and the greedy-purity grid do.
 
 ## 0. Why it is interesting
 
-The MTP draft head is an **LM-head matmul over the full vocabulary** (151k-256k rows on the current Qwen /
-Flash-Next payloads) executed **once per draft step** — i.e. up to `--spec-draft-n-max` times per target
-token.  On gfx1151 the reporter measures that draft step at **4.3 ms -> 1.6 ms**, and the whole token at
-**x1.0648** (46.25 -> 49.24 t/s, Qwen3.8 Flash-Next Q5_K_M, ctx 131k, `--spec-draft-n-max 3`).  The draft
-is only a *proposal*: verification is untouched, so greedy output is unchanged **by construction**, and an
-id the trim drops simply loses its draft win (acceptance 0.6908 -> 0.6786 in their run).
-
-It is a **decode** win with no purity risk to prefill and no kernel work: a smaller `mul_mat` plus a
-`fill`/`set_rows` scatter.  That makes it a cheap candidate for a delivery that already ships
-adaptive MTP.
+The MTP draft head is an **LM-head matmul over the full vocabulary** (151k-262k rows on the current Qwen /
+Flash-Next / gemma4 payloads) executed once per draft step — up to `--spec-draft-n-max` times per target
+token.  Trimming the scored rows cuts the draft step (reporter: 4.3 ms -> 1.6 ms on gfx1151) and the whole
+token by x1.0648 there.  The draft is only a *proposal*: verification is untouched, an id the trim drops
+simply loses its draft win.  It is a decode win with no kernel work — a smaller `mul_mat` plus a
+`fill`/`set_rows` scatter.
 
 ## 1. How it works
 
-Two mechanisms, one knob.
-
-**(a) The flag.**  `--spec-draft-mtp-vocab N` (`common/arg.cpp`, `common_params_speculative_draft::
-mtp_vocab`, plus the `LLAMA_ARG_SPEC_DRAFT_MTP_VOCAB` env alias from 0005) is copied into
+**(a) The flag.**  `--spec-draft-mtp-vocab N` (`common/arg.cpp`, `common_params_speculative_draft::mtp_vocab`,
+plus the `LLAMA_ARG_SPEC_DRAFT_MTP_VOCAB` env alias from 0005) is copied into
 `llama_context_params::mtp_draft_vocab` **only for the MTP draft context** — `common/common.cpp:1283` (the
 `-md`/`--model-draft` sidecar path) and `common/speculative.cpp:2884` (the in-tree speculator path).  The
 target context never sees it, so the target's own `output` projection is untouched.  `0` = off = today's
 code path byte-for-byte.
 
-**(b) The subset.**  When the MTP context is created (`src/llama-context.cpp:802`), it asks the model for
-an immutable `llama_mtp_draft_vocab` (`llama_model::mtp_draft_vocab_get`, `src/llama-model.cpp:2895`):
+**(b) The subset.**  When the MTP context is created (`src/llama-context.cpp:802`), it asks the model for an
+immutable `llama_mtp_draft_vocab` (`llama_model::mtp_draft_vocab_get`, `src/llama-model.cpp:2895`):
 
 - **Row selection**: token ids `t < N` **plus** every id carrying `LLAMA_TOKEN_ATTR_CONTROL` or
-  `LLAMA_TOKEN_ATTR_USER_DEFINED` (so `</s>`, `<|im_end|>`, tool-call and other special ids stay
-  draftable — without them the draft could never propose a stop token at all).
+  `LLAMA_TOKEN_ATTR_USER_DEFINED` (so `</s>`, `<|im_end|>`, tool-call ids stay draftable — without them the
+  draft could never propose a stop token).
 - **Why a plain cutoff is legitimate**: BPE ids are assigned in merge order, so low ids are the short,
-  frequent merges.  A guard (`mtp_draft_vocab_ids_follow_merge_order`, line 2857) walks the merge table and
-  requires the vocab to be BPE, to have at least `n_vocab/2` merges, and every merge-produced id to be
-  >= the previous one; otherwise the flag is **ignored with an `LLAMA_LOG_ERROR`** (`the tokenizer is not
-  BPE` / `token ids do not follow BPE merge order`).  A sentencepiece/UGGUF-style vocab is therefore
-  rejected rather than silently trimmed to noise.
-- **The subset tensors**: `head` is a `[n_embd, n_sel]` copy of the LM-head rows **in the same quant type**,
-  `ids` is an `I64[n_sel]` map back to real token ids.  The rows are copied host-side from
-  `model.output` with `ggml_backend_tensor_get` in **contiguous runs** (so a run of adjacent ids is one
-  copy, not one per row), into a buffer of the LM head's own buffer type, tagged
-  `GGML_BACKEND_BUFFER_USAGE_WEIGHTS`.  Nothing is repacked, requantized or dequantized — this is a
-  straight copy of a row range, which is why it cannot change a single logit.
-- **Guards**: arch must be `qwen35`, `qwen35moe` or `qwen4exp` (the three graphs that were taught the
-  scatter), `hparams.n_layer_nextn > 0`, and the MTP block must score with the **model** LM head
-  (`layers[n_layer()].nextn.shared_head_head == nullptr`) — a block with its own head would ignore the
-  subset, so it logs a warning instead of building an unused copy.  `n_sel >= n_vocab` is a no-op.
-  Probe contexts (`common_fit_params`, unallocated weights) return `nullptr` before touching anything.
-- **Ownership (0003)**: the subset is **per context**, not model-global state — `llama_context` holds a
-  `shared_ptr<const llama_mtp_draft_vocab>`, the model keeps weak references keyed by
-  `(n_keep, buffer_type)` under a mutex, and a context's graph sees it through
-  `llm_graph_params::mtp_draft` (`src/llama-graph.{h,cpp}`) and `llama_cparams::mtp_draft_vocab` (the N
-  actually in use).  Two contexts with the same N share one copy; `N` then `0`, or `N1` then `N2`, on the
-  same model do not leak into each other; the copy is freed with the last holder.  Graph reuse compares the
-  pointer and the cparams field (`llm_graph_params::equals`), so a captured graph is never replayed against
-  the wrong head.
+  frequent merges.  A guard (`mtp_draft_vocab_ids_follow_merge_order`) walks the merge table and requires a
+  BPE vocab, at least `n_vocab/2` merges, and each merge-produced id to be >= the previous one; otherwise the
+  flag is **ignored with an `LLAMA_LOG_ERROR`** (`the tokenizer is not BPE` / `token ids do not follow BPE
+  merge order`).  **0009** fixes that check: it compared against the *running maximum*, which a single
+  early high id poisons (gemma4 maps a few leading-space pieces to ~255998, so it read "236336 of 236339
+  out of order" while its ids actually track merge rank with corr **+0.992**).  It now compares against the
+  previous merge-produced id and tolerates <= 1 % inverted pairs (gemma4: **30 of 236339, 0.013 %**;
+  qwen35: 0).  A sentencepiece/UGGUF vocab is still rejected.
+- **The subset tensors**: `head` is `[n_embd, n_sel]`, a **row copy in the LM head's own quant type** (no
+  dequant/requant/repack — which is why it cannot change a logit), plus `ids`, an `I64[n_sel]` map back to
+  real token ids.  Rows are copied host-side from `model.output` in **contiguous runs** (one copy per run),
+  into a buffer of the LM head's own buffer type, tagged `GGML_BACKEND_BUFFER_USAGE_WEIGHTS`.
+- **Guards**: the MTP graph must be one of `qwen35`, `qwen35moe`, `qwen4exp` (nextn block or borrowed target
+  head) or `gemma4`/`gemma4-assistant`; the block must score with the model LM head; probe contexts
+  (`common_fit_params`, unallocated weights) return `nullptr`.  See **0008** for the gemma4 arm.
+- **Ownership (0003)**: per context — `llama_context` holds a `shared_ptr<const llama_mtp_draft_vocab>`, the
+  model keeps weak references keyed by `(n_keep, buffer_type)` under a mutex, the graph sees it through
+  `llm_graph_params::mtp_draft`.  Two contexts with the same N share one copy; `N` then `0`, or `N1` then
+  `N2`, do not leak into each other; the copy is freed with the last holder; graph reuse compares the pointer
+  and the cached `cparams.mtp_draft_vocab`.
 
-**(c) The graph.**  In the MTP graph only (`src/models/qwen35.cpp:666`, `qwen35moe.cpp:739`,
-`qwen4exp.cpp:1314`), when a subset exists **and** the head the graph would score with is the subset's
-source tensor **and** `n_outputs == 1`, the single `build_lora_mm(head_w, cur, head_s)` becomes:
+**(c) The graph.**  Only in the MTP graph (`src/models/qwen35.cpp:666`, `qwen35moe.cpp:739`,
+`qwen4exp.cpp:1314`, `gemma4-assistant.cpp:196`), when a subset exists **and** the head the graph would score
+with is the subset's source tensor **and** `n_outputs == 1`:
 
 ```c
 sub = build_lora_mm(mtp_draft->head, cur, head_s);              // [n_sel, 1]  -- the smaller matmul
@@ -86,205 +82,206 @@ cur = ggml_set_rows(ctx0, cur, ggml_reshape_2d(ctx0, sub, 1, n_sel), mtp_draft->
 cur = ggml_reshape_2d(ctx0, cur, n_row, 1);
 ```
 
-The tensor handed to the speculator is therefore still a **full-vocab logit row** — same shape, same
-consumer, same sampler chain — with `-inf` exactly at the ids the draft may not propose.  This is the whole
-correctness argument:
+The speculator still receives a **full-vocab logit row** — same shape, same consumers, same sampler chain —
+with `-inf` exactly at the ids the draft may not propose.  So a token that was never drafted can never be
+accepted, and a token is accepted only when the *target* agrees; the trim can only lose proposals.
 
-- **Greedy text is preserved by construction** because a speculative token is accepted only when it equals
-  what the *target* produces, and the target still scores the full vocabulary.  The trim can only make the
-  draft *miss* a proposal (a lost speed opportunity), never change an accepted token.  The reporter's
-  gate agrees: greedy bytes identical on every fresh load, logprob fingerprint `kl_mean 0.0`, top-1
-  agreement 1.0.
-- The `-inf` is what makes it safe for the sampler: a chain that samples the draft logits (top-k/top-p,
-  `--spec-draft-p-min`, the adaptive controller) cannot pick a `-inf` row.
-- It *is* lossy for **acceptance** whenever the full-vocab argmax id is >= N.  Their measurement is honest
-  about it: 0.6908 -> 0.6786, net +6.5 % anyway.  The campaign's second field note is a warning that the
-  sweet spot is payload-specific (64000 wins on ROCm, 98304 on their vulkan build — at 98304 the q6_K row
-  gather's requant noise flips near-tie draft argmaxes and acceptance drops, still lossless, just slower).
+**(d) 0006 — borrowed head.**  Shared-NextN sidecars (`nextn_shared_target_tensors`) carry no
+`output.weight`; the draft borrows the target's head, so the donor hook was inert.  0006 falls back to the
+target via `cparams.ctx_other`, skips the target's own-MTP-block checks (a shared-NextN target has
+`n_layer_nextn == 0`, so 0003's `layers[n_layer()]` access would read past its layer array) and identifies
+the tensor by `llama_mtp_draft_vocab::src` instead of `model.output`.
 
-**(d) 0006 — the borrowed-head case.**  Every shared-head MTP sidecar on the hub
-(`nextn_shared_target_tensors = True`) carries **no** `output.weight`: the draft graph borrows the
-*target's* LM head (`head_w = other.output`).  The donor hook ran on the draft model, whose `output` is
-`nullptr`, so it returned silently and the flag was completely inert — the reporter's sixth patch is the
-adaptation: fall back to the target model via `cparams.ctx_other`, build the subset from that head, skip
-the target's own-MTP-block checks (a shared-NextN target has `n_layer_nextn == 0`, so 0003's
-`layers[n_layer()]` access would read past the layer array), and identify the tensor by a new
-`llama_mtp_draft_vocab::src` pointer instead of `model.output`, so both shapes match.
+**(e) 0008 — gemma4.**  The gemma4 MTP sidecar (`arch gemma4-assistant`) scores its draft step with its own
+**tied token embedding** (`output = token_embd.weight`, `TENSOR_DUPLICATED`), so it takes the same hook.
+The arch guard allows `LLM_ARCH_GEMMA4_ASSISTANT` and skips the nextn checks for it (its layer array has
+exactly `n_layer()` entries and no nextn sub-struct).  Works; see §3.3 for why it does not pay.
 
-## 2. Patch inventory (unchanged, as imported)
+## 2. Patch inventory
 
-Applied on r106 with `git am -3`, **six commits, zero conflicts, zero manual resolution** (verified
-2026-10-21; see §3).
+Imported (unchanged, authors preserved) + three campaign patches.  All 9 apply to r106 with `git am -3`,
+zero conflicts; applied tree `60fc64c6d21cacd58542d3a5fc2c1860092d0442` (verified on a fresh worktree of the
+r106 tree).
 
-| patch | author | sha256 (first 16) | what |
-|---|---|---|---|
-| `0001-spec-MTP-draft-vocabulary-subset-spec-draft-mtp-voca.patch` | Simon Teixidor | `77a20529aac46268` | the flag, the subset build, the `qwen35`/`qwen35moe` graph scatter |
-| `0002-tests-per-context-MTP-draft-vocabulary-regression-te.patch` | Simon Teixidor | `a746a68e0367056a` | `tests/test-mtp-draft-vocab.cpp` (built, **not** registered with ctest — needs `-m <qwen35 MTP model>`) |
-| `0003-spec-make-the-MTP-draft-vocabulary-subset-per-contex.patch` | Simon Teixidor | `6f8e5f7b29afd33c` | per-context ownership, model-side weak-ref cache, `llm_graph_params::mtp_draft` |
-| `0004-qwen4exp-MTP-draft-vocab-subset-spec-draft-mtp-vocab.patch` | Laurent Zuijdwijk | `20dcc9035d9bc100` | the `qwen4exp` (Flash-Next) MTP graph + the arch guard |
-| `0005-common-LLAMA_ARG_SPEC_DRAFT_MTP_VOCAB-env-var-for-sp.patch` | Laurent Zuijdwijk | `c4b02955a90996e9` | `LLAMA_ARG_SPEC_DRAFT_MTP_VOCAB` env alias |
-| `0006-qwen4exp-build-the-MTP-draft-vocab-subset-from-the-b.patch` | Martin B (martino2k6) | `be79cfcc7f0dedf9` | shared-NextN sidecar: build the subset from the borrowed target head |
+| patch | author | what |
+|---|---|---|
+| `0001-spec-MTP-draft-vocabulary-subset-spec-draft-mtp-voca.patch` | Simon Teixidor | the flag, the subset build, the `qwen35`/`qwen35moe` scatter |
+| `0002-tests-per-context-MTP-draft-vocabulary-regression-te.patch` | Simon Teixidor | `tests/test-mtp-draft-vocab.cpp` (built, **not** registered with ctest — it needs `-m <qwen35 MTP model>`) |
+| `0003-spec-make-the-MTP-draft-vocabulary-subset-per-contex.patch` | Simon Teixidor | per-context ownership, model-side weak-ref cache, `llm_graph_params::mtp_draft` |
+| `0004-qwen4exp-MTP-draft-vocab-subset-spec-draft-mtp-vocab.patch` | Laurent Zuijdwijk | the `qwen4exp` (Flash-Next) MTP graph + the arch guard |
+| `0005-common-LLAMA_ARG_SPEC_DRAFT_MTP_VOCAB-env-var-for-sp.patch` | Laurent Zuijdwijk | `LLAMA_ARG_SPEC_DRAFT_MTP_VOCAB` env alias |
+| `0006-qwen4exp-build-the-MTP-draft-vocab-subset-from-the-b.patch` | Martino B (martino2k6) | shared-NextN sidecar: build the subset from the borrowed target head |
+| **`0007-meta-read-a-row-range-out-of-a-row-split-2-D-tensor.patch`** | **campaign** | **F2 fix**: `ggml_backend_meta_get_tensor_impl` can splice a row range of a *row-split* 2-D tensor (a vocabulary-split LM head) device by device |
+| **`0008-qwen4exp-MTP-draft-vocab-subset-for-gemma4-assistant.patch`** | **campaign** | gemma4-assistant MTP graph + arch guard |
+| **`0009-spec-accept-near-merge-ordered-token-ids-not-strictl.patch`** | **campaign** | merge-order guard: previous-id comparison + 1 % tolerance (gemma4 = 0.013 %) |
+
+Applied-state footprint: 18 files, +~560/-15 lines incl. the 243-line test.  **One ggml file now**
+(`ggml-backend-meta.cpp`) — promotion is no longer graph-only, so §4 step 7 is a real gate.
 
 Provenance (reporter's words, kept because it matters for upstreaming): 0001-0003 originated in
 Aristo94/GSQHalo.cpp (Simon Teixidor, 2026-09-13/15), were cherry-picked into agentionai/llama.cpp where
-0004-0005 were added (Laurent Zuijdwijk, 2026-10-01), and 0006 is martino2k6's own (MIT, authorship
-preserved in every commit).  **Not** the same feature as ggml-org/llama.cpp#30380 (that is a *dynamic*
-trimmed-vocab draft — different mechanism, different flag).
+0004-0005 were added (Laurent Zuijdwijk, 2026-10-01), 0006 is martino2k6's own.  MIT, authorship preserved.
+**Not** the same feature as ggml-org/llama.cpp#30380 (that is a *dynamic* trimmed-vocab draft).
 
-Applied-state footprint on r106: **17 files, +491/-5 lines** (incl. the 243-line test).  No ggml/kernel
-change, no new `.cu`, nothing in the CUDA backend — the whole feature is `src/` graph construction plus one
-host-side row copy.
+## 3. Measurements (gfx1201, 2x AI PRO R9700, ROCm 10.1.0, 2026-10-21)
 
-## 3. Import record (2026-10-21, on r106)
+`--temp 0 --seed 42`, greedy text hashed with `scripts/extract-generated.py`.  **Shallow depth** (prompts are
+296-5246 tokens, context sized 16384) — the delivery's decode work is normally validated at depth 16384, so
+treat these as shallow-depth numbers.
 
-- Base mismatch: patches are cut on **r101**, the delivery is at **r106**.  The intervening releases touched
-  blocks 06 (r104/r105), 10 (r105) and 11 (r106) — none of them a file this series edits, and
-  `git am -3` on a detached worktree of `rdna-boosts` (`tree d3c1e6c5…` = `release.json.tree`) applied all
-  six with **no conflict marker, no fuzz**.
-- **Build: clean.**  Fresh configure + full build of the patched tree with `~/bin/build-llama-rocm`
-  (ROCm 10.1.0, `GPU_TARGETS=gfx1201`) succeeded, `test-mtp-draft-vocab` included, and **no warning in any
-  file the series touches**.
-- `release.json`/`patches/` are untouched by this import; the delivery tree is unchanged.
-- Gate status: **step 1-2 done, step 6 blocked** — see §3.1 and F2.
+### 3.1 27B Q8_0 (`qwen35`, vocab 248320, n_embd 5120) — the config that must work
 
-### 3.1 First local measurements (gfx1201, 2x AI PRO R9700, ROCm 10.1.0, 2026-10-21)
+Prompt `prompts/code-reasoning-mixed.txt` (296 tok), `-n 512`, 2 GPU:
 
-`--temp 0 --seed 42 --spec-type draft-mtp --spec-draft-n-max 3`, greedy text hashed with
-`scripts/extract-generated.py`.  These are **smoke arms, not the gate**: short prompts, single config, no
-adaptive controller, no deep context.
-
-| model / split | trim N | gen t/s | greedy text | note |
+| speculator | split | trim | gen t/s | greedy text |
 |---|---|---|---|---|
-| Qwen3.5-4B Q8_0, 1 GPU, `-n 256` | 0 | 203.9 / 204.3 | identical | baseline, two rounds |
-| | 64000 | 216.1 / 215.4 | identical | +6.0 % |
-| | 98304 | 231.9 / 231.3 | identical | +13.7 % (4B has a small draft step; see gate step 4) |
-| Qwen3.8-27B Q8_0, 2 GPU `-sm layer`, `-n 256` | 0 | 40.6 / 40.6 | `da2e2d192e21` | equals the **r106 delivery build** (40.7, same hash) |
-| | 64000 | 43.5 / 42.9 | `da2e2d192e21` | **+5.7…+7.1 %**, reproduces the reporter's x1.0648 |
-| | 98304 | 42.8 / 42.9 | `da2e2d192e21` | no better here |
-| Qwen3.8-27B Q8_0, 2 GPU `-sm tensor`, `-n 64` | 0 | 50.5 | — | baseline OK |
-| | 64000 | — | — | **aborts**: `ggml-backend-meta.cpp:2319 GGML_ASSERT(size % chunk_size_full == 0)` (F2) |
+| `draft-mtp-adaptive`, n-max 9 | tensor | 0 | **69.7** (delivery build: 69.3) | `5612aa128fc3` (= delivery build) |
+| | tensor | 64000 | **72.1** (+3.4 %) | `59f85f3d2ef9` (see F9) |
+| | tensor | 98304 | 70.8 | `5612aa128fc3` |
+| `draft-mtp`, n-max 9 (fixed) | tensor | 0 | 67.0 | `ec1a197011c4` (= delivery build) |
+| | tensor | 64000 | **69.9** (+4.3 %) | `ec1a197011c4` — **identical** |
+| `draft-mtp`, n-max 1 (fixed) | tensor | 0 | 53.8 | `92010829c9f6` (= delivery build) |
+| | tensor | 64000 | 54.4 (+1.1 %) | `92010829c9f6` — **identical** |
 
-Activation lines observed (`-v`; invisible at default verbosity, see F8):
-`mtp_draft_vocab = 64000: MTP draft head uses 64033 of 248320 rows (166.10 MiB of q8_0, ROCm0)` for the 4B
-(n_embd 2560) and `(332.20 MiB of q8_0, ROCm1)` for the 27B (n_embd 5120) — i.e. **64000 + 33 control/user
-rows**, and the extra weight copy F3 quantifies.  No GPU faults after the abort
-(`scripts/check-gpu-faults.sh`, kernel + log: clean); it is a host-side assert, not a device fault.
+Short synthetic prompt (`The capital of France is`, `-n 256`), 2 GPU tensor, adaptive n-max 9:
+0 -> **61.8**, 64000 -> **65.2 (+5.5 %)**, 98304 -> 63.0, 131072 -> 60.9; **all four text hashes identical**
+(`da2e2d192e21`).
 
-## 4. Gate plan for this box (feasible, unlike most campaigns)
+`-sm layer` (2 GPU, `-n 256`): 0 -> 40.6 / 64000 -> 43.5, 42.9 / 98304 -> 42.8, 42.9; text identical
+throughout.
 
-Unlike the reporter's sidecar setup we do not need a download: **the MTP head is inside the models we
-already have**.  `qwen35.nextn_predict_layers` is present in `Qwen3.8-27B-Q8_0.gguf` and
-`Qwen3.5-4B-Q8_0.gguf`, and `qwen35moe.nextn_predict_layers` in `Qwen3.6-35B-A3B-Q8_0.gguf`, so
-`--spec-type draft-mtp` scores with the **model** LM head — exactly the shape 0001/0003 wire up (0006's
-shared-NextN fallback is the one arm we cannot exercise locally; it needs a hub sidecar GGUF).
+Acceptance (adaptive n-max 9, tensor, mixed prompt): trim 0 = **0.4851** (374/771, mean len 3.73), trim
+64000 = **0.4757** (372/782, mean len 3.70); per-position 0.825/0.664/0.555/0.409/0.219/0.036/... vs
+0.833/0.645/0.529/0.391/0.239/0.029/... — the trim costs ~1 pt of acceptance, deepest positions were already
+~0.
 
-Order (each step is a gate, not a measurement):
+4B Q8_0, 1 GPU, `-n 256`: 0 -> 203.9, 64000 -> 216.1 (+6.0 %), 98304 -> 231.9 (+13.7 %), two rounds each,
+text identical.  (A small model has a proportionally bigger draft step — the cutoff sweep is per payload.)
 
-1. **Build + smoke** — done (§3.1): the patched tree builds and `--spec-draft-mtp-vocab 64000` prints the
-   activation line `mtp_draft_vocab = 64000: MTP draft head uses N of M rows`.  If it prints
-   `... ignored: <why>`, stop: the trim is not active and everything downstream is a false A/B.  **Pass `-v`
-   to see it.**
-2. **Greedy purity (the criterion)** — same seed, `--temp 0`, `-n 300` minimum, trim arm vs
-   `--spec-draft-mtp-vocab 0` on the same binary, **and** vs the r106 release build, per the
-   `GREEDY-PURITY.md` §36 grid shape (f16/bf16/q8_0 exact; coarse quants logits-level).  Byte-identical
-   output is the promise; a difference is a defect, not a trade.
-3. **Adaptive-MTP gate** (`benchmarks/mtp-adaptive-methodology.md`, rule 0: `-n 3000`, `--reasoning on`
-   for R, `--reasoning off` for P/C/K, plus the phase-switching `prompts/code-reasoning-mixed.txt`), with
-   our **recommended** config (`--spec-type draft-mtp-adaptive` and also `-adaptive,ngram-mod`), not the
-   reporter's static `n-max 3`.  The controller keys on `n_accepted`, and the trim *deliberately* lowers
-   acceptance for ids >= N, so the climb/drop trajectory — not just the mean — has to be compared.
-4. **Sweep N** (e.g. 32768 / 49152 / 65536 / 98304 / 131072 / 0) per model and quant, because the reporter's
-   own field note says the sweet spot is payload-specific and a too-large N buys back nothing while
-   costing acceptance.
-5. **Kill-switch identity** — `--spec-draft-mtp-vocab 0` must reproduce the r106 build bit-for-bit and
-   within noise on t/s (the "inert at default" claim).
-6. Then the delivery's own gates on the multi-device shapes: `-sm tensor` (2 and 3 GPU) — **blocked today**,
-   see F2.  `-sm layer` works (measured above), so a `-sm layer`-only ship is possible if F2 is not fixed.
-
-## 5. Review findings (raised before any delivery-affecting work — maintainer decides)
-
-**F1 (correctness/scope) — the arch list is three entries, but the delivery ships more MTP users.**
-Only `qwen35`, `qwen35moe` and `qwen4exp` are wired.  Every other arch with an MTP path falls through to
-`"not supported for this model"`.  Two of ours matter: **`gemma4`** (our `-MTP.gguf` sidecars, the
-`fix-gemma-4` campaign, block 11) and the **DFlash / deepseek4 / glm5-next** families.  Gemma4's MTP graph
-scores with a borrowed head too, so porting it to this hook is the same ~10-line block 0004 adds — but it
-is **not** done here, and gemma4 is the MTP model the maintainer actually benches.  Decision needed:
-extend the campaign to gemma4 (and which others), or keep it a Qwen/Flash-Next-only probe.
-
-**F2 (CONFIRMED 2026-10-21 — blocks the `-sm tensor` config) — the subset build aborts under a
-vocabulary-split LM head.**  `-sm tensor` places the `output` projection **split along the vocab axis**, and
-building the subset reads a *row range* out of that split Meta buffer.  `llama-cli` 2x R9700 on
-`Qwen3.8-27B-Q8_0` + `--spec-draft-mtp-vocab 64000 -sm tensor` dies at MTP-context creation with
+### 3.2 `-sm tensor` before 0007 (the F2 abort, for the record)
 
 ```
 /tmp/lc-vocab/ggml/src/ggml-backend-meta.cpp:2319: GGML_ASSERT(size % chunk_size_full == 0) failed
 ```
 
-which is `ggml_backend_meta_buffer_get_tensor`'s `SPLIT_AXIS_0/1/2` path: it splices a split tensor only in
-whole `nb[axis+1]` chunks, so for a 2-D vocab-split tensor *any* partial read is rejected (the `MIRRORED`
-branch, immediately below it, does support it).  Same binary, `-sm tensor` with `--spec-draft-mtp-vocab 0`:
-50.5 t/s, fine; `-sm layer` + trim: fine (43.5 t/s, §3.1).  So the failure is the feature, not the config,
-and it is a **clean host-side abort before decode** — no GPU fault, no silent wrong output.  Users have
-`-sm layer` as the escape hatch today; `-sm tensor` is the delivery's recommended multi-GPU mode, so this
-must be fixed before any promotion.
+`llama-cli` 27B Q8_0 + `--spec-draft-mtp-vocab 64000 -sm tensor` died at MTP-context creation: the subset
+build reads a row range out of the **vocabulary-split** LM head, and the Meta buffer's splice path serves a
+2-D axis-1-split tensor only as a whole tensor (its chunk is `nb[axis + 1]`, which for a 2-D tensor *is* the
+tensor).  It was a clean host assert before decode (no GPU fault, `check-gpu-faults.sh` clean), and the same
+binary was fine at `-sm layer` and at `-sm tensor` with the trim off.  0007 adds the row-granular path; after
+it, `-sm tensor` + trim runs at every N in the tables above.
 
-Fix routes, in order of preference: (a) build the subset **device by device** through
-`ggml_backend_meta_buffer_simple_tensor()` (or by asking the Meta buft for a per-device view) instead of one
-range read — small host helper, keeps the maximum win because the subset head keeps the Meta buft and is
-then placed vocab-split like the head it was copied from; (b) then verify the two *graph* ops on a split row —
-`ggml_fill` of the `-inf` full-vocab row and `ggml_set_rows` with an id list that spans both devices — against
-the single-device arm; if the scatter cannot be made correct per-device, gather the draft logits row the way
-block 11 does for the DFlash selector (`GGML_ALL_GATHER`, r106); (c) fallback: reject `--spec-draft-mtp-vocab`
-with `-sm tensor` loudly (a warning + full-vocab draft) rather than aborting, and ship `-sm layer` only.
+### 3.3 gemma4 26B-A4B QAT + `gemma-4-26B-A4B-it-Q4_0-MTP.gguf` (`gemma4-assistant`)
 
-**F3 (memory) — the subset copy is unaccounted VRAM, and `--fit` cannot see it.**  Measured: **332.20 MiB**
-for 64033 of 248320 q8_0 rows on the 27B (n_embd 5120), **166.10 MiB** on the 4B (n_embd 2560) — a second
-copy of `N/n_vocab` of the LM head in its own quant type, allocated when the **MTP context** is created,
-i.e. after `--fit` has committed its estimate (probe contexts are deliberately skipped, 0006).  On the tight
-24 GiB-per-card configs we gate at (27B Q4 + 128k ctx + expert cache) that is enough to tip an allocation
-into shared memory.  Options: teach the estimator, account it as part of the draft's weight bytes, or accept
-it and document a size.
+`gemma4-assistant` **does not implement `-sm tensor`** (load-time rejection), so this is `-sm layer`, 2 GPU,
+`-n 256`, mixed prompt, `draft-mtp` n-max 3:
 
-**F4 (policy) — opt-in vs the default-on policy.**  `AGENTS.md` says a beneficial, gated feature ships ON
-with an env kill-switch.  This is a numeric tuning knob whose sweet spot is payload-specific (their two
-field notes), so "default 0 + `--spec-draft-mtp-vocab N`" is defensible **only if** we publish a
-recommended N per payload family (and validate it).  Alternatively pick a conservative default (e.g.
-`min(n_vocab, 65536)` or the tokenizer's trained prefix) and make `0` the kill-switch.  Note that a
-*default-on* trim changes every existing MTP decode number we have published, so the adaptive-MTP baseline
-in `benchmarks/` would have to be re-recorded.  Decision needed at promotion, not now.
+| trim | rows kept | gen t/s | acceptance | mean len |
+|---|---|---|---|---|
+| 0 (full vocab) | 262144 | **150.3** | 0.669 | 3.00 |
+| 64000 | 64006 (35.2 MiB q4_0) | 104.5 | 0.339 | 2.02 |
+| 131072 | 131078 (72.0 MiB) | 105.7 | 0.355 | 2.07 |
+| 196608 | 196614 (108.0 MiB) | 106.9 | 0.369 | 2.11 |
+| **245760** | 245766 (135.0 MiB) | **150.5** | **0.669** | **3.00** |
+| 64000 + last 32768 (two bands) | 96768 | 144.6 | 0.610 | 2.82 |
 
-**F5 (purity bookkeeping) — needs a `GREEDY-PURITY.md` §entry when it is promoted.**  The claim is "the
-draft may be arbitrarily lossy; the verified sequence is the target's greedy sequence", i.e. the same
-family as the existing §36 statement, but the acceptance loss and the `-inf` scatter deserve an explicit
-rule ("a draft-side vocabulary restriction never changes an accepted token; it can only drop proposals").
-Also: with `--temp > 0` the sampled output distribution is untouched (acceptance is still evaluated
-against the target), but our §36 grid is greedy-only — write the statement down rather than infer it.
+**So gemma4 is supported but not worth trimming on this payload.**  The reason is the tokenizer layout: of
+762 sampled draft candidates, 70 % are ids < 64000 and **24 % sit in the 229376..262143 band** (gemma4's
+space-prefixed pieces live at the top of the vocabulary), and the *top-1* is split across both — so any cut
+below ~245760 halves acceptance, and at 245760 there is nothing left to save and the `fill`/`set_rows`
+overhead makes it a wash (150.5 vs 150.3).  A two-band subset (keep `< N` **and** `>= n_vocab - M`, measured
+with a temporary env knob, not committed) recovers acceptance to 0.610 at 37 % of the rows but is still
+0.4 % *slower* than full vocab: gemma4's draft step is cheap relative to its 26B MoE target, so the row
+saving cannot pay for the scatter.  If gemma4 support is wanted for its own sake, the two-band idea is the
+route — as a follow-up, with a real CLI knob, not a hidden env.
 
-**F6 (ABI/API) — a new field mid-struct in the public `llama_context_params`.**  Fine in-tree, but it is an
-ABI break for prebuilt bindings, and the field sits between `n_threads_batch` and `ctx_type` (not at the
-end).  Upstream-PR material would want it at the tail and documented in `ENVIRONMENT.md` terms.  No action
-for a wip import; note it when cutting an `upstream/` copy.
+## 4. Gate plan / what is left
 
-**F7 (small) — the flag is silently inert outside MTP.**  `--spec-draft-mtp-vocab N` with
-`--spec-type ngram-mod`/`none`/`eagle3` is accepted and does nothing (no warning).  Also
-`LLAMA_ARG_SPEC_DRAFT_MTP_VOCAB` is a `common` env alias only — for promotion it needs an
-`ENVIRONMENT.md` row (kind: opt-in tuning value, `0` = off) and the `--spec-draft-mtp-vocab` help text
-carries the payload-specific sweet spot caveat.
+Done here: **1** build + activation line, **2** greedy purity (all same-trajectory comparisons), **3** the
+adaptive gate's decode/acceptance axes on one prompt, **4** a first N sweep (27B + 4B + gemma4), **5**
+kill-switch identity (untrimmed arms reproduce the delivery build's text at n1/n9/adaptive-9; `0` = off),
+**6** 27B `-sm tensor` (2 GPU) — works.
 
-**F8 (confirmed on our tree, nit) — the activation line is `LLAMA_LOG_INFO`, and our `llama-cli` does not
-show it by default either.**  A 4B A/B run without `-v` printed no loader or core INFO lines at all (only
-the banner and the timing footer), so a working trim and a silently rejected one look identical — exactly
-the trap the reporter fell into twice.  Promoting the line to `LLAMA_LOG_WARN` (or adding an
-`mtp_draft_vocab` gauge next to the existing draft counters) makes gate step 1 self-verifying; until then,
-every A/B in this campaign is run with `-v`.
+Still open before any ship decision:
+
+1. **Adaptive-MTP gate, properly** — `-n 3000` (rule 0), `--reasoning on` for R and `off` for P/C/K, the
+   full R/C/K + phase-switching set, and the *climb/drop trajectory* comparison (`n_accepted` drives the
+   controller; the trim lowers acceptance by design).  Our numbers are one prompt at `-n 512`.
+2. **Depth** — repeat at depth 16384 (the delivery's decode validation depth).
+3. **3 GPU** — `-sm tensor` on 3 devices, and the `-sm layer` arm for comparison.
+4. **`GGML_META` regression** for **0007**: `test-backend-ops`, `test-logits-width-probe SPLIT=tensor`, plus a
+   direct full-read-vs-row-range equality check on a split weight.  This is a `ggml/` change now.
+5. **`--fit` accounting** (F3) and the default-on policy decision (F4) if it is ever promoted.
+
+## 5. Review findings
+
+**F2 — FIXED (0007), verified.**  See §3.2.  `-sm tensor` + trim works at 27B Q8_0 on 2 GPU.  The fix is a
+row-granular splice in `ggml_backend_meta_get_tensor_impl` for a 2-D tensor split on axis 1 (per
+segment/repeat, so a repeated split works too); everything else keeps its old path.  It is a general
+meta-buffer improvement, not a special case for this feature.
+
+**F9 — greedy text is a function of the acceptance trajectory, in the delivery too (NEW, pre-existing).**
+With **no campaign code at all**, the r106 delivery build produces *three different* greedy texts on the
+mixed prompt depending only on draft depth:
+
+| delivery r106, `-sm tensor`, mixed prompt, 512 tok | greedy text |
+|---|---|
+| `draft-mtp` n-max 3 | `92010829c9f6` |
+| `draft-mtp` n-max 9 | `ec1a197011c4` |
+| `draft-mtp-adaptive` n-max 9 | `5612aa128fc3` |
+
+(`-sm layer`: n-max 3 `348b4bb78c8a` vs n-max 9 `921afe655051` — same story.)  Verify-width-dependent
+numerics flip a near-tie somewhere in a 500-token generation, so "greedy bytes are identical" is only
+meaningful **at a fixed trajectory**.  Consequences:
+
+- The trim's purity is verified the right way here: identical text at **fixed** n-max (1 and 9) and on the
+  short prompt under adaptive-9.  The single divergence is the adaptive arm on the 512-token prompt, where the
+  trim changes acceptance -> the controller changes depth -> the trajectory changes: the two arms produce
+  **identical text for the first 1952 characters (76.5 %)** and then a near-tie flips on a code/reasoning
+  phase switch (2560 vs 2492 chars, EOS at a different point).  That is the same effect as the untrimmed
+  n3-vs-n9 difference above, and it is a property of the *schedule*, not of the trimmed subset.
+- A promotion should therefore **not** gate on "trim == no-trim bytes" across trajectories.  Gate on
+  same-trajectory identity plus the structural argument (target graph untouched; `-inf` means a draft cannot
+  propose outside its own subset).  This belongs in `GREEDY-PURITY.md` as a §entry either way: it is the first
+  measurement in this repo of greedy text depending on `--spec-draft-n-max` alone.
+
+**F1 — arch coverage (partly done).**  `qwen35`, `qwen35moe`, `qwen4exp` (imported) + `gemma4-assistant`
+(0008, not beneficial).  Not wired: the DFlash / deepseek4 / glm5-next MTP families — unknown whether worth
+it (their draft heads are not necessarily the LM head).
+
+**F3 — the subset copy is unaccounted VRAM.**  Measured: **332.20 MiB** of q8_0 for 64033 of 248320 rows on
+the 27B (`n_embd` 5120), 166.10 MiB on the 4B, 35.16 MiB of q4_0 for gemma4.  It is allocated when the MTP
+context is created, i.e. **after `--fit`** has committed its estimate (probe contexts are skipped on
+purpose).  On tight per-card configs that can tip an allocation into shared memory.  Options: teach the
+estimator, account it as draft weight bytes, or document a size.
+
+**F4 — opt-in vs the default-on policy.**  A numeric knob whose sweet spot is payload-specific (27B/4B:
+64000-98304 wins; gemma4: only a no-op cutoff keeps acceptance).  "Default 0 + flag" is defensible only if a
+recommended per-payload N is published and validated; a default-on trim would also change every published MTP
+decode number and require re-recording the adaptive-MTP baseline.  Decision at promotion.
+
+**F5 — purity bookkeeping.**  Needs the `GREEDY-PURITY.md` §entry from F9 (draft-side restriction cannot change
+an accepted token; a trim can only drop proposals; greedy text is trajectory-dependent).
+
+**F6 — public struct field mid-`llama_context_params`** (ABI break for prebuilt bindings).  Fine in-tree;
+upstream-PR material wants it at the tail.
+
+**F7 — small.**  The flag is silently inert outside MTP spec types (no warning); `LLAMA_ARG_SPEC_DRAFT_MTP_VOCAB`
+needs an `ENVIRONMENT.md` row on promotion (kind: opt-in tuning value, `0` = off).
+
+**F8 — confirmed on our tree.**  The activation line is `LLAMA_LOG_INFO` and our `llama-cli` hides INFO at
+default verbosity (a 4B A/B printed no loader or core INFO lines at all), so a working trim and a silently
+rejected one look identical.  Every A/B here was run with `-v`.  Promote the line to `LLAMA_LOG_WARN`, or add
+an `mtp_draft_vocab` gauge next to the draft counters.
 
 ## 6. Open questions for the maintainer
 
-1. Is this a campaign we want at all (a decode-only win for a flag, no kernel change), and if yes, is F1's
-   gemma4 extension in scope or is Qwen/Flash-Next enough?
-2. Who fixes F2, and is `-sm layer`-only acceptable as a first ship?  With F2 fixed the feature is usable in
-   our recommended 2-3 GPU `-sm tensor` config; without it, it is a `-sm layer` feature only.  The rest of
-   the gate plan (step 3-5) does not depend on the answer and is cheap on this box.
-3. If it gates green, is it a new block (12) or a fold into **block 02** (adaptive MTP)?  It is
-   draft-decode-side and independent of the controller, so block 02 is the natural home; F4's
-   default-on question decides whether it can ship as a block amendment in a patch release.
+1. **Do we want it at all?**  On the delivery's own recommended config (27B Q8_0, 2-3 GPU `-sm tensor`,
+   adaptive n-max 9) it is **+3.4 %** on the phase-switching prompt and **+5.5 %** on a short synthetic one,
+   for a 332 MiB extra copy and a new `ggml-backend-meta` read path.  gemma4 gains nothing.  The remaining
+   gates (§4) are cheap except the meta regression suite and the depth/3-GPU arms.
+2. **`-sm layer`-only is no longer a fallback** — 0007 makes `-sm tensor` work, so the question is whether the
+   `ggml/` change is acceptable as part of the delivery (it is small and general, but it *is* core ggml).
+3. **If it gates green**: new block 12, or a fold into **block 02** (adaptive MTP)?  It is decode-side and
+   independent of the controller, so block 02 is the natural home.  F4 decides whether a default-on variant
+   is even on the table.

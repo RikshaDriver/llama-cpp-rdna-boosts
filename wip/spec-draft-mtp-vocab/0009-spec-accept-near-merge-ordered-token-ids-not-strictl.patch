@@ -1,0 +1,93 @@
+From 215cd21e997a4e26d8208b225d365b2939ed5ec7 Mon Sep 17 00:00:00 2001
+From: Stew Forster <ci@rdna-boosts.invalid>
+Date: Wed, 21 Oct 2026 23:03:40 -0500
+Subject: [PATCH 9/9] spec : accept near-merge-ordered token ids, not strictly
+ monotone ones
+
+The subset is only worthwhile when token ids follow BPE merge order, and the
+guard checked each merge-produced id against the RUNNING MAXIMUM.  That is
+right only for a perfectly monotone sequence: a tokenizer that maps an early
+merge to a high id (gemma4 maps a few leading-space pieces to ~255998) marks
+every later id out of order, so gemma4 was rejected with
+"236336 of 236339 merge-produced tokens out of order" even though its ids track
+merge rank with corr +0.992.
+
+Compare against the PREVIOUS merge-produced id and tolerate up to 1 % inverted
+pairs (gemma4: 30 of 236339, 0.013 %; qwen35: 0).  A cutoff still cannot select
+rare tokens, and a genuinely unordered tokenizer (sentencepiece/UGGUF) is still
+rejected.
+
+Measured on the 26B-A4B QAT payload: the trim activates, and the accepted cutoff
+for gemma4 is 245760 of 262144 rows -- below that, acceptance halves (0.669 ->
+0.339 at 64000), because most of its draft top-1 ids sit in the 229376..255999
+band.  See the campaign README for the numbers.
+---
+ src/llama-model.cpp | 32 +++++++++++++++++++++-----------
+ 1 file changed, 21 insertions(+), 11 deletions(-)
+
+diff --git a/src/llama-model.cpp b/src/llama-model.cpp
+index e6e6b4f4e..9f6a45390 100644
+--- a/src/llama-model.cpp
++++ b/src/llama-model.cpp
+@@ -2866,7 +2866,7 @@ static bool mtp_draft_vocab_ids_follow_merge_order(const llama_vocab & vocab, st
+         return false;
+     }
+     std::vector<uint8_t> seen((size_t) n_vocab, 0);
+-    llama_token last = -1;
++    llama_token prev = -1;
+     size_t n_first = 0;
+     size_t n_out_of_order = 0;
+     for (const std::string & m : merges) {
+@@ -2880,13 +2880,18 @@ static bool mtp_draft_vocab_ids_follow_merge_order(const llama_vocab & vocab, st
+         }
+         seen[(size_t) id] = 1;
+         n_first++;
+-        if (id < last) {
++        // Compare with the PREVIOUS merge-produced id, not with the running maximum: a tokenizer may map an
++        // early merge to a high id (gemma4 maps a few leading-space pieces to 2559xx) and that single peak
++        // would otherwise mark every later id as out of order.  A handful of inverted pairs are tolerated —
++        // they are a rounding error against the ordering, which is what a token-id cutoff needs.
++        if (prev >= 0 && id < prev) {
+             n_out_of_order++;
+         }
+-        last = std::max(last, id);
++        prev = id;
+     }
+-    if (n_first < (size_t) n_vocab / 2 || n_out_of_order > 0) {
+-        why = format("token ids do not follow BPE merge order (%zu of %zu merge-produced tokens out of order)", n_out_of_order, n_first);
++    if (n_first < (size_t) n_vocab / 2 || n_out_of_order > n_first / 100) {
++        why = format("token ids do not follow BPE merge order (%zu of %zu merge-produced tokens out of order)",
++                n_out_of_order, n_first);
+         return false;
+     }
+     return true;
+@@ -2898,15 +2903,20 @@ std::shared_ptr<const llama_mtp_draft_vocab> llama_model::mtp_draft_vocab_get(in
+     if (n_keep <= 0 || out == nullptr || out->buffer == nullptr || out->data == nullptr) {
+         return nullptr;
+     }
+-    // only the qwen35, qwen35moe and qwen4exp MTP graphs use the subset, and only when the MTP block scores with the model LM head
+-    if (arch != LLM_ARCH_QWEN35 && arch != LLM_ARCH_QWEN35MOE && arch != LLM_ARCH_QWEN4EXP) {
++    // only the MTP graphs that were taught the subset use it, and only when they score with the model LM head:
++    // qwen35/qwen35moe/qwen4exp (their nextn block or the borrowed target head), and gemma4-assistant, whose
++    // `output` is its own tied token embedding
++    const bool own_head_always = arch == LLM_ARCH_GEMMA4_ASSISTANT;
++    if (arch != LLM_ARCH_QWEN35 && arch != LLM_ARCH_QWEN35MOE && arch != LLM_ARCH_QWEN4EXP &&
++            arch != LLM_ARCH_GEMMA4 && !own_head_always) {
+         LLAMA_LOG_WARN("%s: mtp_draft_vocab = %d ignored: not supported for this model\n", __func__, n_keep);
+         return nullptr;
+     }
+-    // the nextn checks apply to a model whose own MTP block scores with this head. A shared-NextN target owns no MTP
+-    // block (n_layer_nextn == 0) and the layers[n_layer()] access below would read past its layer array - the consumer
+-    // of this subset is the sidecar's graph, checked against src there
+-    if (!shared_target_head && (hparams.n_layer_nextn == 0 ||
++    // The nextn checks apply to a model whose own MTP block scores with this head.  They are skipped for a
++    // shared-NextN target (it owns no MTP block, n_layer_nextn == 0, so the layers[n_layer()] access would read
++    // past its layer array; the consumer there is the sidecar's graph, checked against src) and for
++    // gemma4-assistant, whose layer array has exactly n_layer() entries and no nextn sub-struct at all.
++    if (!own_head_always && !shared_target_head && (hparams.n_layer_nextn == 0 ||
+             layers[hparams.n_layer()].nextn.shared_head_head != nullptr)) {
+         LLAMA_LOG_WARN("%s: mtp_draft_vocab = %d ignored: not supported for this model\n", __func__, n_keep);
+         return nullptr;
+-- 
+2.56.0
+

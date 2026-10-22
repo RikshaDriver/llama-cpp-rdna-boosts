@@ -1,0 +1,70 @@
+From 74fb56d6c2fc391970c6af5d9a42184730c38df8 Mon Sep 17 00:00:00 2001
+From: Stew Forster <ci@rdna-boosts.invalid>
+Date: Wed, 21 Oct 2026 23:03:34 -0500
+Subject: [PATCH 8/9] qwen4exp : MTP draft vocab subset for gemma4-assistant
+
+The gemma4 MTP sidecar (arch gemma4-assistant) scores its draft step with its
+own tied token embedding (`output` = token_embd.weight, TENSOR_DUPLICATED), so
+it takes the same subset hook the qwen35/qwen35moe/qwen4exp graphs use: score
+the draft over the copied rows and scatter the result into a full-vocab row of
+-inf.  The target still verifies the full vocabulary.
+
+mtp_draft_vocab_get() also stops indexing layers[hparams.n_layer()] for this
+arch: an assistant's layer array has exactly n_layer() entries and no nextn
+sub-struct, so those checks are skipped for it (they stay for qwen35/35moe,
+whose array carries the nextn layer, and for the shared-NextN target path).
+EOF
+spec : accept near-merge-ordered token ids, not strictly monotone ones
+
+The subset is only worthwhile when token ids follow BPE merge order, and the
+guard checked each merge-produced id against the RUNNING MAXIMUM.  That is
+right only for a perfectly monotone sequence: a tokenizer that maps an early
+merge to a high id (gemma4 maps a few leading-space pieces to ~255998) marks
+every later id out of order, so gemma4 was rejected with
+"236336 of 236339 merge-produced tokens out of order" even though its ids track
+merge rank with corr +0.992.
+
+Compare against the PREVIOUS merge-produced id and tolerate up to 1 % inverted
+pairs (gemma4: 30 of 236339, 0.013 %; qwen35: 0).  A cutoff still cannot select
+rare tokens, and a genuinely unordered tokenizer (sentencepiece/UGGUF) is still
+rejected.
+
+Measured on the 26B-A4B QAT payload: the trim activates, and the accepted
+cutoff for gemma4 is 245760 of 262144 rows -- below that, acceptance halves
+(0.669 -> 0.339 at 64000), because most of its draft top-1 ids sit in the
+229376..255999 band.  See the campaign README for the numbers.
+EOF3
+---
+ src/models/gemma4-assistant.cpp | 16 +++++++++++++++-
+ 1 file changed, 15 insertions(+), 1 deletion(-)
+
+diff --git a/src/models/gemma4-assistant.cpp b/src/models/gemma4-assistant.cpp
+index 2b6560a88..52016fa1b 100644
+--- a/src/models/gemma4-assistant.cpp
++++ b/src/models/gemma4-assistant.cpp
+@@ -193,7 +193,21 @@ llama_model_gemma4_assistant::graph::graph(const llama_model & model, const llm_
+     cur = build_norm(cur, model.output_norm, nullptr, LLM_NORM_RMS, -1);
+     cb(cur, "result_norm", -1);
+ 
+-    ggml_tensor * logits = build_lora_mm(model.output, cur);
++    ggml_tensor * logits;
++    if (mtp_draft != nullptr && model.output == mtp_draft->src && n_outputs == 1) {
++        // --spec-draft-mtp-vocab: this context drafts over a row subset of the LM head (the assistant's tied
++        // token embedding) and scatters its logits into a full-vocab row of -inf, as the qwen35/qwen35moe/
++        // qwen4exp MTP graphs do.  Only the draft changes; the target still verifies the full vocabulary.
++        GGML_ASSERT(mtp_draft->n_keep == cparams.mtp_draft_vocab);
++        const int64_t n_sel = mtp_draft->head->ne[1];
++        const int64_t n_row = model.output->ne[1];
++        ggml_tensor * sub = build_lora_mm(mtp_draft->head, cur);
++        logits = ggml_fill(ctx0, ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, 1, n_row), -INFINITY);
++        logits = ggml_set_rows(ctx0, logits, ggml_reshape_2d(ctx0, sub, 1, n_sel), mtp_draft->ids);
++        logits = ggml_reshape_2d(ctx0, logits, n_row, 1);
++    } else {
++        logits = build_lora_mm(model.output, cur);
++    }
+     cb(logits, "result_output", -1);
+     res->t_logits = logits;
+ 
+-- 
+2.56.0
+
