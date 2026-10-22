@@ -106,7 +106,7 @@ numbers are **stable** — dozens of docs cite them — so they are never renumb
 | **§44** | a per-start hipBLASLt solution pick is not a code defect; pin `ROCBLAS_USE_HIPBLASLT=0` before comparing starts | doctrine |
 | **§45** | a split the op cannot serve locally must be rejected, never approximated — and "locally" means no device straddles the reduction | fix (r101) |
 | **§46** | a tile→WMMA family switch is judged at a calibrated point (base PPL in the gate's domain) against a same-kernel ubatch control; the r102 head-512 rows pass there | doctrine (r102, TODO #81 closed 2026-10-21) |
-| **§47** | an exact F32 GEMM in a different summation order is a family switch too; own the path in-code and judge it against the same-kernel control (12/12 fresh starts determinism, +4.2 % prefill) | fix (r104, TODO #82 closed) |
+| **§47** | an exact F32 GEMM in a different summation order is a family switch too; own the path in-code and judge it against the same-kernel control (12/12 fresh starts determinism, +4.2 % prefill) | fix (r104, TODO #82 closed; default extended to RDNA3_5 in r105) |
 
 ---
 
@@ -1099,5 +1099,10 @@ within-family change and must meet the absolute limits at the default point.
 construction) and BF16/f16 prefill is untouched, so Flash-Next keeps both hipBLASLt's +51 % and its own
 per-start lottery (a BF16 counterpart is a separate job, not delivered).  A full-F32 model's FFN GEMMs
 (`m` ≫ 256) still reach hipBLASLt: an accepted limitation, recorded in `patches/README.md` (block 06).
-Default-on for RDNA4 only; RDNA3/RDNA3_5 are opt-in until that box runs the same determinism + bench pair
-(§19's arch-admission discipline).
+Default-on for **RDNA4 and RDNA3_5** (r105 extended it); **RDNA3 stays opt-in** — gfx1100 measured
+−1.3…−2.2 % at `pp2048` (one visit a tie), so there the lever would be a per-arch tile (`BN`/`ks`), not the
+gate.  RDNA3_5 (gfx1151) passed §19's arch-admission legs: `test-backend-ops -o MUL_MAT` 2444/2444 with
+NMSE **6.11e-14** vs rocBLAS 6.83e-13 (a case the kernel does not take is bit-identical), **12/12** fresh
+starts one logits class, **+1.0 % pp512 / +1.6 % pp2048** with decode flat, and this same family-switch
+protocol at the shipped point: base PPL 1.4345, candidate **0.013016 / 98.673 %** vs same-kernel control
+**0.019125 / 97.975 %** (no worse on both, PASS with `--allow-control-pass`).

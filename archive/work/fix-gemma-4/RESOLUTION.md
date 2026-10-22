@@ -68,3 +68,28 @@ stock models (`none` == `draft-mtp` text on all eight pairs; dense hashes identi
 **Re-opening this:** the campaign is closed.  A new gemma4/`-sm tensor` defect is a new TODO entry and a new
 campaign — do not edit these records, and do not re-apply `patch-state/` to a current tree (its base is
 `972f3b757`, two releases old).
+
+## Correction (2026-10-21, r105) — the async-input ring did NOT take this arm from 0 to 8/10
+
+`WORKLOG.md` 261021.003 credited block 10's **per-origin async-input ring** with taking the gemma4 MTP arm
+from *unstable in every sample* to **8/10** "by removing a genuine cross-context ordering defect".  That
+credit is **withdrawn** — the ring could not have done it, and the step has a measured cause.
+
+The ring's per-origin state was keyed on the `cudaStreamPerThread` sentinel (issue #201), so it held exactly
+one origin per device: r101's "per-origin ordering" did not exist, and the default single-context path was
+unaffected (see `archive/work/async-input-per-origin/RESOLUTION.md`, which also proves the fixed build now
+produces two origins from two host threads on one device).  Re-derived on the r105 tree with the campaign's
+own instrument (`tools/fp.sh`, draft-candidate fingerprint classes, gemma4 26B-A4B Q8_0 + MTP n3,
+`-ncmoe 40 -sm layer`, 2 devices):
+
+| arm | 10 × `-n 300` | 3 × `-n 3000` |
+|---|---|---|
+| hipBLASLt **on** (default) | **10/10** `05e32c4dee` | 3/3 `867a09a093` |
+| `ROCBLAS_USE_HIPBLASLT=0` | **10/10** `05e32c4dee` | 3/3 `867a09a093` |
+| **`GGML_CUDA_MMF32=0`**, hipBLASLt on | **2 classes in 6**: `6f6923ef36` ×4, `51274cb0f2` ×2 | — |
+
+So the r101 "unstable" arm was the **hipBLASLt per-start solution lottery** on the F32 MoE-router GEMM
+(`m=128 n=375 k=2816` — inside `mmf32`'s window), which `ROCBLAS_USE_HIPBLASLT=0` pinned at r101 (hence
+8/10, not 10/10) and which **r104's `mmf32` removed by construction** (hence 10/10 in *both* arms now).  The
+two unstable fingerprints are exactly the two §44 recorded for this config.  Correcting record:
+`WORKLOG.md` 261021.014.

@@ -12,7 +12,7 @@ Details never live here: they live in `AGENTS.md`, `patches/README.md`, `MANIFES
 still means the same subject after that item is closed and removed from this file.  New items append.
 
 **Current state:** the **12-block V2.0 set** (block 00 + blocks 01-11) at fork point **`097cf33d9`**,
-release **`v12-097cf33d9-r104`**.  `release.json` is the source of truth for the tip/tree and hashes; the
+release **`v12-097cf33d9-r105`**.  `release.json` is the source of truth for the tip/tree and hashes; the
 top of `WORKLOG.md` is the newest record.
 
 | # | subject | kind | status |
@@ -28,7 +28,6 @@ top of `WORKLOG.md` is the newest record.
 | **78** | DFlash2 `-sm tensor`: the real Meta distributed `TOP_K` fix | correctness | open, scoping (`wip/dflash-meta-split-impl/`) |
 | **79** | RDNA3_0 verify-band fusions: no multi-device measurement, and gfx1101/gfx1102 untested | platform validation | open (shipped default-on in r95; needs a 2+ card gfx1100 box).  `ssh fingon` is single-RDNA3 (`ROCm0`; its second rocm-smi entry is an iGPU and is not a HIP device), so it does **not** cover the multi-device arm — it validates single-GPU gfx1100 only.  gfx1101/gfx1102 still have no hardware |
 | **80** | meta split-state cache: 30+ lookups per node per re-allocation | performance | parked (`archive/work/issue-184-meta-r80r82/RESOLUTION.md` `§` headroom) |
-| **84** | issue #201: the async-input ring's per-origin state is keyed on the `cudaStreamPerThread` sentinel (constant `2`), so r101's per-origin ordering does not exist | correctness | open, campaign `wip/async-input-per-origin/` (fix + the bundled RDNA3_5 `mmf32` default) |
 
 Accepted limitations that are deliberately **not** fixed are listed at the end — do not re-report them.
 
@@ -191,9 +190,11 @@ Two gaps, both needing hardware the fleet does not have:
   GEMMs (`m` ≫ 256: dense F32/F16-weights-heavy prefill) still fall through to rocBLAS/hipBLASLt, so they keep
   that path's per-start solution lottery; the kernel's tile (32 output rows) is the wrong shape to be
   competitive there and no such model is validated.  Also untouched: BF16/f16 prefill (Flash-Next keeps both
-  hipBLASLt's +51 % and its own lottery — a BF16 counterpart is its own job) and RDNA3/RDNA3_5, where the
-  kernel is opt-in (`GGML_CUDA_MMF32=1`) until those boxes run the determinism + bench pair.  Scope:
-  `patches/README.md` (block 06), rule: `GREEDY-PURITY.md` §47.
+  hipBLASLt's +51 % and its own lottery — a BF16 counterpart is its own job) and **RDNA3** (gfx1100), where the
+  kernel stays opt-in (`GGML_CUDA_MMF32=1`) because it measured −1.3…−2.2 % at `pp2048` there; the lever would be
+  a per-arch tile, not the gate.  RDNA3_5 was admitted and is default-on since r105 (`halo`: 12/12
+  deterministic, +1.0 %/+1.6 % prefill, family-switch PASS).  Scope: `patches/README.md` (block 06), rule:
+  `GREEDY-PURITY.md` §47.
 - **The `launch-ledger` remainder (item 5(c)) — measured, not pursued (2026-09-12 (8)).**  The small-pp
   remainder (+38 `scale_f32`/eval, an `rms_norm<256,true>` count diff) is sub-0.2 %, root-cause-only.
 - **The mmq mma `sum[]` accumulator-overflow latent defect (item 5(d)) — accepted, no upstream report

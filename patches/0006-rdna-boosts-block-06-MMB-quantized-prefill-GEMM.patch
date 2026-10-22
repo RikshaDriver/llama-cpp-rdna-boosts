@@ -1,4 +1,4 @@
-From c58642f934a1f1f2a041e1bf98b3a6c0bb2a62c4 Mon Sep 17 00:00:00 2001
+From cc4bf51fffc4fc2cfb9c9d61e52f36cffa231c09 Mon Sep 17 00:00:00 2001
 From: Stew Forster <ci@rdna-boosts.invalid>
 Date: Wed, 21 Oct 2026 10:40:31 -0500
 Subject: [PATCH 06/11] rdna-boosts: block 06: MMB quantized prefill GEMM
@@ -40,11 +40,11 @@ determinism + bench pair).  GGML_CUDA_MMF32_LOG prints the resolved plans (diagn
  ggml/src/ggml-cuda/ggml-cuda.cu   |   49 +-
  ggml/src/ggml-cuda/mmb.cu         | 2366 +++++++++++++++++++++++++++++
  ggml/src/ggml-cuda/mmb.cuh        |   33 +
- ggml/src/ggml-cuda/mmf32.cu       |  198 +++
+ ggml/src/ggml-cuda/mmf32.cu       |  201 +++
  ggml/src/ggml-cuda/mmf32.cuh      |   45 +
  tests/CMakeLists.txt              |    1 +
  tests/test-logits-width-probe.cpp |  185 +++
- 7 files changed, 2874 insertions(+), 3 deletions(-)
+ 7 files changed, 2877 insertions(+), 3 deletions(-)
  create mode 100644 ggml/src/ggml-cuda/mmb.cu
  create mode 100644 ggml/src/ggml-cuda/mmb.cuh
  create mode 100644 ggml/src/ggml-cuda/mmf32.cu
@@ -2574,10 +2574,10 @@ index 000000000..270cb0fc4
 +void ggml_cuda_mmb_release_all();
 diff --git a/ggml/src/ggml-cuda/mmf32.cu b/ggml/src/ggml-cuda/mmf32.cu
 new file mode 100644
-index 000000000..e3ad22c65
+index 000000000..2257a267e
 --- /dev/null
 +++ b/ggml/src/ggml-cuda/mmf32.cu
-@@ -0,0 +1,198 @@
+@@ -0,0 +1,201 @@
 +#if defined(GGML_USE_HIP)
 +
 +// mmf32 -- the F32 "skinny" prefill GEMM (block 06).  See mmf32.cuh for why it exists and its scope.
@@ -2719,8 +2719,11 @@ index 000000000..e3ad22c65
 +} // namespace
 +
 +bool ggml_cuda_mmf32_enabled(int cc) {
-+    // Default-on policy: the variable exists to DISABLE.  RDNA4 is the validated device (gfx1201); on the
-+    // other RDNA families the kernel is opt-in until that box has run the same determinism + bench pair.
++    // Default-on policy: the variable exists to DISABLE.  RDNA4 (gfx1201) and RDNA3_5 (gfx1151) are the
++    // validated devices -- same four legs on both (exact, deterministic by construction, a prefill win, and a
++    // --family-switch PASS at a confident point; GREEDY-PURITY.md §47).  On RDNA3 the kernel is NOT a win
++    // (gfx1100: -1.3..-2.2 % at pp2048, one visit a tie), so it stays opt-in there until that box has a pinned
++    // per-arch tile; the lever would be the tile (`BN`/`ks`), not this gate.
 +    static const int env = []() {
 +        const char * e = getenv("GGML_CUDA_MMF32");
 +        if (e == nullptr) {
@@ -2731,7 +2734,7 @@ index 000000000..e3ad22c65
 +    if (env >= 0) {
 +        return env == 1;
 +    }
-+    return GGML_CUDA_CC_IS_RDNA4(cc);
++    return GGML_CUDA_CC_IS_RDNA4(cc) || GGML_CUDA_CC_IS_RDNA3_5(cc);
 +}
 +
 +bool ggml_cuda_mmf32_supported(int cc, int64_t m, int64_t n, int64_t k, int64_t ldc) {

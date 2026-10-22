@@ -1,5 +1,101 @@
 # WORKLOG - dated delivery records
 
+## 261021.015 (r105) -- issue #201 fixed (the async-input ring is actually per-origin) + `mmf32` default-on for RDNA3_5
+
+**Release `v12-097cf33d9-r105`**, 12 blocks, fork point `097cf33d9`, tip `dfb7fe80d`, tree
+`60f5017c72d8f990ff22bc45b7a246f4a8f14aaa`.  Two block amendments: **10** (the ring, issue #201 / `TODO` #84)
+and **06** (`mmf32` predicate: RDNA3_5 joins RDNA4).  Campaign record:
+`archive/work/async-input-per-origin/` (`RESOLUTION.md`, `repro/`); the record correction this release owed is
+its own entry, **261021.014** below.
+
+**Block 10 — the ring's ordering state is now per host thread.**  r101 keyed the per-origin map on
+`cudaStreamPerThread`, which is the sentinel `((hipStream_t)2)` — the same value in every thread — so there was
+exactly one origin per device and "per-origin ordering" did not exist.  Now keyed on
+`std::this_thread::get_id()`; uploads are still *issued* on `cudaStreamPerThread` (ordering is carried by the
+per-copy `ev` / batched `flush_ev`, never by a stream handle), and the r101 comment's "a stream is a
+`llama_context`" model is replaced (an origin is a host thread).  Fixed with it: only the **owning** thread
+consumes an origin's `pending`/`has_flush` (a foreign wait may still *issue* a foreign queue — the loader
+uploads from another thread — but no longer steals the owner's wait), the `flush_ev` wait happens **before**
+the `o.q.empty()` early-out, and the ring head wraps only after every origin's queue is issued and the device
+has drained (a foreign origin's *queued* uploads would otherwise be overwritten before they were ever issued —
+a fourth gap that only a correct key exposes).  `GGML_CUDA_ASYNC_INPUT_DEBUG=1` logs the origin count and
+thread id (`ENVIRONMENT.md` §7.4).
+
+**Proven, not assumed.**  `repro/ain_origin_repro.cpp`: two host threads, two CUDA backends, **one device**.
+r104 semantics → **1 origin**, and the second thread's first wait finds `issued=0 ev=0 flush=0` (its copy was
+issued on the *other* thread's stream: the foreign-thread drain).  The fix → **2 origins** (`key == thread`),
+and the owner still consumes its flush after a foreign drain.  Re-verified on gfx1201, gfx1151 and gfx1100.
+
+**Gates (gfx1201 unless stated, one GPU job at a time).**  `GGML_CUDA_ASYNC_INPUT=0` vs default through the
+prefill-logit gate with hipBLASLt pinned on both arms: **0.000000 / 100.000 %** — the ring is byte-identical
+to the old path.  `test-backend-ops` SET/SET_ROWS/CPY **422/422**, MUL_MAT **2444/2444** (seeded NMSE).
+Determinism (dump hashes): 35B-A3B **12/12** one class at 1 GPU (`d598fa841cff`, r104's class) and **4/4** at
+2 GPU `-sm tensor` (`e5179311f6d2`), dense 27B 4/4.  Coherence 4B 3 GPU `1c5d32ac537d` (== r93…r99).
+Perf, 3 interleaved visits, ring on vs off: 35B-A3B 2 GPU `-ncmoe 40` → pp512 **+2.7 %**, pp2048 **+1.6 %**,
+tg128 **+4.3 %**; Flash-Next GSQ-IQ3_XXS 2 GPU `-ncmoe 48 -ub 2048 --load-mode mmap --lazy-mode off` → pp2048
+flat, tg128 **+4.9 %**.  No regression; r90's decode win survives.
+
+**Block 06 — `mmf32` default-on for RDNA3_5** (`GGML_CUDA_CC_IS_RDNA4 || GGML_CUDA_CC_IS_RDNA3_5`), the
+r104 admission legs re-run on `halo` (gfx1151) with the kernel as the *default*: `test-backend-ops -o MUL_MAT`
+2444/2444; **12/12** fresh starts one logits class (`3f86d992a67f`, the class the r104 campaign recorded for
+`MMF32=1`); **+1.24 % pp512** (2238.4 vs 2211.0) and **+1.42 % pp2048** (2233.5 vs 2202.3), decode flat, 3
+interleaved visits; `--family-switch` at the shipped confident point (in-domain corpus, `-c 2048 --chunks 7`,
+base arm the kill switch, base PPL **1.4345**): candidate **0.013016 / 98.673 %** vs same-kernel control
+**0.019125 / 97.975 %** → PASS with `--allow-control-pass`.  On `fingon` (gfx1100) the default environment still
+logs **0 intercepts** — RDNA3 stays opt-in (−1.3…−2.2 % at `pp2048`).
+
+**Release gates.**  `scripts/validate-set.sh` green (checksums, strict 12/12 from a fresh tarball, tree
+`60f5017c…` == `release.json`); `scripts/gate-per-block-build.sh --changed-from f38bfa9dd` **3/3** (blocks 06,
+10, 11 — 11's delta moves only because its `ggml-cuda.cu` context does); the standard prefill-logit point
+re-recorded on the shipping default (dense 27B Q8_0, dump sha `44d7605be6…`, **0.000000 / 100.000 %** PASS).
+
+**Two instrument nits found and recorded (not fixed here).**  (1) `scripts/gate-prefill-logits.sh` defaults
+`LLAMA_PPL` to `~/llama.cpp/build-rocm-hybrid`, which on `soar` was a **stale 2026-10-17 build** — a release
+gate would silently test an old binary; always pass `--ppl`.  (2) `--ab` **overwrites the standard base file**
+with the fallback arm's dump (its `meta` records `arm=<the ab arm>`); `--record` re-records the default arm
+(and it must come *after* `--ab` on the command line, since `--record` resets the arm).
+
+**Docs.**  `ENVIRONMENT.md` (§10.1 default column + validated-device sentence, new
+`GGML_CUDA_ASYNC_INPUT_DEBUG` row), `patches/README.md` (block 06 scope/default, block 10's ring bullet +
+knob), `MANIFESTS.md` (block-06 rows incl. the per-arch legs; block-10 verification row gains the ring gates),
+`GREEDY-PURITY.md` §47 (+ index row), `TODO.md` (#84 closed; the accepted-limitation bullet now names RDNA3
+only), `README.md`/`TODO.md` current-release line, `wip/CAMPAIGNS.md` (row removed, closure note added), and
+the campaign moved to `archive/work/async-input-per-origin/` with its `RESOLUTION.md` — no stub left behind.
+
+**Publication.**  Tag `v12-097cf33d9-r105`; fork `rdna-boosts` refreshed to `dfb7fe80d` (clean 12-block apply
+at `097cf33d9`, tree verified, gated, `--force-with-lease`, personal fork only); `validate.yml` + `release.yml`
+on the tag; the container images (ROCm 7.14.1 + 10.1) are built and pushed by the worker watcher on
+`radiance` from the tag — not on this box.
+
+## 261021.014 (docs) -- record correction: the r101 gemma4 MTP "0 -> 8/10" step was the hipBLASLt lottery, not the async-input ring
+
+**Correction only -- no patch, no `release.json` change.**  `WORKLOG.md` 261021.003 (r101) and
+`archive/work/fix-gemma-4/` credit block 10's **per-origin async-input ring** with taking the gemma4 26B-A4B MTP
+arm from *unstable in every sample* to **8/10** "by removing a genuine cross-context ordering defect".  That
+attribution is withdrawn: the ring's origin map was keyed on the `cudaStreamPerThread` sentinel and could hold
+only **one** origin per device (issue #201, fixed in r105 — see 261021.015), so it cannot have changed the
+single-context ordering it was credited with, and the residual had already been re-attributed to the hipBLASLt
+solution lottery (`GREEDY-PURITY.md` §44) without explaining the 0 -> 8/10 step.
+
+**Re-derived on the r105 tree** (gemma4 26B-A4B Q8_0 + `mtp-gemma-4-26B-A4B`, `-ngl 99 -ncmoe 40 -sm layer
+--fit false -c 16384 --spec-type draft-mtp --spec-draft-n-max 3 -n 300 -t 8 --seed 42 --temp 0 --ignore-eos`,
+2 devices, draft-candidate fingerprint classes via `archive/work/fix-gemma-4/tools/fp.sh`):
+
+| arm | 10 x `-n 300` | 3 x `-n 3000` |
+|---|---|---|
+| hipBLASLt **on** (default) | **10/10** `05e32c4dee` | 3/3 `867a09a093` |
+| `ROCBLAS_USE_HIPBLASLT=0` | **10/10** `05e32c4dee` | 3/3 `867a09a093` |
+| **`GGML_CUDA_MMF32=0`**, hipBLASLt on | **2 classes in 6**: `6f6923ef36` x4, `51274cb0f2` x2 | — |
+
+So the r101 "unstable" arm was the **hipBLASLt per-start solution lottery** on the F32 MoE-router GEMM
+(`m=128 n=375 k=2816`, inside `mmf32`'s window): `ROCBLAS_USE_HIPBLASLT=0` pinned it at r101 (8/10, not
+10/10), and **r104's `mmf32` removed it by construction** — which is why both arms are 10/10 today.  The two
+unstable fingerprints are exactly the two classes §44 recorded for this config, which is the independent
+cross-check that the attribution is right.
+
+`archive/work/fix-gemma-4/RESOLUTION.md` gains a "Correction" section pointing here; the r101 entry itself is
+not edited (a dated record is never rewritten).  `TODO` #84 and the ring remain as recorded in 261021.015.
+
 ## 261021.013 (docs) -- session close: RDNA3_5 `mmf32` default + issue #201 bundled into r105; campaign seeded with a handover
 
 **Docs only: no patch, no `release.json` change, no default flipped yet.**  Records the two decisions this

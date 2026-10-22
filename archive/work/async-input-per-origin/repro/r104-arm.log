@@ -1,0 +1,27 @@
+repro: 2 threads x 3 rounds, one device (graph-input upload + graph compute each)
+ggml_cuda_init: found 1 ROCm devices (Total VRAM: 32624 MiB):
+  Device 0: AMD Radeon AI PRO R9700, gfx1201 (0x1201), VMM: yes, Wave Size: 32, VRAM: 32624 MiB
+moe_cache_init: MoE expert cache enabled on device 0: budget=auto MiB/device, period=32 steps, adaptive uniform slots (deferred sizing)
+AIN origin: dev=0 key=785287a565e85510 thread=9bf81d9b72403918 origins=1
+ggml_cuda_async_input_arm_locked: device ring: batched graph-input uploads on (GGML_CUDA_ASYNC_INPUT_BATCH=0 disables)
+ggml_cuda_async_input_set: device 0: async graph-input uploads on (GGML_CUDA_ASYNC_INPUT=1 enables)
+AIN wait: dev=0 key=785287a565e85510 thread=9bf81d9b72403918 origins=1 issued=2 ev=0 flush=1
+AIN wait: dev=0 key=785287a565e85510 thread=19781a7c1b134b64 origins=1 issued=0 ev=0 flush=0
+repro: thread 1 round 0 done
+repro: thread 0 round 0 done
+AIN wait: dev=0 key=785287a565e85510 thread=9bf81d9b72403918 origins=1 issued=1 ev=0 flush=1
+ggml_backend_cuda_graph_compute: CUDA graph warmup complete
+AIN wait: dev=0 key=785287a565e85510 thread=19781a7c1b134b64 origins=1 issued=1 ev=0 flush=1
+ggml_backend_cuda_graph_compute: CUDA graph warmup complete
+repro: thread 1 round 1 done
+AIN wait: dev=0 key=785287a565e85510 thread=9bf81d9b72403918 origins=1 issued=1 ev=0 flush=1
+repro: thread 0 round 1 done
+AIN wait: dev=0 key=785287a565e85510 thread=19781a7c1b134b64 origins=1 issued=1 ev=0 flush=1
+repro: thread 1 round 2 done
+repro: thread 0 round 2 done
+repro: done
+moe_cache_report: MoE expert cache: h=0.0000 (0/0 reaches), fills=0 evictions=0, tables=0, slots=0, arena=0.0 MiB total (budget auto MiB/device)
+moe_cache_report: takeover=0 decline_all=0 get_ok=0 cold=uva cold_reaches=0
+moe_cache_report: cold admission=touch, admission-rejected (served cold)=0
+moe_cache_report: heat (R2): total=0, nonzero=0/0 experts over 0 tables
+moe_cache_report: VRAM budget: requested=auto MiB/device, free-clamped=0, arena alloc failures=0 (fail-soft)

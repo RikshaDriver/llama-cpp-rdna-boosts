@@ -309,7 +309,8 @@ judgement.
 keeps the rocBLAS call.  BF16/f16 prefill (Flash-Next) is untouched, so hipBLASLt keeps its large advantage
 there (and its per-start lottery — the BF16 counterpart is not claimed).  A **full-F32 model's FFN GEMMs
 (`m` ≫ 256) stay on rocBLAS**: the kernel would need a different tile to be competitive at wide `m`, and no
-such model is validated.  Default-on for RDNA4, opt-in on RDNA3/RDNA3_5 (`ENVIRONMENT.md` §10.1).
+such model is validated.  Default-on for RDNA4 **and RDNA3_5**, opt-in on RDNA3 (`ENVIRONMENT.md` §10.1; RDNA3
+measured −1.3…−2.2 % at `pp2048` on gfx1100, so the lever there would be a per-arch tile, not the gate).
 
 **Contents.**  The `mmb` kernel family and its dispatch (`ggml-cuda.cu`); a per-quant type list
 (`GGML_CUDA_MMB_TYPES`); per-arch RDNA3/RDNA4 tuning knobs; `mmf32.cu`/`mmf32.cuh` and its dispatch; and
@@ -637,7 +638,17 @@ fusions.
 * **Async graph-input ring**: batched uploads + lazy done event (PR #182), and the r90 fix that snapshots
   the source through the pinned ring — the scheduler uses `set_tensor_async` for a *CPU split's* output,
   which the next ubatch rewrites, so a direct copy from the caller's live pointer could read the next
-  ubatch's bytes.  Default-on; `GGML_CUDA_ASYNC_INPUT=0` disables.
+  ubatch's bytes.  Default-on; `GGML_CUDA_ASYNC_INPUT=0` disables.  **The ordering state is per origin
+  host thread** (r105, issue #201): r101-r104 keyed the per-origin map on `cudaStreamPerThread`, which is
+  the sentinel `((hipStream_t)2)` — the same value in every thread — so there was exactly one origin per
+  device and r101's per-origin ordering did not exist.  It is now keyed on `std::this_thread::get_id()`
+  (uploads are still *issued* on `cudaStreamPerThread`; ordering is carried by the per-copy `ev` / batched
+  `flush_ev`, never by a stream handle), only the owning thread may consume an origin's ordering state (a
+  foreign wait may still *issue* its queue — the loader legitimately uploads from another thread — but must
+  leave the owner's wait intact), the `has_flush` event is consumed even when the queue is empty, and the
+  ring head wraps only after every origin's queue is issued and the device has drained (a foreign origin's
+  *queued* uploads would otherwise be overwritten before they were ever issued).  `GGML_CUDA_ASYNC_INPUT_DEBUG`
+  logs the origin count/thread id; the two-thread reproducer is in `archive/work/async-input-per-origin/`.
 * **`GGML_CUDA_GDN_TAIL`**: the fixed-`D` sequential tail that makes a chunked-GDN prefill batch write its
   rollback snapshots (r91; `GREEDY-PURITY.md` §27).
 * Graph-memory generations (`GGML_CUDA_GRAPH_MEM_GEN`) so a graph is recaptured when the pool / FA staging /
@@ -647,7 +658,7 @@ fusions.
   faulted with `HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION`.
 
 **Knobs.**  The slab/cache set listed under block 09, plus `GGML_CUDA_POOL_WIDE[_MIN_MIB]`,
-`GGML_CUDA_SLAB_STATS` / `_GRAPH_TRACE`, `GGML_CUDA_ASYNC_INPUT_BATCH` / `_LAZY_DONE`,
+`GGML_CUDA_SLAB_STATS` / `_GRAPH_TRACE`, `GGML_CUDA_ASYNC_INPUT_BATCH` / `_LAZY_DONE` / `_DEBUG`,
 `GGML_CUDA_GDN_TAIL`, `GGML_CUDA_GRAPH_MEM_GEN`, `GGML_META_SPLIT_COPY`, `GGML_META_SEG_ASYNC`,
 `GGML_CUDA_FUSE_GATE_BETA_BF16` / `GGML_CUDA_FUSE_GDN_CONV_NORM` / `GGML_CUDA_FUSE_CONT_GATE_Q8_1` /
 `GGML_CUDA_FUSE_GDN_NORM_GATE` (r102, all default-on kill-switches),
