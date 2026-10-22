@@ -25,7 +25,7 @@ scripts/gate-prefill-logits.sh                        # prefill-logit KLD gate (
 scripts/make-patches.sh        # re-export the blocks from the canonical fork chain (git format-patch)
 scripts/make-release.sh        # rewrite release.json + rdna-boosts-all.patch, hashes included
 scripts/validate-set.sh        # must be green before the tag
-git tag v12-<base>-r<N> && git push origin main --tags
+git tag v<blocks>-<base>-r<N> && git push origin main --tags
 # then the worker builds and pushes the container images (see CONTAINERS.md)
 ```
 
@@ -44,7 +44,7 @@ git tag v12-<base>-r<N> && git push origin main --tags
 | `make-release.sh` | Rewrites `release.json` — fork point, base tree, canonical tip/tree, block count and the sha256 of every shipped artifact — plus `rdna-boosts-all.patch`. Values not passed as flags are inherited from the existing `release.json`. | after `make-patches.sh`, before the tag |
 | `extract-generated.py` | Prints `<N> chars sha=<sha256[:12]>` for the text a `llama-cli` log actually generated (or the text itself with `--text`). It strips the terminal backspaces and the banner/footer first, which is why a naive `sed`/`grep` slice does not reproduce a reported hash. | comparing same-seed coherence text |
 | `build-containers.sh` | Builds (and with `--push`, publishes) the ROCm container images: reconstructs the canonical patched tree from `release.json` (asserting its tree hash), builds `full`/`light`/`server` per ROCm line with the CI-equivalent build args and tags, and prunes the registry (`cleanup-ghcr.py`). `--rocm`, `--arch`, `--targets`, `--prepare-only` for a fast smoke. | release container images — normally run by the worker, not on the primary box |
-| `container-watch.sh` | The off-host release watcher (cron/systemd on a build worker): polls for the newest `v12-*` tag **by creation date** (a version sort mis-orders across a re-base), and if it is not the last successfully built tag, checks it out and runs that tag's own `build-containers.sh --push`. `flock` prevents concurrent builds; a state file stops a tag being rebuilt. | one-time worker setup; runs unattended (`CONTAINERS.md`) |
+| `container-watch.sh` | The off-host release watcher (cron/systemd on a build worker): polls for the newest release tag (`v<blocks>-<base>-r<N>`) **by creation date** — the pattern must not pin the block count (a `v12-*` glob silently missed every `v13-*` release, r107/r108) (a version sort mis-orders across a re-base), and if it is not the last successfully built tag, checks it out and runs that tag's own `build-containers.sh --push`. `flock` prevents concurrent builds; a state file stops a tag being rebuilt. | one-time worker setup; runs unattended (`CONTAINERS.md`) |
 | `cleanup-ghcr.py` | GHCR version retention, called by `build-containers.sh --push`: deletes every package version outside a rolling `--keep-days` window (default 7) while always keeping the current base's `*-<base>` tags and any tag matching `--keep-tag`. A GitHub bulk-delete throttle is a warning, not a failure. | automatically on `--push`; re-run it to finish a throttled prune |
 
 ## Notes

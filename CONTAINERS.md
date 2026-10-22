@@ -238,7 +238,7 @@ git tag -a v<blocks>-<base-sha>-r<N> -m "rdna-boosts v<blocks>-<base-sha>-r<N>"
 git push origin main v<blocks>-<base-sha>-r<N>
 ```
 
-**Release naming.**  One tag per release, `v<blocks>-<base-sha>-r<N>` (e.g. `v12-097cf33d9-r94`), where `N` is
+**Release naming.**  One tag per release, `v<blocks>-<base-sha>-r<N>` (e.g. `v13-097cf33d9-r108`), where `N` is
 that base's revision: `r1` is the release that lands the re-base and `r2`,
 `r3`, ... each later release on the same base.  `release.json.release` must be
 exactly the tag — `validate.yml` checks the manifest, and
@@ -403,7 +403,8 @@ login session's temporary `$XDG_RUNTIME_DIR/containers/auth.json`; no separate
 `podman login` is needed once `gh` is authenticated.  `loginctl enable-linger` is
 required so rootless podman still has a runtime dir when the user is logged out.
 
-The watcher fetches tags, takes the newest `v12-*` release **by tag creation date**
+The watcher fetches tags, takes the newest release tag (`v<blocks>-<base>-r<N>`) **by tag creation date** — it does not
+pin the block count, so a `v12-*` -> `v13-*` rename cannot make it go quiet (it did: r107/r108, fixed 2026-10-22)
 (not a version sort: the base SHA is in the tag name, so a re-base to a lower-sorting
 base would otherwise be missed), and if it differs from
 `~/.cache/rdna-containers/last-built`, checks it out and runs that tag's
@@ -416,7 +417,7 @@ builds; the log is `~/.cache/rdna-containers/build-<tag>.log`.  `FORCE_TAG=<tag>
 To build a release immediately instead of waiting for cron:
 
 ```bash
-FORCE_TAG=v12-097cf33d9-r69 ~/bin/rdna-container-watch.sh
+FORCE_TAG=v13-097cf33d9-r108 ~/bin/rdna-container-watch.sh
 ```
 
 The primary box can keep using `scripts/build-containers.sh` directly for a manual or

@@ -75,6 +75,15 @@ the other 11 patch-identical); the new test PASS on the release tree and exit 2 
 `test-backend-ops` (no op, op instantiation or dispatch predicate changed - the diff is one launch argument in
 one fusion and a new test file) and `gate-per-block-build` for the untouched blocks (patch-identical).
 
+**Release tooling fixed while publishing (post-tag commit, patches unaffected).**  The off-host container
+watcher (`scripts/container-watch.sh`, cron on `radiance`) selected its release tag with a hardcoded
+`git tag -l 'v12-*'`, so it kept reporting "up to date (v12-097cf33d9-r106)" and **never built r107 or r108** -
+the tag prefix moved to `v13-` with the 13-block set and the glob was never updated.  It now filters
+`^v<blocks>-<base>-r<N>$` without pinning the block count (creation-date sort unchanged, so re-bases still
+order correctly); `scripts/README.md` and `CONTAINERS.md` say so as well.  Nothing in `patches/` or
+`release.json` changes, so the tag's delivery content and hashes stand; the image build was re-run with
+`FORCE_TAG=v13-097cf33d9-r108`.
+
 ## 261022.001 (r107) -- block 12: the MTP draft vocabulary subset (`--spec-draft-mtp-vocab N`, opt-in)
 
 **Release `v13-097cf33d9-r107`**, 13 blocks, fork point `097cf33d9`, tip `25bec484e`, tree

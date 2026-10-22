@@ -7,11 +7,15 @@
 # separate, beefier worker poll the delivery repo for a new release tag and run
 # `scripts/build-containers.sh --push` in the background (cron or a systemd timer).
 #
-# It fetches tags, finds the newest `v12-*` release BY TAG CREATION DATE, and if it
-# differs from the last successfully pushed tag, checks that tag out and runs the
-# tag's own `scripts/build-containers.sh`.  The creation-date sort matters: a
-# version sort (`-v:refname`) mis-orders tags across a re-base, because the base SHA
-# is part of the tag name (`v12-<base>-rN`) and the next base need not sort higher.  A `flock` prevents two builds at once and a state
+# It fetches tags, finds the newest release tag (`v<blocks>-<base>-r<N>`) BY TAG
+# CREATION DATE, and if it differs from the last successfully pushed tag, checks that
+# tag out and runs the tag's own `scripts/build-containers.sh`.  The creation-date sort
+# matters: a version sort (`-v:refname`) mis-orders tags across a re-base, because the
+# base SHA is part of the tag name (`v12-<base>-rN`) and the next base need not sort
+# higher.  The tag *pattern* must not pin the block count: the release id's `v<blocks>`
+# component changed from `v12-` to `v13-` with the V2.0 (13-block) set at r107, and a
+# hardcoded `v12-*` glob then silently reports "up to date" forever (it did for r107
+# and r108, caught 2026-10-22).  A `flock` prevents two builds at once and a state
 # file stops a tag being rebuilt.  See CONTAINERS.md, "Offload the image build".
 #
 # Env (all optional):
@@ -68,8 +72,9 @@ else
     # -creatordate, not -v:refname: the base SHA is in the tag name, so a re-base to a
     # "lower" base would otherwise be missed.  Release tags are annotated, so this is
     # the release order.
-    tag="$(git tag -l 'v12-*' --sort=-creatordate | head -1)"
-    [ -n "$tag" ] || { log "no v12-* release tag found"; exit 0; }
+    # release tags are v<blocks>-<base>-r<N>; do NOT pin the block count (v12 -> v13 broke this)
+    tag="$(git tag -l --sort=-creatordate | grep -E '^v[0-9]+-[0-9a-f]+-r[0-9]+$' | head -1)"
+    [ -n "$tag" ] || { log "no v<blocks>-<base>-r<N> release tag found"; exit 0; }
 fi
 
 built="$(cat "$STATE_DIR/last-built" 2>/dev/null || true)"
