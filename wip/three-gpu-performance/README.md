@@ -12,6 +12,16 @@ maintainer's go-ahead (see the WIP and promotion rules in `AGENTS.md`).
 > length) or a regression landed between r54 and r73; **step 0 is to re-run the r55 harness on r73.**  The
 > closure record is kept as [`RESOLUTION-2026-10-13-closed.md`](RESOLUTION-2026-10-13-closed.md).
 
+> **Dense datapoint (2026-10-22, r109).**  The deficit is **width**-dependent, not direction-dependent.
+> Qwen3.8-27B Q8_0, `-sm tensor`, four axes at `-n 3000`: 3 GPU is **+3.4 %** aggregate and **+9.2 %** on
+> the R axis (mean verify len 2.9), but **−14.4 %** on K (mean len 29.2) **with bit-identical acceptance,
+> counts and mean length**, and at depth 16384 it is −8.5 % (84.4 vs 92.2 t/s) with a shallow→deep penalty
+> of −14.1 % at 3 GPU vs −2.2 % at 2 GPU.  Same runs also produced the first 3-GPU regression attributable
+> to a delivery feature (the block-13 mirrored MTP draft subset, −2.2 % aggregate).
+> [`FINDING-2026-10-22-dense-27b-and-mirrored-draft-subset.md`](FINDING-2026-10-22-dense-27b-and-mirrored-draft-subset.md),
+> harness + raw numbers in [`tools/arms-2026-10-22/`](tools/arms-2026-10-22/).  This does **not** close the
+> item — the MoE/field-config arm and the `-sm layer` / AR-profile grid are still outstanding.
+
 ## 0. Current symptom and findings (2026-10-16, r73)
 
 Measured on this box: Qwen3.8-Flash-Next GSQ-IQ3_XXS, `-ncmoe 48 -sm tensor`, 13.8K-token prompt, 200

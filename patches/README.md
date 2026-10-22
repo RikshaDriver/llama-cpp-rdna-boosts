@@ -885,7 +885,28 @@ exactly as the setter does).  Whole-tensor reads and every other split axis keep
 payload-specific**: 98304 on Qwen3.8-27B Q8_0 (acceptance unchanged, all four gate axes improve), 64000 is
 the reporter's gfx1151 value and is a **loss** on our 27B (prose -3.6 % at adaptive n-max 9), gemma4's only
 lossless cut is 245760 of 262144 (a no-op).  Cost: a second copy of `N/n_vocab` of the LM head in VRAM
-(510 MiB at 98304 on the 27B), per device under `-sm tensor`, not seen by `--fit`.
+(510 MiB at 98304 on the 27B), per device under `-sm tensor`, not seen by `--fit`.  Leave `--spec-draft-n-start`
+at its default 3 — it is the *initial* adaptive depth, not a ceiling, and setting it to n-max pins the
+controller there (2-GPU prose 94.3 -> 87.6 t/s with a different acceptance).
+
+**Device count — enable it only when `N * n_devices < n_vocab`.**  The subset head is allocated from the LM
+head's buffer type, so under `-sm tensor` it is **mirrored on every device** while the untrimmed head is
+**split**: the per-device draft matmul is `N` columns versus `n_vocab / n_devices`, plus a per-step
+`fill` (a full-vocab `-inf` row) and `set_rows`.  On the 27B (vocab 248320), four axes at `-n 3000`:
+
+| devices | per-device share | trim 0 | +98304 | Δ |
+|---|---:|---:|---:|---:|
+| 2 | 124160 | 109.4 | 110.9 | **+1.4 %** |
+| 3 | 82773 | 113.1 | 110.6 | **-2.2 %** |
+
+The width sweep is the control (98304 and 131072 have *identical* acceptance, so only the matmul width
+differs): 2 GPU 94.3 / **95.8** / 93.1, 3 GPU **98.3** / 96.0 / 93.3 (prose axis).  At 3 GPU the width rule
+(`N < 82773`) sits below the acceptance floor — 64000 measures 89.1 t/s (-9.4 %) — so **no N pays there**;
+the 3-GPU advice is leave the trim off.  Depth-16384 decode is flat (2 GPU +0.1 %, 3 GPU -1.4 %).  The
+gemma4 corollary (unmeasured): its only lossless cut is >= 245760, i.e. above the 2-device share, so even
+the "no-op" cut would be a width loss.  Record:
+`../archive/work/spec-draft-mtp-vocab/VALIDATION-2026-10-22.md`; mechanism + numbers also in
+`../wip/three-gpu-performance/FINDING-2026-10-22-dense-27b-and-mirrored-draft-subset.md`.
 
 **Purity.**  `GREEDY-PURITY.md` §48: a draft-side restriction cannot change an accepted token, and inside the
 `n_max <= 7` band the trim is *text*-identical to plain decode (verified on prose and code at `-n 3000`).
@@ -894,9 +915,9 @@ flip a near-tie — the same property the untrimmed build already shows between 
 `n_max <= 7`, or on acceptance + MTP-vs-plain above it.
 
 **Known interactions.**  adaptive controller (acceptance/depth, §48), `ngram-mod` (unaffected; shrinks the
-trim's share), `-sm tensor` (subset head is Meta-mirrored, so the draft matmul is duplicated per device and no
-all-gather is needed), `--fit` (subset not estimated), the purity band (above).  Detail and numbers:
-`../archive/work/spec-draft-mtp-vocab/README.md` §5.
+trim's share), `-sm tensor` (subset head is Meta-mirrored — **the draft matmul is duplicated per device, so the
+trim only pays when `N * n_devices < n_vocab`**; see "Device count" above), `--fit` (subset not estimated), the
+purity band (above).  Detail and numbers: `../archive/work/spec-draft-mtp-vocab/README.md` §5.
 
 ## Dated history
 

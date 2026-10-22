@@ -208,14 +208,19 @@ Gate rules:
    flips once the run is long enough), while at `-n 256` all four happened to
    match.  Report purity at the gate length, not a short check.
 
-**Known interaction — `--spec-draft-mtp-vocab` (r107, block 12).**  A draft-side vocabulary restriction
+**Known interaction — `--spec-draft-mtp-vocab` (r107, block 13).**  A draft-side vocabulary restriction
 changes *acceptance*, and the adaptive controller keys on acceptance, so it changes the depth trajectory.  The
 trim itself cannot change an accepted token (the target still verifies the full vocabulary, and the draft
 scatters into a full-vocab row of `-inf`), but above the `n_max <= 7` purity band a shifted trajectory can flip
 a near-tie.  With no campaign code applied the r106 build already gives three different greedy texts on
 `prompts/code-reasoning-mixed.txt` for `draft-mtp` n3 / n9 / adaptive-n9.  **Measure and gate the trim at
 `--spec-draft-n-max 7`**, or gate on acceptance + MTP-vs-plain above it; the recommended pairing is
-`--spec-draft-n-max 7 --spec-draft-mtp-vocab 98304` on the dense 27B (`GREEDY-PURITY.md` §48).
+`--spec-draft-n-max 7 --spec-draft-mtp-vocab 98304` on the dense 27B (`GREEDY-PURITY.md` §48), with
+`--spec-draft-n-start` left at its default 3 (it is the *initial* adaptive depth, **not** a ceiling — setting it
+to n-max pins the controller there and changes the trajectory).  **Check the device count first:** under
+`-sm tensor` the subset head is mirrored per device while the untrimmed head is split, so the trim pays only
+when `N * n_devices < n_vocab` — +1.4 % aggregate on the 27B at 2 GPU, **-2.2 % at 3 GPU** (the server shape),
+where no N pays.  Record: `../archive/work/spec-draft-mtp-vocab/VALIDATION-2026-10-22.md`.
 
 ### Protocol B — server harness (dense canonical, long-context workloads)
 

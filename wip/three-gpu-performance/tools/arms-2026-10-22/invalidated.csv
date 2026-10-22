@@ -1,0 +1,50 @@
+# runs NOT used by the finding: two setup mistakes, kept for the record.
+# a1-*  : --spec-draft-n-start 7 (pins the adaptive controller at the ceiling), so a fixed-depth-7 trajectory.
+# a1b-* : same n-start 7 mistake, canonical 4-axis flags otherwise.
+# ctl*,ctlA*,ctlQ*,ctl3*,p-*: Protocol A flags (presence-penalty 1.5 + bf16 KV + -c 102400) which truncate
+#        the stream at EOS and change acceptance; used only to locate the campaign's config.
+run,devices,axis,trim,tps,acceptance,mean_len
+a1-3gpu-C-trim0,3,C,0,112.7,0.66865,5.68
+a1-3gpu-C-trim98304,3,C,98304,111.1,0.66865,5.68
+a1-3gpu-K-trim0,3,K,0,257.2,0.97183,35.50
+a1-3gpu-K-trim98304,3,K,98304,255.0,0.97183,35.50
+a1-3gpu-P-trim0,3,P,0,95.4,0.63166,4.90
+a1-3gpu-P-trim98304,3,P,98304,89.8,0.62951,4.67
+a1-3gpu-R-trim0,3,R,0,68.2,0.50146,2.70
+a1-3gpu-R-trim98304,3,R,98304,67.1,0.50496,2.69
+a1b-2gpu-C-trim0,2,C,0,102.5,0.69006,5.54
+a1b-2gpu-C-trim98304,2,C,98304,104.7,0.69006,5.54
+a1b-2gpu-K-trim0,2,K,0,283.7,0.98361,29.24
+a1b-2gpu-K-trim98304,2,K,98304,282.3,0.98361,29.24
+a1b-2gpu-P-trim0,2,P,0,90.7,0.66379,4.61
+a1b-2gpu-P-trim98304,2,P,98304,91.3,0.67085,4.46
+a1b-2gpu-R-trim0,2,R,0,63.2,0.52657,2.62
+a1b-2gpu-R-trim98304,2,R,98304,63.8,0.52351,2.61
+a1b-3gpu-C-trim0,3,C,0,104.5,0.68393,5.53
+a1b-3gpu-C-trim98304,3,C,98304,102.2,0.68393,5.53
+a1b-3gpu-K-trim0,3,K,0,250.3,0.98361,29.24
+a1b-3gpu-K-trim98304,3,K,98304,251.7,0.98361,29.24
+a1b-3gpu-P-trim0,3,P,0,90.9,0.65645,4.56
+a1b-3gpu-P-trim98304,3,P,98304,89.9,0.65800,4.48
+a1b-3gpu-R-trim0,3,R,0,71.6,0.51789,2.65
+a1b-3gpu-R-trim98304,3,R,98304,70.6,0.52289,2.66
+ctl-2gpu-P-trim0,2,P,0,87.6,0.62704,4.50
+ctl-2gpu-P-trim98304,2,P,98304,87.8,0.62654,4.40
+ctl3-2gpu-P-trim0,2,P,0,90.6,0.66379,4.61
+ctl3-2gpu-P-trim98304,2,P,98304,91.2,0.67085,4.46
+ctlA-2gpu-P-trim0,2,P,0,94.4,0.63440,4.92
+ctlA-2gpu-P-trim98304,2,P,98304,92.0,0.64079,4.62
+ctlA2-2gpu-P-trim0,2,P,0,94.3,0.63440,4.92
+ctlA2-2gpu-P-trim98304,2,P,98304,92.1,0.64079,4.62
+ctlQ-2gpu-P-trim0,2,P,0,88.1,0.62891,4.57
+ctlQ-2gpu-P-trim98304,2,P,98304,88.6,0.63028,4.44
+p-01-mtp-trim0,2,,0,94.6,,
+p-01-mtp-trim98304,2,,98304,95.1,,
+p-01-none,2,,,33.5,,
+p-012-mtp-trim0,3,,0,103.5,,
+p-012-mtp-trim98304,3,,98304,99.1,,
+p-012-none,3,,,40.4,,
+smoke-3gpu-trim,3,,,40.5,0.52128,4.50
+smoke-moe,,,,88.4,,
+smoke-moe8,,,,115.1,,
+smoke-moe8v,,,,57.2,1.00000,4.00

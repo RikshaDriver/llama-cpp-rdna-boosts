@@ -2,7 +2,9 @@
 
 **Shipped.**  `--spec-draft-mtp-vocab N` (opt-in, default `0` = off) is block 12 of the delivery as of
 `v13-097cf33d9-r107`.  Record: `WORKLOG.md` 261022.001.  Block reference: `patches/README.md` → "Block 12".
-Purity doctrine: `GREEDY-PURITY.md` §48.  Knob: `ENVIRONMENT.md` §3.  Open validation arms: `TODO.md` #83.
+Purity doctrine: `GREEDY-PURITY.md` §48.  Knob: `ENVIRONMENT.md` §3.  Validation arms: `TODO.md` #85 (misfiled as #83 through r109) —
+**closed 2026-10-22** by [`VALIDATION-2026-10-22.md`](VALIDATION-2026-10-22.md) (3 GPU = **negative**, depth
+= flat, MoE+`-ncmoe` = neutral).
 
 **What the campaign contributed, in one table** (this directory's README has the full record):
 
@@ -23,4 +25,6 @@ sitting outside the purity promise.  At n-max 7 every axis improves and the puri
 
 **Not carried into the block:** a two-band subset (keep `< N` **and** `>= n_vocab - M`) to catch gemma4's
 space-piece band.  It measured 0.610 acceptance at 37 % of the rows but was 0.4 % *slower* than full vocab on
-that payload, so it stayed a measurement (with a temporary env knob) and is filed under `TODO.md` #83 item 4.
+that payload, so it stayed a measurement (with a temporary env knob) and is filed as an accepted limitation
+(measured, not pursued) — a second band only widens the *mirrored* draft matmul, see
+[`VALIDATION-2026-10-22.md`](VALIDATION-2026-10-22.md) §5.

@@ -257,8 +257,13 @@ stub alive to serve them, and treat a `wip/` path in an old record as a historic
   a no-op), it costs `N/n_vocab` of the head in VRAM (510 MiB at 98304, per device under `-sm tensor`) and it
   is **not** in the `--fit` estimate.  Gate purity at **`n_max <= 7`** (`GREEDY-PURITY.md` §48: the trim moves
   acceptance, which moves the adaptive controller's depth, which moves the verify widths); the shipped
-  recommendation is `--spec-draft-n-max 7 --spec-draft-mtp-vocab 98304`.  The `ggml` half is the
+  recommendation is `--spec-draft-n-max 7 --spec-draft-mtp-vocab 98304` (leave `--spec-draft-n-start` at its
+  default 3 — it is the *initial* depth, not a ceiling).  **Check the device count before enabling it:** the
+  subset head is *mirrored* per device under `-sm tensor` while the untrimmed head is *split*, so it pays only
+  when **`N * n_devices < n_vocab`** — on the 27B 98304 is +1.4 % at 2 GPU (share 124160) and **-2.2 % at
+  3 GPU** (share 82773, the server shape), and no N pays at 3 GPU.  The `ggml` half is the
   `ggml-backend-meta` row-range read that makes a vocabulary-split LM head readable piecewise.
+  Record: `archive/work/spec-draft-mtp-vocab/VALIDATION-2026-10-22.md`.
 - **`--spec-draft-n-max` is capped at 15** (the recurrent snapshot bound); purity is promised only to
   **7** (the kernel-family switch at 8 rows). `LLAMA_SPEC_DRAFT_N_MAX_CLAMP=0` escapes the clamp.
 - **The mmvq band-uniform knobs are a purity requirement *and* a perf trap.** `nwarps` and the vec_dot

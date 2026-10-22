@@ -95,8 +95,14 @@ every commit, and PR #205's originals are archived verbatim in `archive/work/pr2
 ## 3. Measurements (gfx1201, 2x R9700, ROCm 10.1.0)
 
 All `--temp 0 --seed 42`, `-sm tensor` 2 GPU, `draft-mtp-adaptive,ngram-mod --spec-draft-n-max <N>
---spec-draft-n-start <N> --spec-ngram-mod-n-match 45`, `-n 3000` (methodology rule 0), delivery prompt files,
+--spec-ngram-mod-n-match 45`, `-n 3000` (methodology rule 0), delivery prompt files,
 greedy text hashed with `scripts/extract-generated.py`.  Shallow depth (32k context, 5k-token prompts).
+
+> **Correction (2026-10-22).**  This line used to write `--spec-draft-n-start <N>` beside `--spec-draft-n-max <N>`.
+> `n-start` is the *initial* adaptive depth (default **3**), not a ceiling — setting it to n-max pins the
+> controller at the ceiling and changes the trajectory (2-GPU P 94.3 -> 87.6 t/s, acceptance 0.670 -> 0.627).
+> The rows below were measured with `-n-start` at its default.  The remaining arms and the reproduction
+> check are in [`VALIDATION-2026-10-22.md`](VALIDATION-2026-10-22.md).
 
 ### 3.1 Four-axis adaptive gate — Qwen3.8-27B Q8_0 (`qwen35`, vocab 248320)
 
@@ -211,10 +217,15 @@ property of the *schedule*, and they are the reason the recommended configuratio
 
 ## 6. Open items
 
-1. **3 GPU `-sm tensor`** (0,1,2): not run.  The Meta path is width-agnostic and the 2-GPU arm is green, but
-   the delivery's servers run 3-GPU.
-2. **Deep-context decode** (depth 16384, the delivery's decode validation depth): all numbers here are shallow.
+1. **3 GPU `-sm tensor`** (0,1,2) — **DONE 2026-10-22, NEGATIVE: −2.2 % aggregate.**  The Meta path is not
+   width-neutral after all: the subset head is *mirrored* per device while the untrimmed head is *split*, so
+   the trim only pays when `N · n_devices < n_vocab`.  See [`VALIDATION-2026-10-22.md`](VALIDATION-2026-10-22.md)
+   §1 and the width-sweep control in
+   [`../../wip/three-gpu-performance/FINDING-2026-10-22-dense-27b-and-mirrored-draft-subset.md`](../../wip/three-gpu-performance/FINDING-2026-10-22-dense-27b-and-mirrored-draft-subset.md).
+2. **Deep-context decode** (depth 16384) — **DONE 2026-10-22, flat** (2 GPU +0.1 %, 3 GPU −1.4 %), purity
+   identical at depth.
 3. **Default-on?**  It stays opt-in (`0`).  A default-on variant would need a per-payload N (98304 dense Qwen,
    nothing for gemma4/35B-A3B) and would change every published MTP number; the maintainer has decided opt-in
    for the block.
-4. **MoE + `-ncmoe`/expert cache** interaction: only the fully-device-resident MoE arm was measured.
+4. **MoE + `-ncmoe`/expert cache** — **DONE 2026-10-22, neutral** (P +0.9 %, K −0.6 % at 100 % arena
+   residency).

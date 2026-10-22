@@ -18,7 +18,7 @@ top of `WORKLOG.md` is the newest record.
 | # | subject | kind | status |
 |---|---|---|---|
 | **36** | genuine CPU/GPU overlap for the MoE misses | performance | open, scoping (`wip/moe-cpu-overlap/`) |
-| **51** | 3-GPU decode is slower than 2-GPU | performance | open (`wip/three-gpu-performance/`) |
+| **51** | 3-GPU decode is slower than 2-GPU | performance | open (`wip/three-gpu-performance/`).  2026-10-22 datapoint (dense 27B Q8_0, `wip/three-gpu-performance/FINDING-2026-10-22-dense-27b-and-mirrored-draft-subset.md`): it is **width**-dependent, not direction-dependent — 3 GPU wins +9.2 % at mean verify len 2.9 and loses **−14.4 %** at mean len 29.2 with *bit-identical* acceptance, and at depth 16384 it loses 8.5 %.  The MoE/field-config arm is still the campaign's target |
 | **55** | drop the full pinned `ROCm_Host` master when `--host-experts pool` is on | memory | open (`wip/host-expert-master-drop/`) |
 | **59** | `ngram-mod` + `draft-mtp-adaptive` halves decode with host-resident experts | performance | open (`wip/ngram-mod-host-experts/`) |
 | **61** | MoE expert-cache coverage: offline trace replay, per-layer capacity quota | performance | open (`wip/moe-cache-coverage/`) |
@@ -26,7 +26,6 @@ top of `WORKLOG.md` is the newest record.
 | **65** | IQ4_NL field (MTP) + `--host-experts pool` decode collapses | memory | parked (maintainer 2026-10-15; the "after r67" condition is long past — never picked up, still parked) |
 | **70** | harden the expert-cache re-arm / wide-aux growth against a starved arena | robustness | open |
 | **79** | RDNA3_0 verify-band fusions: no multi-device measurement, and gfx1101/gfx1102 untested | platform validation | open (shipped default-on in r95; needs a 2+ card gfx1100 box).  `ssh fingon` is single-RDNA3 (`ROCm0`; its second rocm-smi entry is an iGPU and is not a HIP device), so it does **not** cover the multi-device arm — it validates single-GPU gfx1100 only.  gfx1101/gfx1102 still have no hardware |
-| **83** | `--spec-draft-mtp-vocab N`: the MTP draft scores a trimmed LM-head row subset | performance (decode) | **shipped in r107 as block 12 (now block 13 since the r109 split)** (opt-in, default off).  Remaining arms below.  27B Q8_0 2 GPU `-sm tensor` works and gives +3.4 % (adaptive n-max 9) to +5.5 %; trim 0 == today.  gemma4 supported but not beneficial (useful cutoff 245760/262144 = a no-op).  Remaining: full adaptive gate, depth 16384, 3 GPU, `ggml` regression for the new meta read path |
 
 Accepted limitations that are deliberately **not** fixed are listed at the end — do not re-report them.
 
@@ -175,31 +174,6 @@ Two gaps, both needing hardware the fleet does not have:
 
 ---
 
-## 83. `--spec-draft-mtp-vocab N`: the MTP draft scores a trimmed LM-head row subset — PERFORMANCE (decode)
-
-**Shipped in `v13-097cf33d9-r107` as block 12** (block 13 since the r109 split) (opt-in, default off: `--spec-draft-mtp-vocab 0` builds no
-subset and adds no graph node).  Record: `WORKLOG.md` 261022.001; campaign + numbers:
-[`archive/work/spec-draft-mtp-vocab/`](archive/work/spec-draft-mtp-vocab/README.md); PR #205 archived verbatim
-in [`archive/work/pr205-spec-draft-mtp-vocab/`](archive/work/pr205-spec-draft-mtp-vocab/IMPORT.md).
-
-Gated on gfx1201 (2x R9700, ROCm 10.1.0), Qwen3.8-27B Q8_0 2 GPU `-sm tensor`,
-`draft-mtp-adaptive,ngram-mod --spec-draft-n-max 7 --spec-draft-mtp-vocab 98304`, `-n 3000` four-axis:
-R +1.3 %, P +1.7 %, C +2.4 %, K +0.8 % (+1.6 % aggregate), with the `n_max <= 7` greedy-purity promise verified
-**with the trim on**.  `test-backend-ops` 21179/21179, `test-logits-width-probe SPLIT=tensor` PASS (W=1..8
-maxdiff 0), prefill-logit KLD 0.000000 / 100.000 %.  MoE 35B-A3B neutral; gemma4 supported but not beneficial
-(its useful cut is 245760 of 262144 rows = a no-op).
-
-**Remaining arms (none blocks the ship; all are validation, not correctness):**
-
-1. **3 GPU `-sm tensor`** — only the 2-GPU arm was run.  The Meta path is width-agnostic and the 2-GPU arm is
-   green, but the servers run 3-GPU.
-2. **Deep-context decode** — every number is shallow (32k context, 5k-token prompts); the delivery validates
-   decode at depth 16384.
-3. **MoE with `-ncmoe` / expert cache active** — only the fully-device-resident MoE arm was measured.
-4. **A hidden second vocabulary band** (gemma4's space-prefixed pieces at 229376..255999): a two-band subset
-   measured 0.610 acceptance at 37 % of the rows but was still 0.4 % slower on that payload, so it was not
-   shipped.  Worth revisiting only for a payload where the draft matmul is a large share of the token.
-
 ## Documented, deliberately NOT fixed (accepted limitations — do not re-report)
 
 - **`mmf32` covers the skinny F32 shapes only (r104, `TODO` #82 closed) — accepted.**  A full-F32 model's FFN
@@ -257,6 +231,12 @@ maxdiff 0), prefill-logit KLD 0.000000 / 100.000 %.  MoE 35B-A3B neutral; gemma4
 - **Not worth pursuing** (measured, no win): the decode fq-inline-quantize port (wash-to-negative — the
   tree already launches fewer kernels/step and sits at wall parity) and the GDN +72-launch 2-kernel split
   (cosmetic).
+- **`--spec-draft-mtp-vocab` two-band subset (closed 2026-10-22, measured, not shipped).**  A second band
+  (keep `< N` **and** `>= n_vocab - M`) was meant to catch gemma4's space-piece band (229376..255999): it
+  measured 0.610 acceptance at 37 % of the rows and was still 0.4 % *slower* on that payload.  With the
+  width rule found in the 3-GPU arm (`N · n_devices < n_vocab`) a second band only makes the **mirrored**
+  draft matmul wider, so it is a non-goal, not a parked idea.  Record:
+  `archive/work/spec-draft-mtp-vocab/VALIDATION-2026-10-22.md` §5.
 
 ## 80. Meta split-state cache: 30+ lookups per node per re-allocation — PERFORMANCE (parked)
 

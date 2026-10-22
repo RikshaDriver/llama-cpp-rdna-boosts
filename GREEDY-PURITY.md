@@ -1141,7 +1141,16 @@ changes).  Inside the band, all widths take the same kernels, so the schedule do
 
 So: gate the trim at `n_max <= 7` (text identity against plain decode is then a valid, strong check), or above
 it on acceptance + MTP-vs-plain — exactly what `benchmarks/mtp-adaptive-methodology.md` rule 4 already says for
-any speculator.  Recommended configuration for the block: `--spec-draft-n-max 7 --spec-draft-mtp-vocab 98304`.
+any speculator.  Recommended configuration for the block: `--spec-draft-n-max 7 --spec-draft-mtp-vocab 98304`
+(`--spec-draft-n-start` at its default 3 — the *initial* depth, not a ceiling).
+
+**Device count (r109 validation, 2026-10-22) — purity is unaffected, the *throughput* is not.**  The subset
+head is *mirrored* on every device under `-sm tensor` while the untrimmed head is *split*, so the trim pays
+only when `N * n_devices < n_vocab`.  27B (vocab 248320), four axes at `-n 3000`: +1.4 % aggregate at 2 GPU
+(share 124160), **-2.2 % at 3 GPU** (share 82773), and no N pays at 3 GPU (64000 loses acceptance,
+0.68878 -> 0.67260).  Purity holds in all of them — 3-GPU shallow `none` / trim 0 / trim 98304 all
+`c5421068b4e0`, and all `12048e399854` at depth 16384 — so this is a recommendation-scope note, not a
+weakening of the claim.  Record: `../archive/work/spec-draft-mtp-vocab/VALIDATION-2026-10-22.md`.
 
 ## 49. A fused chain's launch geometry comes from the flat projection, not from a consumer's reshaped view
 

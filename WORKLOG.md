@@ -1,5 +1,61 @@
 # WORKLOG - dated delivery records
 
+## 261022.004 (r109) -- the MTP draft-vocab validation arms closed (3 GPU is NEGATIVE, depth flat, MoE neutral)
+
+> **Numbering note — this item is `TODO` #85.**  #83 was already used once before: the gemma-4 bf16 K/V
+> `rope.cu` item was *filed and closed* as #83 in r103 (`WORKLOG.md` 261021.007 item 1, `patches/README.md`
+> block 05), and #84 is the async-input-per-origin ring (closed r105).  The r107 campaign reused #83 for this
+> block-13 item, breaking the "numbers are never reused" rule; the maintainer resolved it as **#85** on
+> 2026-10-22.  #83 keeps its r103 meaning, #84 keeps the ring, and the r107 entry below now carries an inline
+> pointer.  The item is **closed** (validation complete) and therefore removed from `TODO.md` per the
+> closed-item rule.
+
+**No shipped code, default, knob or `release.json` field changes** -- this is a validation record for block 13
+(`--spec-draft-mtp-vocab N`) plus one guidance caveat the 3-GPU arm forced.  Tree `8e67f977…` (r109),
+ROCm 10.1.0, 3x R9700 gfx1201, `ROCBLAS_USE_HIPBLASLT=0` for every run (determinism, `GREEDY-PURITY.md` §44).
+Record: `archive/work/spec-draft-mtp-vocab/VALIDATION-2026-10-22.md`; raw runs + harness:
+`wip/three-gpu-performance/tools/arms-2026-10-22/` (`summary.csv` = the 36 runs used, `invalidated.csv` =
+the two setup mistakes kept for the record).
+
+**The 3-GPU arm is a loss, and the mechanism is the block's own allocation.**  Qwen3.8-27B Q8_0,
+`-sm tensor`, four axes at `-n 3000`, trim 0 -> 98304 at `--spec-draft-n-max 7`: **+1.4 % aggregate at
+2 GPU** (r107 recorded +1.6 %; table reproduced within 0.4 %/axis) but **-2.2 % aggregate at 3 GPU**
+(R -1.7, P -2.3, C -2.6, K -2.1).  The subset head is allocated from the LM head's buffer type, so under a
+tensor split it is **mirrored on every device** while the untrimmed head is **split**: the per-device draft
+matmul is `N` columns vs `n_vocab / n_devices`.  At 2 GPUs `98337 < 124160` (win); at 3 GPUs
+`98337 > 82773` (loss).  The width sweep is the control -- 98304 and 131072 have *identical* acceptance
+(0.67337 / mean len 4.67 at 2 GPU; 0.68827 / 4.83 at 3 GPU), so only the matmul width differs:
+2 GPU 94.3 (trim 0) / 95.8 (98304) / 93.1 (131072); 3 GPU **98.3 / 96.0 / 93.3**.  At 3 GPUs the width
+threshold (82773) sits below the acceptance floor: 64000 measures 89.1 t/s (-9.4 %, acceptance
+0.68878 -> 0.67260), so **no N is profitable there** -- the advice for a 248320-vocab model on 3 GPUs is
+leave the trim off.  The r107 record's "still 2.5x smaller at 98304" compares against the whole vocabulary;
+on a tensor split the live comparison is the per-device share.
+
+**Depth 16384 is flat for the trim** (prompt `prompts/prose-rdna-boosts.txt` x3 = 15746 tok,
+`sha256 6fec9806b375…`, `-c 20480`): 2 GPU 92.2 -> 92.3, 3 GPU 84.4 -> 83.2.  **MoE + `-ncmoe` is neutral**
+(35B-A3B Q8_0 -- the UD-Q4_K_M on this box has no nextn block -- 2 GPU `-ncmoe 40`, expert cache 100 %
+residency, 32640 MiB `ROCm_Host`: P 196.1 -> 197.9, K 64.1 -> 63.7 with identical acceptance).
+
+**Purity holds everywhere tested** (trim only loses proposals): 3-GPU shallow `none` / trim 0 / trim 98304
+all `c5421068b4e0`; 3-GPU at depth all `12048e399854`.  `scripts/check-gpu-faults.sh --since "90 min ago"`
+(kernel journal + run logs): clean.
+
+**Docs bug found and fixed in the record.**  The campaign README wrote the invocation as
+`--spec-draft-n-max <N> --spec-draft-n-start <N>`; `-n-start` is the *initial* adaptive depth (default 3),
+not a ceiling, and pinning it at 7 changes the trajectory (2-GPU P 94.3 -> 87.6 t/s, acceptance
+0.670 -> 0.627).  The validated config is `--spec-draft-n-max 7` with `-n-start` default.
+
+**Dense 2-vs-3-GPU data for `TODO.md` #51** (same runs, trim off): aggregate 109.4 -> **113.1 (+3.4 %)**,
+per axis R +9.2 %, P +4.2 %, C +0.3 %, **K -14.4 %** -- and K's acceptance, counts (480/488) and mean
+length (29.24) are *bit-identical* across widths, so that -14.4 % is a clean device-count effect at verify
+width ~30.  At depth 16384 the 3rd GPU costs 8.5 % (84.4 vs 92.2) and the shallow->deep penalty is -14.1 %
+at 3 GPU vs -2.2 % at 2 GPU.  So 3-GPU decode is *width*-dependent on a dense model (it wins at 2-5-token
+verify widths, loses at ~30 and at depth), which is the discriminator §5 of the campaign predicts: on 3
+devices the small-message path is the host-staged chunked ring (both 2-device fast paths need exactly 2
+devices) and its cost grows with the message.  Written up in
+`wip/three-gpu-performance/FINDING-2026-10-22-dense-27b-and-mirrored-draft-subset.md`; it does **not** close
+#51 (the MoE/field-config arm is still the campaign's target).
+
 ## 261022.003 (r109) -- block 10 split in two: the infrastructure stays 10, qwen4exp becomes block 11
 
 **Release `v14-097cf33d9-r109`**, **14 blocks**, fork point `097cf33d9`, tip `933b964c7`, tree
@@ -165,7 +221,8 @@ order correctly); `scripts/README.md` and `CONTAINERS.md` say so as well.  Nothi
 `91bcefc49ef42220ba97a937821fb5e1d4fda6a8`.  One new block: **12**.  Campaign record:
 `archive/work/spec-draft-mtp-vocab/` (`README.md` = the gate record, `RESOLUTION.md` = the promotion); the
 contributor's PR is archived verbatim in `archive/work/pr205-spec-draft-mtp-vocab/` (merged for authorship).
-`TODO.md` #83 tracks the remaining validation arms.
+`TODO.md` #83 tracks the remaining validation arms.  *(Handle corrected 2026-10-22: #83 is the r103 bf16
+`rope.cu` item — this block-13 item is **#85**; see 261022.004.  The quoted text is otherwise unchanged.)*
 
 **What ships.**  `--spec-draft-mtp-vocab N` makes the MTP draft head score only the LM-head rows for token ids
 `< N` plus every control/user-defined id, and scatter the result into a full-vocabulary row of `-inf`.  The
@@ -215,12 +272,12 @@ to r106.  `scripts/validate-set.sh` green (13/13, strict `git am`, applied tree 
 the assistant arch rejects `-sm tensor` at load): full vocab 150.3 t/s, 64000 -> 104.5 (acceptance 0.669 ->
 0.339), 196608 -> 106.9, 245760 -> 150.5 (a no-op).  Its draft top-1 ids split across ids < 64000 and the
 229376+ "space piece" band, so any lossless cut saves nothing.  A two-band subset (98368 rows, 0.610
-acceptance) measured 0.4 % *slower* and was not shipped (`TODO.md` #83 item 4).
+acceptance) measured 0.4 % *slower* and was not shipped (the two-band item, item 4 of the validation list; handle **#85**, see 261022.004).
 
 **Cost.**  A second copy of `N/n_vocab` of the LM head, per device under `-sm tensor`: 510 MiB at 98304 on the
 27B (332 MiB at 64000), allocated when the MTP context is created -- i.e. **not** in the `--fit` estimate.
 
-**Not run (open, `TODO.md` #83):** 3 GPU `-sm tensor`, depth-16384 decode, and MoE with `-ncmoe` / expert cache
+**Not run (open at the time; the item is #85):** 3 GPU `-sm tensor`, depth-16384 decode, and MoE with `-ncmoe` / expert cache
 active.  The MoE arm that *was* run (35B-A3B Q8_0, 2 GPU tensor) is neutral: 233.5 -> 233.4 t/s.
 
 ## 261021.016 (r106) -- DFlash2 under `-sm tensor`: the Meta `ALL_GATHER` collective (TODO #78 closed)
