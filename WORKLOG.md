@@ -60,6 +60,19 @@ created lazily during sizing), so FRAC 25 pinned 75 % of the host set -- fixed b
 the per-device MAX and giving each pool `frac %` of its own experts.  Bugs (1) and (2) are independent of
 this campaign and should be kept even if the master-drop is not promoted.
 
+**Known limitation found after the tag (gfx1100 field session, 2026-10-22).**  On a box whose RAM is smaller
+than the model (fingon: 7900 XTX, 24 GB VRAM, **30 GiB RAM**, 35B-A3B **Q8_0** 37.8 GB) the mode works and
+produces byte-identical text in every configuration tested (`-ncmoe` 28/32/36/40, pool/pinned, FRAC
+10/25/50/75/90, DIO on/off) — but **the buffered pool at `MOE_HOST_POOL_FRAC=75` SIGSEGVs in
+`pool_bg_worker`** (2/2, `memcpy` from the model mapping, `error 4`), while `MOE_HOST_POOL_DIO=1` at the same
+FRAC and the low-FRAC configurations are clean.  That is a defect to fix (r11x), not a tuning item: tracked
+as **TODO #87** with the campaign `wip/host-pool-swap-and-prefill/` (which also carries the two design
+questions: prefill must not evict pool entries, and the arena eviction ⟷ pool admit swap).  Field numbers
+for the record: `-ncmoe 32 pinned` 83.7 t/s decode / 492 t/s prefill (host set fits in RAM, pool is pure
+cost, as the default-on policy intends); `-ncmoe 36 pool FRAC 75 + DIO` 74.4 t/s decode with **zero swap**
+and 49 t/s prefill on a 1400-token prompt (the stable disk tier); `-ncmoe 40 pool FRAC 25` 48.6 t/s;
+`-ncmoe 40 pinned` degenerates (the pinned allocation fails, 15.9 GiB of swap, 2-3 t/s).
+
 **Docs with it:** `ENVIRONMENT.md` §1.2.1 rewritten (the "it does not reduce host RSS yet" paragraph is
 gone; `MOE_HOST_POOL_VERIFY` and `LLAMA_HOST_MASTER_PINNED` are documented), `AGENTS.md` gains a
 `--host-experts pool` critical fact and its pinning fact is qualified, `patches/README.md` gets the block-12

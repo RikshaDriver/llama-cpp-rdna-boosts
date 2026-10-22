@@ -19,6 +19,7 @@ top of `WORKLOG.md` is the newest record.
 |---|---|---|---|
 | **36** | genuine CPU/GPU overlap for the MoE misses | performance | open, scoping (`wip/moe-cpu-overlap/`) |
 | **51** | 3-GPU decode is slower than 2-GPU | performance | open (`wip/three-gpu-performance/`).  2026-10-22 datapoint (dense 27B Q8_0, `wip/three-gpu-performance/FINDING-2026-10-22-dense-27b-and-mirrored-draft-subset.md`): it is **width**-dependent, not direction-dependent — 3 GPU wins +9.2 % at mean verify len 2.9 and loses **−14.4 %** at mean len 29.2 with *bit-identical* acceptance, and at depth 16384 it loses 8.5 %.  The MoE/field-config arm is still the campaign's target |
+| **87** | `--host-experts pool` follow-ups (gfx1100 field data): (a) **DEFECT** SIGSEGV in the background pool worker at high `MOE_HOST_POOL_FRAC` on a memory-tight box, (b) prefill must not evict pool entries, (c) arena-evict ⟷ pool-admit swap and the FRAC optimum is inverted between "set fits in RAM" and "it does not" | robustness + performance | open (`wip/host-pool-swap-and-prefill/`) |
 | **59** | `ngram-mod` + `draft-mtp-adaptive` halves decode with host-resident experts | performance | open (`wip/ngram-mod-host-experts/`) |
 | **86** | MoE expert-cache *admission quality*: the shipped policy is ~11 pts of hit rate below a static oracle — decompose foreknowledge vs churn, then prefetch/admission candidates offline | performance | open, scoping (`wip/moe-admission-quality/`) |
 | **65** | IQ4_NL field (MTP) + `--host-experts pool` decode collapses | memory | parked (maintainer 2026-10-15; the "after r67" condition is long past — never picked up, still parked) |
@@ -53,6 +54,40 @@ r55 `mtp-3gpu-decode` campaign; that campaign's r55 closure record moved with it
 README as `RESOLUTION-2026-10-13-closed.md`).  Step 0: re-run the r55 harness on the current tree, then the full
 `{2,3}` x `{plain,MTP}` x `{partial,fully-resident}` x `{tensor,layer}` grid, then the all-reduce /
 identity-path / tensor-split-gather profile.
+
+## 87. `--host-experts pool` follow-ups from the gfx1100 field session — ROBUSTNESS + PERFORMANCE
+
+Opened 2026-10-22 (r111), from the fingon (gfx1100, 24 GB VRAM, **30 GiB RAM**) session that validated the
+master drop on a model **larger than RAM** (35B-A3B **Q8_0**, 37.8 GB).  All configurations produced
+byte-identical text, so this is not a purity item — it is one defect and two design/tuning questions.
+
+**(a) DEFECT — SIGSEGV in `pool_bg_worker`** with the **buffered** pool at `MOE_HOST_POOL_FRAC=75`,
+`-ncmoe 36`, on the 30 GiB box (2/2 runs, `memcpy` from the model mapping, `error 4` read of an unmapped
+page).  The DIO variant at the same FRAC ran clean (3/3), as did FRAC 25/50.  My page-aligned-`munmap`
+hypothesis (the r49 reclaim can eat a page of an adjacent host expert tensor, which r111 now *reads*) is
+**refuted** — `LLAMA_LOAD_RELEASE_MMAP=0` still crashes — though that page-alignment hazard is real and
+should be guarded cheaply.  Suspects: the one path that reads the file/mapping **outside `g_mutex`**, or the
+`cudaHostAlloc`-failure path under pressure leaving an inconsistent pool.  Needs a fix (and an r11x); the
+workaround is `MOE_HOST_POOL_DIO=1` or a lower FRAC.
+
+**(b) Prefill must not evict pool entries.**  Whole-table staging already bypasses the pool (r111: +13 %
+prefill on gfx1201), but the used-expert upload and the pre-sizing eager fills still churn it.  The rule to
+implement: a PREFILL-band access may read a pool slot but must never evict or admit one; only the
+decode/verify band owns pool residency.  Then the disk only loads what is not already in VRAM / the host
+pool.
+
+**(c) The arena eviction is already a swap with the pool** (`access_locked` enqueues the victim into the
+pool and sources the incoming expert from it), but the two LRUs are independent, the victim enqueue can be
+dropped, and nothing feeds L2 residency back into L1 admission.  Also, `MOE_HOST_POOL_FRAC`'s optimum is
+**inverted** between the two regimes: when the host set fits in RAM a small pool wins (the page cache is the
+lever: 36-45 t/s at FRAC 10 vs 7.8 at FRAC 50 on `-ncmoe 40`), while on the disk tier a large pool with
+`MOE_HOST_POOL_DIO=1` is the stable shape (`-ncmoe 36` FRAC 75: **74.4 t/s, zero swap**, vs 71.8 + swap at
+FRAC 90).  With the host remainder fitting in RAM, plain `pinned` still wins outright (`-ncmoe 32`:
+**83.7 t/s**) — as the default-on policy intends.
+
+Working home [`wip/host-pool-swap-and-prefill/`](wip/host-pool-swap-and-prefill/README.md) (full measurement
+table, repro commands, suspects).  Related: #86 (admission quality) is the same tiering question on the
+*policy* axis.
 
 ## 59. `ngram-mod` + `draft-mtp-adaptive` halves decode with host-resident MoE experts — PERFORMANCE
 
