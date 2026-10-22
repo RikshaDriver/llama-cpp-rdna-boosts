@@ -94,6 +94,9 @@ the slack up front moves the cost to before the arena is sized.
 | `MOE_EXPERT_HEATMAP_DIR` | unset | tuning | directory for the sidecar when the model directory is not writable.  Otherwise the fallback order is `$XDG_CACHE_HOME/llama-moe-heatmap`, `$HOME/.cache/llama-moe-heatmap`, `/tmp`. |
 | `MOE_EXPERT_HEATMAP_DEBOUNCE_S` | `60` | tuning | minimum seconds between heat-map writes (the server flushes at turn end; process exit always flushes). |
 | `MOE_EXPERT_HEATMAP_MAX_FAILS` | `3` | tuning | consecutive write failures before persistence is disabled for the session (non-fatal throughout). |
+| `MOE_EXPERT_HEATMAP_DECODE_SAMPLE` | `64` | tuning | **sampled decode-band heat tally for a fully-resident (identity) table** (r110, block 09, TODO #64.2).  Every other table's decode routing is tallied *exactly* on the host (the eager path already reads it), but a fully-resident table takes the identity fast path, which never reads the routing back at all -- so its decode traffic contributed nothing to the heat prior.  This tallies it from the device entry, one op in `N`, **weighted by `N`** so the counts stay on the same scale as the exact tallies.  `0` disables it.  Cost: one atomic tick per decode op and, for a sampled op, one small kernel launch; the tally mirror is pre-allocated at sizing so nothing is allocated on the captured decode path.  Measurement-side effect only (the prior changes which experts are resident, never the bytes served). |
+| `MOE_EXPERT_TRACE` | unset = off | **diagnostic** | **offline routing trace** (r110, block 09, TODO #61 P1): writes the raw routing of every `mul_mat_id` to this path, in a text format that `scripts/moe-trace-replay.py` replays to score cache policies (the shipped F-LRU, static top-f, a per-layer capacity quota, pass-start pre-admission) against a real workload.  DECODE records come from the scheduler hook, where the ids are already on the host (no readback, no sync); PREFILL records come from the device entry, because the staged prefill path never brings them to the host -- that costs one readback per prefill op (a prefill ubatch is never CUDA-graph captured, so it is safe).  A fully-resident (identity) table's decode band is not traced: it cannot miss.  It is a *diagnostic*, never default-on, and the replayer's absolute hit rate is a model of the cache, not the cache -- judge policies by their delta. |
+| `MOE_EXPERT_TRACE_MIB` | `1024` | tuning | cap on the trace file, in MiB (r110).  Recording stops at the cap with one warning; the records already written are kept.  A 296-token prompt + 128 decode tokens on a 40-layer MoE is ~2 MiB. |
 | `GGML_MOE_CACHE_MAX_TOK` | device MMVQ band (16 on RDNA4; 8 on RDNA3, NVIDIA) | kill-switch | caps the expert-cache **decode/verify band** (routed `MUL_MAT_ID` tokens the cache serves from the arena).  It defaults to the routed-expert MMVQ kernel's own band on the device since r31; `8` restores the pre-r31 band (band widening in `archive/work/moe-cache-band16/`).  A non-numeric value silently yields 1. |
 | `GGML_MOE_GATHER_ONCE` | off | diagnostic | gather each expert once per pass. |
 
@@ -113,7 +116,12 @@ the slack up front moves the cost to before the arena is sized.
 > first.  **Freezing a map (r61):** set `MOE_EXPERT_HEATMAP=load`, or simply make the heat-map file
 > read-only (`chmod 400 <base>.moe-heatmap`).  A read-only file is loaded and used to seed, is never
 > overwritten, and is not relocated.  See `patches/README.md` (block 09, r60/r61/r75) and
-> `archive/work/moe-heatmap-persistence/`.
+> `archive/work/moe-heatmap-persistence/`.  **Host-pool warm order (r110):** the `--host-experts pool`
+> pinned tier used to be warmed in expert-id order, because the eager `prefill_count` tally never runs
+> under the staged prefill.  It now takes its order from the device prefill tally, folded in once at the
+> first decode-band pass (`pool_rank_from_prefill_locked`); the prewarm log line says which source it
+> used (`ranked by the prompt tally` / `ranked by expert id (no tally)`).  With `MOE_EXPERT_HEATMAP=0`
+> there is no tally and the historical id order remains.
 
 > **REMOVED — do not reintroduce (2026-10-10, released r40).**  The device-remap path and its whole family
 > (`MOE_EXPERT_CACHE_DEVMAP`, `MOE_EXPERT_CACHE_DEVPOLICY`, `MOE_EXPERT_CACHE_DEVPOLICY_SPLIT`,

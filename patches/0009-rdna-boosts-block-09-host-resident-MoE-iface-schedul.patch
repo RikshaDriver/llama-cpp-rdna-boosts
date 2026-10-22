@@ -1,4 +1,4 @@
-From 42f7f77b9a38b8a5d05e56c025108fca9b4a3b27 Mon Sep 17 00:00:00 2001
+From ab0c41db88ebb85cb2bf5394f857e1ef488f0de8 Mon Sep 17 00:00:00 2001
 From: Stew Forster <ci@rdna-boosts.invalid>
 Date: Wed, 21 Oct 2026 10:40:32 -0500
 Subject: [PATCH 09/13] rdna-boosts: block 09: host-resident MoE (iface,
@@ -160,8 +160,8 @@ the heap containers (A/B only).
  ggml/src/ggml-cuda/ggml-cuda.cu               | 2494 +++++++-
  ggml/src/ggml-cuda/mmvq.cu                    |  275 +-
  ggml/src/ggml-cuda/mmvq.cuh                   |   12 +
- ggml/src/ggml-cuda/moe-expert-cache.cu        | 5078 +++++++++++++++++
- ggml/src/ggml-cuda/moe-expert-cache.h         |  312 +
+ ggml/src/ggml-cuda/moe-expert-cache.cu        | 5377 +++++++++++++++++
+ ggml/src/ggml-cuda/moe-expert-cache.h         |  323 +
  ggml/src/ggml-cuda/norm.cu                    |   35 +
  ggml/src/ggml-cuda/norm.cuh                   |    1 +
  ggml/src/ggml-cuda/vendors/hip.h              |    5 +
@@ -195,7 +195,7 @@ the heap containers (A/B only).
  src/llama.cpp                                 |   16 +-
  tools/cli/cli.cpp                             |    6 +
  tools/llama-bench/llama-bench.cpp             |   65 +-
- 65 files changed, 14175 insertions(+), 535 deletions(-)
+ 65 files changed, 14485 insertions(+), 535 deletions(-)
  create mode 100644 common/draft-reserve.cpp
  create mode 100644 common/draft-reserve.h
  create mode 100644 ggml/src/ggml-cuda/cpy-batch.cu
@@ -9875,10 +9875,10 @@ index 4140f681a..35f625eaa 100644
 \ No newline at end of file
 diff --git a/ggml/src/ggml-cuda/moe-expert-cache.cu b/ggml/src/ggml-cuda/moe-expert-cache.cu
 new file mode 100644
-index 000000000..afbcaf1dc
+index 000000000..b38853bfa
 --- /dev/null
 +++ b/ggml/src/ggml-cuda/moe-expert-cache.cu
-@@ -0,0 +1,5078 @@
+@@ -0,0 +1,5377 @@
 +// wip/moe-expert-cache — Phase 1a foundation.  See moe-expert-cache.h for the contract.
 +
 +#include "moe-expert-cache.h"
@@ -9889,6 +9889,7 @@ index 000000000..afbcaf1dc
 +
 +#include <algorithm>
 +#include <atomic>
++#include <cerrno>
 +#include <chrono>
 +#include <cstdio>
 +#include <cstdlib>
@@ -10252,6 +10253,43 @@ index 000000000..afbcaf1dc
 +int64_t                             g_heat_debounce_s = 60;
 +bool                                g_heat_dirty      = false;
 +std::chrono::steady_clock::time_point g_heat_last_save{};
++// TODO #64.2: a FULLY RESIDENT (identity) table's decode routing is never read back, so the eager host
++// tally never sees it.  Tally it from the device entry instead, SAMPLED - one in this many decode ops -
++// and weight the sample by the period so the counts stay on the same scale as the exact tallies.
++// 0 disables it.  `g_heat_op_tick` is the global decode-op counter the sampling rides on.
++int                                 g_heat_decode_sample = 64;
++std::atomic<int64_t>                g_heat_op_tick{0};
++// TODO #64.1: set once the host-pool warm order has been re-derived from the prompt's prefill tally.
++bool                                g_pool_rank_done  = false;
++// Counts the prefill-band ops the device tally has seen, so the pool re-rank can tell "no prefill yet"
++// (the warmup pass) from "the prompt has been tallied".
++std::atomic<int64_t>                g_heat_prefill_ops{0};
++
++// ---------------------------------------------------------------------------------------------
++// TODO #61 P1: the offline routing trace, `MOE_EXPERT_TRACE=<path>`.  Opt-in diagnostic (never
++// default-on): it writes every `mul_mat_id`'s raw routing so `scripts/moe-trace-replay.py` can score
++// cache policies (the shipped F-LRU, static top-f, a per-layer quota, window dedup) against a REAL
++// workload instead of the aggregate heat vector.  Two bands, two sources, and neither can disturb a
++// captured graph:
++//   * DECODE comes from `moe_cache_update_host`, where the scheduler has already read the routing back
++//     to the host -- no readback of our own, no stream synchronize;
++//   * PREFILL comes from the device hook (`moe_cache_heat_observe`), because the staged prefill path
++//     never brings the ids to the host.  A prefill ubatch is never CUDA-graph captured (block 09's
++//     staging invariant), so the readback there is safe.
++// An IDENTITY (fully resident) table is not traced on decode: its routing is never read back at all.
++// By construction it cannot miss, so the replayer models it as a guaranteed hit.
++bool                                g_trace_on        = false;
++bool                                g_trace_stopped   = false;
++std::string                         g_trace_path;
++int64_t                             g_trace_max_bytes = 1024LL * 1024 * 1024;
++int64_t                             g_trace_bytes     = 0;
++int64_t                             g_trace_records   = 0;
++FILE *                              g_trace_file      = nullptr;
++std::set<std::pair<int, std::string>> g_trace_described;   // (layer, role) table descriptors written
++int                                 g_trace_prev_layer = -2;
++char                                g_trace_prev_band = '?';
++std::string                         g_trace_prev_role;
++std::vector<int32_t>                g_trace_prev_ids;     // dedupe across a tensor split (same op, per device)
 +bool                                g_prov_evict      = false; // MOE_EXPERT_CACHE_PROVISIONAL=1: pre-filled entries are evictable like empty slots until first hit
 +int                                 g_prefill_seed_n  = 0;     // MOE_EXPERT_CACHE_PREFILL_SEED_N: cap seeded experts/table (0 = all slots)
 +// V2.0 block 09 (r74): size+seed the arena on the priming pass (the warmup), not the first real decode,
@@ -10533,6 +10571,28 @@ index 000000000..afbcaf1dc
 +    g_prov_evict     = env_int("MOE_EXPERT_CACHE_PROVISIONAL", 1) != 0;
 +    g_prefill_seed_n = env_int("MOE_EXPERT_CACHE_PREFILL_SEED_N", 0);
 +    g_size_at_prime  = env_int("MOE_EXPERT_CACHE_SIZE_AT_PRIME", 1) != 0;
++    // TODO #64.2: sampled decode-band heat tally for a fully-resident (identity) table (0 = off).
++    g_heat_decode_sample = env_int("MOE_EXPERT_HEATMAP_DECODE_SAMPLE", 64);
++    if (g_heat_decode_sample < 0) {
++        g_heat_decode_sample = 0;
++    }
++    // TODO #61 P1: the offline routing trace.  `MOE_EXPERT_TRACE_MIB` caps the file (default 1024); a run
++    // that reaches the cap keeps the records it has and stops.
++    {
++        const char * tr = getenv("MOE_EXPERT_TRACE");
++        g_trace_on = tr != nullptr && tr[0] != '\0';
++        if (g_trace_on) {
++            g_trace_path      = tr;
++            g_trace_max_bytes = (int64_t) env_int("MOE_EXPERT_TRACE_MIB", 1024) * 1024 * 1024;
++            if (g_trace_max_bytes < 1024 * 1024) {
++                g_trace_max_bytes = 1024 * 1024;
++            }
++            GGML_LOG_WARN("%s: MoE routing trace ON -> %s (cap %.0f MiB; MOE_EXPERT_TRACE_MIB).  This is a "
++                          "diagnostic: the prefill band pays a device readback per op, so expect a slower "
++                          "run.  Replay it with scripts/moe-trace-replay.py.\n",
++                          __func__, g_trace_path.c_str(), (double) g_trace_max_bytes / (1024 * 1024));
++        }
++    }
 +    if (g_prefill_seed_n < 0) {
 +        g_prefill_seed_n = 0;
 +    }
@@ -11150,8 +11210,10 @@ index 000000000..afbcaf1dc
 +        filled++;
 +    }
 +    if (filled > 0) {
-+        GGML_LOG_INFO("%s: prewarmed host pool layer=%d role=%s: %d/%d slots (%zu arena-hot first)\n",
-+                      __func__, t.layer, t.role.c_str(), filled, p.slots, residents.size());
++        GGML_LOG_INFO("%s: prewarmed host pool layer=%d role=%s: %d/%d slots (%zu arena-hot first, ranked "
++                      "by %s)\n",
++                      __func__, t.layer, t.role.c_str(), filled, p.slots, residents.size(),
++                      have_tally ? "the prompt tally" : "expert id (no tally)");
 +    }
 +}
 +
@@ -11202,6 +11264,46 @@ index 000000000..afbcaf1dc
 +    if (filled > 0) {
 +        GGML_LOG_WARN("%s: pool re-ranked from prompt tally layer=%d role=%s: %d/%d slots (%zu wanted non-resident)\n",
 +                      __func__, t.layer, t.role.c_str(), filled, pool->slots, rank.size());
++    }
++}
++
++// TODO #64.1: give the host pool the prompt's warm order.  `prefill_count` is only accumulated by the
++// EAGER prefill path; the default staged prefill intercepts the expert upload before that hook, so the
++// tally stayed empty, `pool_prepopulate_locked` fell back to expert-id order and
++// `pool_rerank_from_tally_locked` above was an uncalled function.  The DEVICE prefill tally does see
++// every prefill, so fold it in once (at the first decode-band pass after a prefill), and hand it to both
++// consumers: a pool that already exists is re-ranked here, and one created later warms from
++// `prefill_count` in `pool_prepopulate_locked`.  Caller holds `g_mutex`.
++static void pool_rank_from_prefill_locked() {
++    heat_pull_locked();   // one pass over the tables: fold + zero every device mirror
++    for (table_t & t : g_tables) {
++        if (t.n_experts <= 0 || t.identity || (int) t.heat.size() != t.n_experts) {
++            continue;   // an identity table holds everything already: its pool is the empty complement
++        }
++        bool any = false;
++        for (uint32_t v : t.heat) {
++            if (v != 0) {
++                any = true;
++                break;
++            }
++        }
++        if (!any) {
++            continue;
++        }
++        std::vector<int32_t> tally((size_t) t.n_experts, 0);
++        for (int e = 0; e < t.n_experts; e++) {
++            const uint32_t h = t.heat[(size_t) e];
++            tally[(size_t) e] = h > 0x7fffffffu ? 0x7fffffff : (int32_t) h;
++        }
++        if ((int) t.prefill_count.size() != t.n_experts) {
++            t.prefill_count.assign((size_t) t.n_experts, 0);
++        }
++        for (int e = 0; e < t.n_experts; e++) {
++            if (t.prefill_count[(size_t) e] == 0) {
++                t.prefill_count[(size_t) e] = tally[(size_t) e];
++            }
++        }
++        pool_rerank_from_tally_locked(t, tally);
 +    }
 +}
 +
@@ -12124,6 +12226,43 @@ index 000000000..afbcaf1dc
 +    t.heat_dev_cap = 0;
 +}
 +
++// Ensure a table's device heat mirror exists.  Caller holds `g_mutex`.  MUST run outside a captured
++// graph: `cudaMalloc` is illegal during capture, so the mirror is pre-allocated at sizing and the
++// decode band may only ever *launch* the tally kernel (TODO #64.2's sampled identity tally sits on the
++// captured decode path -- allocating there aborted with "operation failed due to a previous error
++// during capture").  Fail-soft: a failed allocation leaves the mirror null and the tally disabled.
++static bool heat_dev_ensure_locked(table_t & t, int device) {
++    if (t.heat_dev != nullptr) {
++        return true;
++    }
++    if (t.n_experts <= 0) {
++        return false;
++    }
++    device_guard dg(device >= 0 ? device : 0);
++    void * p = nullptr;
++    // Raw cudaMalloc, not `ggml_cuda_device_malloc`: this is ~1 KiB and must NOT be able to yield the
++    // whole expert arena (the OOM choke point's fail-soft ladder).
++    if (cudaMalloc(&p, (size_t) t.n_experts * sizeof(uint32_t)) != cudaSuccess) {
++        (void) cudaGetLastError();
++        static bool warned = false;
++        if (!warned) {
++            warned = true;
++            GGML_LOG_WARN("%s: heat tally buffer alloc failed; the device routing tally is disabled for "
++                          "this table\n", __func__);
++        }
++        return false;
++    }
++    if (cudaMemset(p, 0, (size_t) t.n_experts * sizeof(uint32_t)) != cudaSuccess) {
++        (void) cudaGetLastError();
++        (void) cudaFree(p);
++        (void) cudaGetLastError();
++        return false;
++    }
++    t.heat_dev     = (uint32_t *) p;
++    t.heat_dev_cap = t.n_experts;
++    return true;
++}
++
 +// WIP item 1 (TODO #42): release every buffer a table owns so it can be rebuilt at a different slot
 +// count (the layer-uniform re-size below).  Mirrors the allocations in `alloc_table_locked`; used only
 +// at sizing time, before the arena is read, but the identity/seed fills enqueue async copies on stream
@@ -12341,6 +12480,11 @@ index 000000000..afbcaf1dc
 +    // the arena begins with the hot set the previous run learned (and the in-run prefill seed, which is
 +    // inert under staging, only fills what is left).
 +    apply_heat_seed_locked(t);
++    // TODO #64.2: pre-allocate the device routing-tally mirror here, at sizing (outside any captured
++    // graph), so the sampled decode-band tally on an identity table only ever *launches* its kernel.
++    if (g_heat_on) {
++        (void) heat_dev_ensure_locked(t, t.device);
++    }
 +    apply_prefill_seed_locked(t);
 +    // Account the count ACTUALLY allocated (`slots`/`t.slots`), not the requested `arena_slots`: on a
 +    // shrunk table the two differ and the old `arena_slots` accounting over-reported the arena.
@@ -13763,53 +13907,106 @@ index 000000000..afbcaf1dc
 +    return { nullptr, false };
 +}
 +
-+void moe_cache_observe(const ggml_tensor * op, const ggml_tensor * src0, const ggml_tensor * ids) {
-+    if (!g_enabled || op == nullptr || src0 == nullptr || ids == nullptr) {
-+        return;
-+    }
-+    const int layer = name_layer(op);   // the op output carries the `-<layer>` suffix, not the weight
-+    if (layer < 0 || src0->ne[2] < 1) {
-+        return;
-+    }
-+    const int n_used = (int) ids->ne[0];
-+    const int n_tok  = (int) ids->ne[1];
-+    if (n_tok > MOE_EXPERT_CACHE_MAX_TOK) {
-+        return;   // decode/verify band only
-+    }
++// ---------------------------------------------------------------------------------------------
++// TODO #61 P1: the offline routing trace writer.  `emit` is the single sink both bands funnel into; it
++// takes `g_mutex` itself, so a caller must NOT already hold it.  See the globals block above for the
++// format and for why the two bands have different sources.
++// ---------------------------------------------------------------------------------------------
 +
-+    const int    n_experts    = (int) src0->ne[2];
-+    // the expert stride; nb[2] for the contiguous expert tensor, falling back to the average.
-+    const size_t expert_bytes = src0->nb[2] > 0 ? (size_t) src0->nb[2]
-+                                                : (size_t) (ggml_nbytes(src0) / (size_t) n_experts);
-+
-+    // register (idempotent) before taking the access lock
-+    const int table = moe_cache_table(src0, layer, name_role(src0).c_str(), n_experts, expert_bytes,
-+                                      expert_bytes, 0, 0, -1, src0->data, -1);
-+    if (table < 0) {
-+        return;
-+    }
-+
-+    std::lock_guard<std::mutex> lock(g_mutex);
-+    table_t & t = g_tables[table];
-+    for (int tok = 0; tok < n_tok; tok++) {
-+        const char * row = (const char *) ids->data + (size_t) tok * ids->nb[1];
-+        for (int j = 0; j < n_used; j++) {
-+            const int32_t e = *(const int32_t *) (row + (size_t) j * ids->nb[0]);
-+            if (e >= 0 && e < t.n_experts) {
-+                (void) access_locked(t, e, nullptr);
-+            }
++// Copy a device-side routing tensor to the host.  Used by the PREFILL band only (never captured).
++static void moe_trace_pull_device(const void * dev_ids, int64_t nb0, int64_t nb1, int n_tok, int n_used,
++                                  void * stream, int device, std::vector<int32_t> & out) {
++    out.assign((size_t) n_used * (size_t) n_tok, -1);
++    device_guard dg(device);
++    const cudaStream_t st = (cudaStream_t) stream;
++    const bool         contiguous = nb0 == (int64_t) sizeof(int32_t) &&
++                                    nb1 == (int64_t) n_used * (int64_t) sizeof(int32_t);
++    const int rows = contiguous ? 1 : n_tok;
++    for (int r = 0; r < rows; r++) {
++        const char * src = (const char *) dev_ids + (size_t) r * (size_t) nb1;
++        int32_t *    dst = out.data() + (size_t) r * (size_t) n_used;
++        const size_t nby = (size_t) n_used * sizeof(int32_t);
++        if (st != nullptr) {
++            (void) cudaMemcpyAsync(dst, src, nby, cudaMemcpyDeviceToHost, st);
++            (void) cudaStreamSynchronize(st);
++        } else {
++            (void) cudaMemcpy(dst, src, nby, cudaMemcpyDeviceToHost);
 +        }
 +    }
++    (void) cudaGetLastError();   // a failed readback leaves -1s: the replayer ignores them
 +}
 +
-+// wip/moe-heatmap-persistence (R2): device-side prefill routing tally.  Reads the raw routing ids on
-+// the device (the OUTER `mul_mat_id` entry, before the cache's slot-remap redirect), so it counts the
-+// true expert ids for every prefill path - including the staged path (where the host hook is skipped)
-+// and the identity path (where the host hook is short-circuited).  Prefill band only: the decode band
-+// is tallied on the host by `moe_cache_update_host`, so there is no double count and no extra launch on
-+// the latency-critical decode path.
++static void moe_trace_emit(char band, int layer, const char * role, int n_tok, int n_used,
++                           const int32_t * ids, int n_experts, size_t expert_bytes) {
++    if (!g_trace_on || g_trace_stopped) {
++        return;
++    }
++    if (role == nullptr) {
++        role = "?";
++    }
++    std::lock_guard<std::mutex> lock(g_mutex);
++    if (g_trace_stopped) {
++        return;
++    }
++    // A tensor split runs the same op (same ids) once per device: the neighbours are identical, so drop
++    // the repeat.  This is also what keeps the trace one record per (layer, role, pass).
++    const size_t n = (size_t) n_used * (size_t) n_tok;
++    if (layer == g_trace_prev_layer && band == g_trace_prev_band && g_trace_prev_role == role &&
++        g_trace_prev_ids.size() == n && (n == 0 || memcmp(g_trace_prev_ids.data(), ids, n * sizeof(int32_t)) == 0)) {
++        return;
++    }
++    if (g_trace_file == nullptr) {
++        g_trace_file = fopen(g_trace_path.c_str(), "w");
++        if (g_trace_file == nullptr) {
++            GGML_LOG_ERROR("%s: cannot open MOE_EXPERT_TRACE=%s: %s; the routing trace is disabled\n",
++                           __func__, g_trace_path.c_str(), strerror(errno));
++            g_trace_stopped = true;
++            return;
++        }
++        fputs("# moe-trace v1\n", g_trace_file);
++    }
++    if (g_trace_bytes >= g_trace_max_bytes) {
++        GGML_LOG_WARN("%s: MOE_EXPERT_TRACE cap reached (%.0f MiB, %lld records); recording stopped.  Raise "
++                      "MOE_EXPERT_TRACE_MIB for a longer capture.\n",
++                      __func__, (double) g_trace_max_bytes / (1024 * 1024), (long long) g_trace_records);
++        fflush(g_trace_file);
++        g_trace_stopped = true;
++        return;
++    }
++    // Table descriptor on first sight, so the replayer knows the expert geometry without the model.
++    if (g_trace_described.emplace(layer, std::string(role)).second) {
++        fprintf(g_trace_file, "T %d %s %d %zu\n", layer, role, n_experts, expert_bytes);
++        g_trace_bytes += 32 + (int64_t) strlen(role);
++    }
++    std::string line;
++    line.reserve(48 + n * 4);
++    char buf[256];
++    snprintf(buf, sizeof(buf), "%c %lld %d %s %d %d", band, (long long) g_trace_records, layer, role,
++             n_tok, n_used);
++    line += buf;
++    for (size_t i = 0; i < n; i++) {
++        snprintf(buf, sizeof(buf), " %d", ids[i]);
++        line += buf;
++    }
++    line += '\n';
++    fwrite(line.data(), 1, line.size(), g_trace_file);
++    g_trace_bytes += (int64_t) line.size();
++    g_trace_records++;
++    g_trace_prev_layer = layer;
++    g_trace_prev_band  = band;
++    g_trace_prev_role  = role;
++    g_trace_prev_ids.assign(ids, ids + n);
++}
++
++// wip/moe-heatmap-persistence (R2): device-side routing tally.  Reads the raw routing ids on the device
++// (the OUTER `mul_mat_id` entry, before the cache's slot-remap redirect), so it counts the true expert
++// ids for every path - including the staged path (where the host hook is skipped) and the identity path
++// (where the host hook is short-circuited).  The PREFILL band is tallied here exactly; the DECODE band is
++// tallied on the host by `moe_cache_update_host`, except for a fully-resident (identity) table, whose
++// decode routing is never read back - that one is tallied here SAMPLED (`w` is the sample period, so the
++// counts stay on the same scale as the exact tallies).
 +static __global__ void moe_cache_heat_kernel(const int32_t * __restrict__ ids, int64_t nb0, int64_t nb1,
-+                                             int n_used, int n_tok, int n_experts,
++                                             int n_used, int n_tok, int n_experts, uint32_t w,
 +                                             uint32_t * __restrict__ heat) {
 +    const int64_t n = (int64_t) n_used * (int64_t) n_tok;
 +    for (int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x; i < n;
@@ -13819,24 +14016,54 @@ index 000000000..afbcaf1dc
 +        const int32_t e = *(const int32_t *) ((const char *) ids + (size_t) tok * (size_t) nb1 +
 +                                              (size_t) j * (size_t) nb0);
 +        if (e >= 0 && e < n_experts) {
-+            atomicAdd(&heat[e], 1u);
++            atomicAdd(&heat[e], w);
 +        }
 +    }
 +}
 +
 +void moe_cache_heat_observe(const ggml_tensor * op, const ggml_tensor * src0, const ggml_tensor * ids,
 +                            void * stream, int device) {
-+    if (!g_heat_on || !g_enabled || op == nullptr || src0 == nullptr || ids == nullptr) {
++    if (!g_enabled || op == nullptr || src0 == nullptr || ids == nullptr) {
 +        return;
 +    }
 +    const int layer = name_layer(op);
 +    if (layer < 0 || src0->ne[2] < 1 || ids->ne[0] <= 0) {
 +        return;
 +    }
-+    const int n_used = (int) ids->ne[0];
-+    const int n_tok  = (int) ids->ne[1];
-+    if (n_tok <= MOE_EXPERT_CACHE_MAX_TOK) {
-+        return;   // prefill band only (the decode band is tallied on the host)
++    const int    n_used = (int) ids->ne[0];
++    const int    n_tok  = (int) ids->ne[1];
++    const bool   prefill_band = n_tok > MOE_EXPERT_CACHE_MAX_TOK;
++
++    // TODO #61 P1: the prefill routing never reaches the host on the staged path, so the trace's
++    // PREFILL records have to come from here.  A prefill ubatch is never CUDA-graph captured, so the
++    // readback is safe; the whole trace is opt-in and the decode band is traced on the host instead.
++    if (prefill_band && g_trace_on && !g_trace_stopped) {
++        std::vector<int32_t> ids_host;
++        moe_trace_pull_device(ids->data, (int64_t) ids->nb[0], (int64_t) ids->nb[1], n_tok, n_used,
++                              stream, device, ids_host);
++        const size_t expert_bytes = src0->nb[2] > 0 ? (size_t) src0->nb[2]
++                                                    : (size_t) (ggml_nbytes(src0) / (size_t) src0->ne[2]);
++        moe_trace_emit('P', layer, sem_role(src0).c_str(), n_tok, n_used, ids_host.data(),
++                       (int) src0->ne[2], expert_bytes);
++    }
++    if (!g_heat_on) {
++        return;
++    }
++    // TODO #64.2: the decode band only needs this tally for a table no host tally can see - a fully
++    // resident (identity) one - and even then SAMPLED, so the latency-critical path pays one atomic
++    // increment per op and a lock only every `g_heat_decode_sample` ops.
++    uint32_t weight = 1;
++    if (!prefill_band) {
++        if (g_heat_decode_sample <= 0) {
++            return;
++        }
++        const int64_t tick = g_heat_op_tick.fetch_add(1, std::memory_order_relaxed) + 1;
++        if (tick % (int64_t) g_heat_decode_sample != 0) {
++            return;
++        }
++        weight = (uint32_t) g_heat_decode_sample;
++    } else {
++        g_heat_prefill_ops.fetch_add(1, std::memory_order_relaxed);
 +    }
 +    std::lock_guard<std::mutex> lock(g_mutex);
 +    const auto it = g_sem_to_id.find(std::make_tuple(layer, sem_role(src0), device));
@@ -13847,25 +14074,14 @@ index 000000000..afbcaf1dc
 +    if (t.n_experts <= 0) {
 +        return;
 +    }
++    if (!prefill_band && !t.identity) {
++        return;   // the eager host path tallies this table exactly; never double count it
++    }
 +    g_heat_dirty = true;
-+    if (t.heat_dev == nullptr) {
-+        device_guard dg(device);
-+        void * p = nullptr;
-+        // Raw cudaMalloc, not `ggml_cuda_device_malloc`: this is ~1 KiB and must NOT be able to yield
-+        // the whole expert arena (the OOM choke point's fail-soft ladder).  Fail soft on error.
-+        if (cudaMalloc(&p, (size_t) t.n_experts * sizeof(uint32_t)) != cudaSuccess) {
-+            (void) cudaGetLastError();
-+            static bool warned = false;
-+            if (!warned) {
-+                warned = true;
-+                GGML_LOG_WARN("%s: heat tally buffer alloc failed; the device prefill tally is disabled "
-+                              "for this table\n", __func__);
-+            }
-+            return;
-+        }
-+        (void) cudaMemset(p, 0, (size_t) t.n_experts * sizeof(uint32_t));
-+        t.heat_dev     = (uint32_t *) p;
-+        t.heat_dev_cap = t.n_experts;
++    // The mirror is pre-allocated at sizing (alloc_table_locked).  Never allocate here on the decode
++    // band: that path is a captured graph, where a `cudaMalloc` aborts the capture.
++    if (t.heat_dev == nullptr && (!prefill_band || !heat_dev_ensure_locked(t, device))) {
++        return;
 +    }
 +    const int64_t n     = (int64_t) n_used * (int64_t) n_tok;
 +    const int     threads = 128;
@@ -13878,7 +14094,7 @@ index 000000000..afbcaf1dc
 +    }
 +    moe_cache_heat_kernel<<<(unsigned) nb, threads, 0, (cudaStream_t) stream>>>(
 +        (const int32_t *) ids->data, (int64_t) ids->nb[0], (int64_t) ids->nb[1],
-+        n_used, n_tok, t.n_experts, t.heat_dev);
++        n_used, n_tok, t.n_experts, weight, t.heat_dev);
 +}
 +
 +// Fold every table's device heat mirror into the host `heat` vector and zero the mirror.  Run at a
@@ -14213,6 +14429,22 @@ index 000000000..afbcaf1dc
 +    if (n_tok > MOE_EXPERT_CACHE_MAX_TOK && !g_prefill_seed) {
 +        return false;
 +    }
++
++    // TODO #61 P1: the DECODE band's routing trace record.  The scheduler has already read these ids back
++    // to the host (that is why this hook exists), so recording them costs no readback and no sync.  A
++    // prefill ubatch is not traced from here: its ids never reach this hook under the default staging, so
++    // the PREFILL records come from the device entry (`moe_cache_heat_observe`) instead.
++    if (g_trace_on && !g_trace_stopped && n_tok <= MOE_EXPERT_CACHE_MAX_TOK) {
++        std::vector<int32_t> ids_host((size_t) n_used * (size_t) n_tok, -1);
++        for (int64_t tok = 0; tok < n_tok; tok++) {
++            for (int64_t j = 0; j < n_used; j++) {
++                ids_host[(size_t) (tok * n_used + j)] =
++                    *(const int32_t *) ((const char *) ids + (size_t) tok * ids_nb1 + (size_t) j * ids_nb0);
++            }
++        }
++        moe_trace_emit('D', layer, sem_role(weight).c_str(), (int) n_tok, (int) n_used, ids_host.data(),
++                       (int) weight->ne[2], weight->nb[2] > 0 ? (size_t) weight->nb[2] : 0);
++    }
 +    const int    n_experts    = (int) weight->ne[2];
 +    // `host_bytes` is the full host-master expert stride; `expert_bytes` is THIS device's slice, which
 +    // the op reads and the arena stores.  They are equal for an unsplit table (1 GPU / `-sm layer`).
@@ -14276,6 +14508,17 @@ index 000000000..afbcaf1dc
 +            t.prefill_tokens += n_tok;
 +        }
 +        return false;   // decode/verify band only
++    }
++
++    // TODO #64.1: the first decode-band pass after a prefill is the moment the prompt's routing is known
++    // in full.  Re-derive the host pool's warm order from it once (the staged prefill never feeds
++    // `prefill_count`, and the device tally is the only record of that routing).  Gated on
++    // `g_heat_prefill_ops` so a pre-prompt warmup pass does not consume the one-shot decision, and on the
++    // pool so a run without `--host-experts pool` pays nothing.
++    if (g_heat_on && g_pool_enabled && !g_pool_rank_done &&
++        g_heat_prefill_ops.load(std::memory_order_relaxed) > 0) {
++        g_pool_rank_done = true;
++        pool_rank_from_prefill_locked();
 +    }
 +
 +    // A pageable axis-0 slice (a `-sm tensor` `down_exps` split) has no device mapping and its only
@@ -14816,6 +15059,52 @@ index 000000000..afbcaf1dc
 +    // is (the placement/persistence consumers need a peaked prior).
 +    if (g_heat_on) {
 +        heat_pull_locked();
++        // TODO #61 P3 (metric parity): `h` alone cannot say how much of the routing distribution the arena
++        // actually covers, and that is the quantity every coverage question is about.  Report, on THIS
++        // SESSION's routing (`heat_delta`, i.e. `heat` minus the part already folded into the persisted
++        // prior), the mass the resident set holds and the mass a GLOBAL-top-f resident set of the same slot
++        // count would hold (the static bound, i.e. what a perfect static placement buys).  Measured BEFORE
++        // the save below, which folds the delta away.  The `expert traffic per token` line further down
++        // completes the pair the campaign's P3 asks for.
++        {
++            int64_t  n_slots       = 0;
++            uint64_t total_mass    = 0;
++            uint64_t resident_mass = 0;
++            int64_t  n_resident    = 0;
++            int64_t  n_expert_sl   = 0;
++            std::vector<uint64_t> all_heat;
++            for (const table_t & t : g_tables) {
++                if ((int) t.heat.size() != t.n_experts) {
++                    continue;
++                }
++                n_slots     += t.slots;
++                n_expert_sl += t.n_experts;
++                n_resident  += (int64_t) t.expert_slot.size();
++                for (int e = 0; e < t.n_experts; e++) {
++                    const uint64_t v = heat_delta(t, (size_t) e);
++                    all_heat.push_back(v);
++                    total_mass += v;
++                    if (t.expert_slot.find(e) != t.expert_slot.end()) {
++                        resident_mass += v;
++                    }
++                }
++            }
++            if (!all_heat.empty() && total_mass > 0) {
++                std::sort(all_heat.begin(), all_heat.end(),
++                          [](uint64_t a, uint64_t b) { return a > b; });
++                const int64_t k = std::min<int64_t>(n_slots, (int64_t) all_heat.size());
++                uint64_t bound = 0;
++                for (int64_t i = 0; i < k; i++) {
++                    bound += all_heat[(size_t) i];
++                }
++                GGML_LOG_INFO("%s: heat coverage (this session): the resident set holds %.2f%% of the routed "
++                              "mass; a global top-%lld placement of the same slots would hold %.2f%% "
++                              "(static bound); resident %lld of %lld expert-slots (summed over tables/devices)\n",
++                              __func__, 100.0 * (double) resident_mass / (double) total_mass,
++                              (long long) k, 100.0 * (double) bound / (double) total_mass,
++                              (long long) n_resident, (long long) n_expert_sl);
++            }
++        }
 +        heat_map_save_locked();   // final flush at process exit (the debounce must not lose the run)
 +        uint64_t total   = 0;
 +        int64_t  nonzero = 0, experts = 0;
@@ -14839,7 +15128,8 @@ index 000000000..afbcaf1dc
 +                }
 +            }
 +        }
-+        GGML_LOG_INFO("%s: heat (R2): total=%llu, nonzero=%lld/%lld experts over %zu tables\n",
++        GGML_LOG_INFO("%s: heat (R2): total=%llu (persisted prior + this session), nonzero=%lld/%lld experts "
++                      "over %zu tables\n",
 +                      __func__, (unsigned long long) total, (long long) nonzero, (long long) experts,
 +                      g_tables.size());
 +        for (const heat_top_t & h : top) {
@@ -14848,6 +15138,15 @@ index 000000000..afbcaf1dc
 +                              __func__, h.layer, h.role, h.e, (unsigned long long) h.v);
 +            }
 +        }
++    }
++    // TODO #61 P1: flush (and close) the routing trace so a run always leaves a complete file.
++    if (g_trace_on && g_trace_file != nullptr) {
++        fflush(g_trace_file);
++        fclose(g_trace_file);
++        g_trace_file = nullptr;
++        GGML_LOG_INFO("%s: routing trace: %lld records, %.1f MiB -> %s\n",
++                      __func__, (long long) g_trace_records, (double) g_trace_bytes / (1024 * 1024),
++                      g_trace_path.c_str());
 +    }
 +
 +    if (g_stage_ok + g_stage_decline_geom + g_stage_decline_usable + g_stage_decline_nomatch > 0) {
@@ -14959,10 +15258,10 @@ index 000000000..afbcaf1dc
 +}
 diff --git a/ggml/src/ggml-cuda/moe-expert-cache.h b/ggml/src/ggml-cuda/moe-expert-cache.h
 new file mode 100644
-index 000000000..86195866f
+index 000000000..e8da0c952
 --- /dev/null
 +++ b/ggml/src/ggml-cuda/moe-expert-cache.h
-@@ -0,0 +1,312 @@
+@@ -0,0 +1,323 @@
 +#pragma once
 +
 +// wip/moe-expert-cache — Phase 1a foundation (2026-09-28).
@@ -15000,6 +15299,19 @@ index 000000000..86195866f
 +//   MOE_EXPERT_HEATMAP_DEBOUNCE_S=N  minimum seconds between heat-map writes (default 60)
 +//   MOE_EXPERT_HEATMAP_MAX_FAILS=N   consecutive write failures before persistence is disabled
 +//                                    for the session (default 3)
++//   MOE_EXPERT_HEATMAP_DECODE_SAMPLE=N  tally a fully-resident (identity) table's DECODE routing from
++//                                    the device, one op in N (default 64, 0 disables).  Every other
++//                                    table's decode band is tallied exactly on the host; an identity
++//                                    table's routing is never read back, so this is the only tally it
++//                                    can have.  The sample is weighted by N, so the counts stay on the
++//                                    same scale as the exact tallies.
++//   MOE_EXPERT_TRACE=PATH      diagnostic (never default-on): write the raw routing of every
++//                                    `mul_mat_id` to PATH for the offline policy replayer
++//                                    (`scripts/moe-trace-replay.py`).  DECODE records come from the
++//                                    scheduler hook (the ids are already on the host); PREFILL records
++//                                    come from the device entry and pay one readback per op.  An
++//                                    identity table's decode band is not traced (it cannot miss).
++//   MOE_EXPERT_TRACE_MIB=N           trace file cap in MiB (default 1024); recording stops at the cap
 +//   MOE_EXPERT_CACHE_PROVISIONAL=0  disable reclaiming pre-filled/seed slots before first hit
 +//                              (default 1)
 +//   MOE_HOST_POOL_MIB=N        PROCESS-WIDE pinned host pool (L2) size in MiB; 0/unset disables it
@@ -15012,9 +15324,9 @@ index 000000000..86195866f
 +//                              bypasses the page cache)
 +//   MOE_HOST_POOL_PREWARM=0    do not DIO/buffered-fill every pool slot when it is built (default on)
 +
-+// Phase 1a status: registration + LFRU policy + arena + alias + fill + report.  The
-+// `mul_mat_id` dispatch already calls `moe_cache_observe()` (live hit-rate measurement) and the
-+// alias seam is the next commit's kernel consumer; see wip/moe-expert-cache/README.md §3.3.
++// Phase 1a status: registration + LFRU policy + arena + alias + fill + report.  The `mul_mat_id`
++// dispatch calls `moe_cache_heat_observe()` (routing tally, both bands) and the scheduler hook
++// `moe_cache_update_host()` drives the policy; see wip/ and archive/work/moe-expert-cache/.
 +
 +#include <cstddef>
 +#include <cstdint>
@@ -15170,16 +15482,14 @@ index 000000000..86195866f
 +// LFRU residency decision + alias for expert `expert` of `table`.  The single compute-path seam.
 +moe_cache_alias moe_cache_alias_get(int table, int expert);
 +
-+// Observe the routing of one `MUL_MAT_ID` (live hit-rate measurement / warm-up).  `op` is the op
-+// output (its name carries the `-<layer>` suffix); `src0` is the expert weight table.  The
-+// gate/up/down ops of one (layer, token) are coalesced so the policy sees one reach per token.
-+void moe_cache_observe(const struct ggml_tensor * op, const struct ggml_tensor * src0, const struct ggml_tensor * ids);
-+
-+// wip/moe-heatmap-persistence (R2): device-side prefill routing tally.  Called from the CUDA
-+// `mul_mat_id` dispatch (the OUTER entry, before the cache's slot-remap redirect) for the prefill
-+// band only, so the routing is counted even when the host copy path is bypassed by the H2D staging
-+// ring (`stage_consumed`) and even when the ids are never read back.  `ids` is the raw routing on
-+// the device.  A no-op unless `MOE_EXPERT_HEATMAP` is on (default on; `=load` to freeze).
++// wip/moe-heatmap-persistence (R2): device-side routing tally.  Called from the CUDA `mul_mat_id`
++// dispatch (the OUTER entry, before the cache's slot-remap redirect), so the routing is counted even
++// when the host copy path is bypassed by the H2D staging ring (`stage_consumed`) and even when the ids
++// are never read back.  `ids` is the raw routing on the device.  The PREFILL band is tallied exactly
++// and, when `MOE_EXPERT_TRACE` is set, is also where the trace's PREFILL records come from; the DECODE
++// band is tallied only for a fully-resident (identity) table and only SAMPLED
++// (`MOE_EXPERT_HEATMAP_DECODE_SAMPLE`), because the eager host path tallies every other table exactly.
++// A no-op unless `MOE_EXPERT_HEATMAP` is on (default on; `=load` to freeze) or a trace is requested.
 +void moe_cache_heat_observe(const struct ggml_tensor * op, const struct ggml_tensor * src0,
 +                            const struct ggml_tensor * ids, void * stream, int device);
 +

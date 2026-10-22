@@ -12,7 +12,7 @@ Details never live here: they live in `AGENTS.md`, `patches/README.md`, `MANIFES
 still means the same subject after that item is closed and removed from this file.  New items append.
 
 **Current state:** the **14-block V2.1 set** (block 00 + blocks 01-13) at fork point **`097cf33d9`**,
-release **`v14-097cf33d9-r109`**.  `release.json` is the source of truth for the tip/tree and hashes; the
+release **`v14-097cf33d9-r110`**.  `release.json` is the source of truth for the tip/tree and hashes; the
 top of `WORKLOG.md` is the newest record.
 
 | # | subject | kind | status |
@@ -21,8 +21,7 @@ top of `WORKLOG.md` is the newest record.
 | **51** | 3-GPU decode is slower than 2-GPU | performance | open (`wip/three-gpu-performance/`).  2026-10-22 datapoint (dense 27B Q8_0, `wip/three-gpu-performance/FINDING-2026-10-22-dense-27b-and-mirrored-draft-subset.md`): it is **width**-dependent, not direction-dependent — 3 GPU wins +9.2 % at mean verify len 2.9 and loses **−14.4 %** at mean len 29.2 with *bit-identical* acceptance, and at depth 16384 it loses 8.5 %.  The MoE/field-config arm is still the campaign's target |
 | **55** | drop the full pinned `ROCm_Host` master when `--host-experts pool` is on | memory | open (`wip/host-expert-master-drop/`) |
 | **59** | `ngram-mod` + `draft-mtp-adaptive` halves decode with host-resident experts | performance | open (`wip/ngram-mod-host-experts/`) |
-| **61** | MoE expert-cache coverage: offline trace replay, per-layer capacity quota | performance | open (`wip/moe-cache-coverage/`) |
-| **64** | MoE heat-map residuals | minor | open |
+| **86** | MoE expert-cache *admission quality*: the shipped policy is ~11 pts of hit rate below a static oracle — decompose foreknowledge vs churn, then prefetch/admission candidates offline | performance | open, scoping (`wip/moe-admission-quality/`) |
 | **65** | IQ4_NL field (MTP) + `--host-experts pool` decode collapses | memory | parked (maintainer 2026-10-15; the "after r67" condition is long past — never picked up, still parked) |
 | **70** | harden the expert-cache re-arm / wide-aux growth against a starved arena | robustness | open |
 | **79** | RDNA3_0 verify-band fusions: no multi-device measurement, and gfx1101/gfx1102 untested | platform validation | open (shipped default-on in r95; needs a 2+ card gfx1100 box).  `ssh fingon` is single-RDNA3 (`ROCm0`; its second rocm-smi entry is an iGPU and is not a HIP device), so it does **not** cover the multi-device arm — it validates single-GPU gfx1100 only.  gfx1101/gfx1102 still have no hardware |
@@ -80,43 +79,26 @@ in the README "Recommended configuration" section.  Working home
 per-op host-expert upload, the MoE cache band and verify graph recapture, the staging-ring width; bisect
 plan in that README).
 
-## 61. MoE expert-cache coverage: heat-map correctness, capacity allocation, offline replay — PERFORMANCE
+## 86. MoE expert-cache admission quality — the ~11 pt gap to a static oracle — PERFORMANCE (scoping)
 
-Retargeted 2026-10-17 (was "hotness-aware arena placement + idle repack").  Three results of the
-2026-10-17 review closed the old premise and opened this one
-([`wip/moe-cache-coverage/FINDINGS-2026-10-17-coverage-vs-defrag.md`](wip/moe-cache-coverage/FINDINGS-2026-10-17-coverage-vs-defrag.md)):
+Opened 2026-10-22 (r110), from the P1 instrument that closed `#61`.  On a real 35B-A3B trace (2 GPU
+`-sm tensor -ncmoe 40`, `MOE_EXPERT_CACHE_MIB=4096` = 43.8 % residency, 296-token prompt, 128 decode
+tokens, `MOE_EXPERT_HEATMAP=0`) the delivered policy models `h` **0.8505** (0.8248 logged) while an oracle
+*static* placement of the **same slot count** reaches **0.8765**, and the global-top-f bound is 96.14 % of
+the routed mass against the shipped set's 91.42 %.  A per-layer slot **quota** does not explain it (+0.0025,
+closed unshipped — see `archive/work/moe-cache-coverage/RESOLUTION.md`), so the gap is either *foreknowledge*
+(the oracle ranks by the whole trace; the delivery carries only a persisted prior) or *eviction churn*
+(2112 evictions / ~37 k cold reads over 130 passes).
 
-1. **The heat map doubled per flush** — fixed in r80 (block 09: delta merge + a degenerate-map guard);
-   the poisoned sidecars were deleted.
-2. **Defrag/repack is not the lever**: the arena is ~100 % allocated in slots (0.51 % truncation) and
-   eviction churn is 3.0 % of reaches, so an idle repack recovers ≤ 0.5 % of bytes while invalidating
-   captured graphs and the arena address in kernel launch params (old phases 3-4 are closed).
-3. **The Strata hit-rate gap is accounting + arena size**, not fragmentation: on equal accounting 91.9 %
-   vs our 90.6 % on the same model, and the residual is 25.46 vs 15.30 GiB of arena.
-
-**Open work** (`wip/moe-cache-coverage/`): (a) an **offline routing-trace replayer** (`MOE_EXPERT_TRACE` +
-a policy scorer — we have only an aggregate heat vector, which cannot answer thrash/prefetch/window
-questions); (b) a **per-layer capacity quota** from heat (uniform slots per table give up only 0.3-0.5 pts
-on a uniformly-tallied map; the 1.5-1.9 pts seen on the 35B-A3B sidecars was the #64.2 tally-gap artifact)
-— the only strictly-inside-the-arena win, and a small one; (c) metric parity (report covered mass +
-expert MiB/token beside `h`).  The **arena size** lever (the slab's 8 GiB compute reserve + 4 GiB VA
-spare, worth +3-6 pts of coverage) belongs to `archive/work/slab-transient-absorption/`, not here.
-
-## 64. MoE heat-map residuals (pool warm order, decode-identity tally, dead `moe_cache_observe`) — MINOR
-
-The heat map itself is promoted (r60, `WORKLOG.md` 261014.005).  Three residuals were deliberately left out:
-
-1. **`MOE_EXPERT_CACHE_PREFILL_SEED` is still dead (F1/F6).**  The in-run `prefill_count` tally is gated
-   on `!g_sized` and the staged prefill path never reaches the host hook, so `pool_prepopulate_locked`
-   warms the `--host-experts pool` pinned tier in **expert-id order** and `pool_rerank_from_tally_locked`
-   remains an **uncalled function**.  The heat vector now covers the arena seed, so this is only the
-   host-pool warm order (and the dead function) — a small fix.
-2. **Decode-identity heat gap.**  A fully-resident table's decode traffic is still not tallied (the
-   identity take-over short-circuits `access_locked`); the prefill tally is a good proxy (measured), so a
-   sampled decode tally is optional polish.
-3. **`moe_cache_observe` is dead code** (superseded by `moe_cache_heat_observe`): remove it or wire it.
-
-Record: `archive/work/moe-heatmap-persistence/` (`RESOLUTION.md` lists these).
+The replayer does **not** model the persisted-prior seed, so it cannot currently tell those apart.  Step 0
+is to add it (`--seed heat|trace|none`, reading a real `.moe-heatmap` sidecar or the trace's first N
+passes) and publish the `{seed} x {churn}` decomposition.  If a heat-seeded arena lands near `static`, close
+the campaign with that measurement; if it stays near `shipped`, score the candidate admission/prefetch
+policies **offline** (lookback prefetch of the previous pass's routed set, heat-weighted victim choice,
+`admit=value` at the verify widths, decay-period sweep) before writing any C++.  Note the one result we
+already have: pass-start pre-admission (`window`) *lowers* `h` to 0.7846 while cutting traffic 25 %, so a
+prefetch is not automatically a win.  Design, invariants and gates:
+[`wip/moe-admission-quality/`](wip/moe-admission-quality/README.md).
 
 ## 65. IQ4_NL field (MTP) + `--host-experts pool` decode collapses — MEMORY
 

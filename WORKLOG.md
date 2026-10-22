@@ -1,5 +1,91 @@
 # WORKLOG - dated delivery records
 
+## 261022.005 (r110) -- the expert cache gets a policy instrument, and its two host-tally gaps close (TODO #61, #64)
+
+**Shipped:** `v14-097cf33d9-r110`, block **09** amended (blocks 10-13 are re-cut with a new `From` line
+and the same bodies; blocks 00-08 are byte-identical).  **No behaviour/throughput claim on the default
+path and no new default-on feature**: the changes are one opt-in diagnostic, two host-tally fixes, a
+reporting addition and one dead function removed.  Tree `5abfa8e4…`, ROCm 10.1.0, 2x R9700 gfx1201.
+Record: `archive/work/moe-cache-coverage/RESOLUTION.md`.
+
+**TODO #61 P1 -- the offline routing-trace replayer (the campaign's missing instrument).**  The campaign
+had only an aggregate heat vector, which cannot answer thrash/prefetch/window questions.  Now
+`MOE_EXPERT_TRACE=<path>` dumps every `mul_mat_id`'s raw routing and `scripts/moe-trace-replay.py`
+(stdlib, no model, no GPU) scores policies against it.  Two bands, two sources, neither able to disturb a
+captured graph: DECODE from the scheduler hook (the ids are already on the host -- no readback, no sync),
+PREFILL from the device entry (the staged prefill never brings the ids to the host; prefill is never
+captured, so one readback per op is legal).  A fully-resident (identity) table's decode band is not
+traced -- it cannot miss.  Opt-in only; `MOE_EXPERT_TRACE_MIB` (default 1024) caps the file.
+
+**TODO #61 P2 -- the per-layer capacity quota is measured and NOT shipped.**  On a real trace
+(Qwen3.6-35B-A3B UD-Q4_K_M, 2 GPU `-sm tensor -ncmoe 40`, `MOE_EXPERT_CACHE_MIB=4096` = 43.8 % residency,
+296-token prompt, 128 decode tokens, `MOE_EXPERT_HEATMAP=0` so the replayer's unseeded model is
+comparable): shipped `h` **0.8505** modelled vs **0.8248** logged (the model has no persisted prior, no
+seed and no arena shortfall -- judge deltas), quota **+0.0025 h / -1.6 % traffic**, oracle static top-f
+0.8765, static bound 96.14 % of the routed mass.  Per-layer routed mass is flat in the decode band, so
+the water-filled slot counts are uniform (113/table) except where the UD quant promotes a layer's
+`down_exps` to Q6_K (106).  That is the campaign's own 0.3-0.5 pt prediction, inside the trace-to-trace
+spread, for a sizing change that must preserve the layer-uniform re-size, the re-arm slot table and the
+`slots >= n_used*n_tok` decline bound.  Closed unshipped; the replayer's useful finding is elsewhere:
+the shipped policy sits **~11 pts of hit rate below an oracle static placement**, which is an
+admission-quality question (a history-driven prefetcher), not a slot-allocation one.
+
+**TODO #61 P3 -- metric parity.**  `moe_cache_report` now prints the resident set's **covered mass**
+against *this session's* routing (the `heat_delta` basis -- the persisted prior is a month-long aggregate
+and hides the session's own distribution), the **global-top-f static bound** at the same slot count, and
+the resident/expert slot counts, beside the existing `h` and expert MiB/token.  Field example
+(35B-A3B `-ncmoe 40`, `MIB=4096`, 296-token prompt): resident 77.8 % of the session's routed mass vs a
+98.2 % static bound.
+
+**TODO #64.1 -- the host pool's warm order.**  `MOE_EXPERT_CACHE_PREFILL_SEED`'s in-run tally only
+accumulates on the *eager* prefill path, and the default staged prefill intercepts the upload, so
+`pool_prepopulate_locked` warmed the `--host-experts pool` pinned tier in **expert-id order** and
+`pool_rerank_from_tally_locked` was an uncalled function.  A new `pool_rank_from_prefill_locked()` folds
+the **device** prefill tally in once, at the first decode-band pass after a prefill (gated on a
+prefill-op counter so a pre-warmup pass cannot consume the one-shot), and feeds both consumers.  Verified
+on 35B-A3B `-ncmoe 40 --host-experts pool`: pools created early are re-ranked ("pool re-ranked from
+prompt tally ... 144/207 slots") and later ones prewarm with the new log's `ranked by the prompt tally`
+instead of `ranked by expert id (no tally)`.  With `MOE_EXPERT_HEATMAP=0` the historical id order remains.
+
+**TODO #64.2 -- a fully-resident table's decode routing is now tallied, sampled.**  An identity table
+takes the fast path that never reads the routing back, so its decode traffic contributed nothing to the
+heat prior.  It is now tallied at the device entry, one op in `MOE_EXPERT_HEATMAP_DECODE_SAMPLE`
+(default 64, `0` off), **weighted by the period** so the counts match the exact tallies; every other
+table is still tallied exactly on the host (never double counted).  **The heat mirror is now
+pre-allocated at sizing**, because the decode band is a captured graph and a `cudaMalloc` there aborted
+with `operation failed due to a previous error during capture` (found and fixed in this session).  A/B on
+fully-resident gemma4-26B-A4B Q8_0 `-ncmoe 99`: sampled 942 092 150 vs 942 063 478 unsampled heat total
+= the 28 672 counts the decode band now contributes (was 0).
+
+**TODO #64.3 -- `moe_cache_observe` removed** (dead since `moe_cache_heat_observe` superseded it); the
+stale header comment that claimed the dispatch called it is corrected.
+
+**The new default-on knob is measurement-side only, and its overhead is measured at zero.**  It is
+explicitly **not** a new default-on performance feature (nothing in this amendment claims throughput):
+*Benefit* — an identity table's decode routing was previously invisible to the heat prior (prefill-only),
+so the prior a *later, partially-resident* run of the same model starts from was skewed to prefill.  When
+every table is fully resident the tally changes nothing in that run by construction (everything is
+resident); it warms the sidecar for the next run.  *Overhead* — one relaxed atomic increment per decode
+op (per layer x role, i.e. ~120-144 per token) and, for one op in 64, one mutex + a small map lookup +
+one 128-thread kernel launch (~1.9 sampled ops/token): fully-resident gemma4-26B-A4B Q8_0
+(`-ncmoe 99`, 2 GPU, 400 tokens, `--temp 0`) measured **75.8 / 75.7 t/s** at sample=64 and
+**75.7 / 75.8** at sample=0, i.e. inside the +/-0.13 % run-to-run noise.  `0` disables it.
+
+**TODO #86 opened (scoping) — the campaign's follow-on.**  The replayer's real number is the ~11 pt gap
+between the shipped policy and an oracle static placement, which the slot-quota question was never about.
+New `wip/moe-admission-quality/` (TODO #86), offline-first: step 0 adds a `--seed heat|trace` model to the
+replayer so the gap decomposes into *foreknowledge* (the persisted prior) and *churn* (eviction); only a
+candidate that wins there is written in C++.  Its first measured warning is already in hand: pass-start
+pre-admission *lowers* `h` (0.7846) while cutting traffic 25 %, so prefetch is not automatically a win.
+
+**Gates.**  Same-seed coherence A/B on the cache-on config (35B-A3B Q4_K_M, 2 GPU `-sm tensor
+-ncmoe 40`, `MIB=4096`, `-n 48 --seed 42 --temp 0`): **byte-identical**, `206 chars sha=cf7f8b23f404`
+before and after.  `scripts/gate-prefill-logits.sh`: **PASS**, mean KLD 0.000000, same-top-p
+100.000 %.  Decode purity smoke (35B-A3B Q8_0, 2 GPU, `-ncmoe 40`, 296-token prompt, `-n 800
+--ignore-eos`): `--spec-type none` == `draft-mtp-adaptive --spec-draft-n-max 3`, `4262 chars
+sha=801a9fa3ebc0` (MTP active: 174.8 vs 112.7 t/s).  `scripts/validate-set.sh`: green (14/14 strict
+apply on a fresh tarball, tree `5abfa8e4…`).
+
 ## 261022.004 (r109) -- the MTP draft-vocab validation arms closed (3 GPU is NEGATIVE, depth flat, MoE neutral)
 
 > **Numbering note — this item is `TODO` #85.**  #83 was already used once before: the gemma-4 bf16 K/V

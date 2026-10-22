@@ -164,7 +164,7 @@ stub alive to serve them, and treat a `wip/` path in an old record as a historic
   Without it, the interactive chat loop blocks forever. Wrap potentially blocking commands in `timeout`.
 - **Apply method:** all 14 blocks with **`git am`**; `scripts/apply-all.sh` is the tested path. Plain
   `git apply` of the concatenated series **silently drops hunks**. Every block is a normal commit.
-- **Naming (V2.1):** the current set is **14 blocks, 00-13** (`v14-097cf33d9-r109`).  Every `block NN`
+- **Naming (V2.1):** the current set is **14 blocks, 00-13** (`v14-097cf33d9-r110`).  Every `block NN`
   reference elsewhere in this file that is not one of the V2.1 numbers below is the **pre-V2.1 16-block
   numbering** and is kept as a historical handle.  The V2.1 map: **01** all-reduce, **02** adaptive MTP,
   **03** chunked GDN, **04** BF16 KV, **05** FA band/native/derived, **06** MMB, **07** k-quant,
@@ -203,6 +203,22 @@ stub alive to serve them, and treat a `wip/` path in an old record as a historic
   the draft's compute buffer exceeds the unmapped VA spare (a tensor-split drafter's is 1280 MiB against the
   estimator's 512 MiB tier; without it `-sm tensor` + draft + `-ncmoe` aborts in `graph_reserve`).  Rule:
   `patches/README.md` (block 12, "Facts that span blocks").
+- **The expert cache's routing trace is opt-in and is the policy instrument (r110, TODO #61 P1).**
+  `MOE_EXPERT_TRACE=<path>` writes every `mul_mat_id`'s raw routing (`scripts/moe-trace-replay.py` scores
+  policies against it offline: the shipped F-LRU, static top-f, per-layer quota, window/prefix
+  pre-admission).  DECODE records come from the scheduler hook (the ids are already on the host);
+  PREFILL records come from the device entry and pay one readback per op (prefill is never captured, so
+  that is legal).  An IDENTITY (fully resident) table's decode routing is not traced -- it cannot miss.
+  The trace is a *diagnostic* (never default-on) and its absolute hit rate is a model, not the cache:
+  judge a policy by its delta.  `MOE_EXPERT_TRACE_MIB` (default 1024) caps the file.
+- **Two host-tally gaps are closed and must stay closed (r110, TODO #64).**  (1) The host pool's warm
+  order comes from the *device* prefill tally, folded in once at the first decode-band pass
+  (`pool_rank_from_prefill_locked`): the eager `prefill_count` path never runs under the staged prefill,
+  which left `pool_rerank_from_tally_locked` uncalled and warmed the pool in expert-id order.  (2) A
+  fully-resident (identity) table's decode routing is tallied device-side, **sampled**
+  (`MOE_EXPERT_HEATMAP_DECODE_SAMPLE`, default 64, 0 off) and weighted by the period.  The heat mirror
+  is pre-allocated at sizing: the decode band is a captured graph and a `cudaMalloc` there aborts the
+  capture (`operation failed due to a previous error during capture`).
 - **Thread sizing is not optional.** `/usr/local/bin/pin_gpu_irqs.sh` puts the GPU IRQs on the top
   `NUM_GPUS` cores (13,14,15 with 3 GPUs); the default `-t` puts the worker pool there and starves the
   GPU (Q4_K_M `-ncmoe 99` tg1024: `-t 16` 19.6 vs `-t 8` 38.9). Size `-t` (or `--cpu-mask` with `-t`

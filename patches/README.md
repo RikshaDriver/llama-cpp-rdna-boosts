@@ -405,6 +405,22 @@ whatever VRAM is left.
 * `moe-expert-cache.cu` (~5.1k lines) + `.h`: the cache engine — arena sizing, per-layer uniform slots,
   the slot remap, the routed-MMVQ decode/verify band (`moe_cache_band`), admission/heat policy, the
   persistent cross-run heat map (`MOE_EXPERT_HEATMAP`) and prefill cache staging.
+* **The cache has an offline policy instrument, and two host-tally gaps are closed** (r110, TODO #61 P1/P3
+  + TODO #64.1/.2/.3).  `MOE_EXPERT_TRACE=<path>` dumps the raw routing of every `mul_mat_id` for
+  `scripts/moe-trace-replay.py`, which scores the shipped F-LRU, an oracle static top-f, a per-layer
+  capacity quota and pass-start pre-admission against a real trace — the instrument the coverage campaign
+  lacked (it had only an aggregate heat vector).  DECODE records come from the scheduler hook (ids
+  already on the host); PREFILL records come from the device entry and pay one readback per op, which is
+  legal because a prefill ubatch is never captured.  `pool_rank_from_prefill_locked` gives the
+  `--host-experts pool` warm order the *device* prefill tally (the eager `prefill_count` never runs under
+  the staged prefill, so the pool was warmed in expert-id order and `pool_rerank_from_tally_locked` was
+  dead); and a fully-resident (identity) table's decode routing — invisible to every host tally — is now
+  tallied device-side, **sampled and weighted** (`MOE_EXPERT_HEATMAP_DECODE_SAMPLE`, default 64).  The
+  heat mirror is pre-allocated at sizing because the decode band is a captured graph and a `cudaMalloc`
+  there aborts the capture.  The report gains **metric parity**: the resident set's covered mass of this
+  session's routed mass, the global-top-f static bound at the same slot count, and (already there)
+  expert MiB/token.  `moe_cache_observe` (dead, superseded by `moe_cache_heat_observe`) is removed.  No
+  numerics change: same-seed text is byte-identical.  `WORKLOG.md` 261022.005.
 * `ggml-cuda.cu`: the **op-offload H2D staging ring** (three invariants: prefill is never graph-captured,
   the width gate is floored at 64 tokens, the arena lives outside the compute-graph reserve), the pinned
   `ROCm_Host` master, the per-device host buffer types, and the base of the async graph-input ring.
