@@ -1,7 +1,7 @@
-From 2e258d3b113213fbd49cd7c33bf686d9d7af3fdb Mon Sep 17 00:00:00 2001
+From 6adf7cf99c9a11b16e1bbe3fc1b63a2fae707633 Mon Sep 17 00:00:00 2001
 From: Stew Forster <ci@rdna-boosts.invalid>
 Date: Wed, 21 Oct 2026 10:40:32 -0500
-Subject: [PATCH 11/11] rdna-boosts: block 11: campaign remainder (CPU wins,
+Subject: [PATCH 11/12] rdna-boosts: block 11: campaign remainder (CPU wins,
  backend iface fills, DFlash, FA build grouping)
 
 The delivery content not owned by blocks 00-10: the CPU top-k block prefilter

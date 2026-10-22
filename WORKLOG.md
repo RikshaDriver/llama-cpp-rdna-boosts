@@ -1,5 +1,80 @@
 # WORKLOG - dated delivery records
 
+## 261022.002 (r108) -- block 10 amendment: the gate/beta BF16 fusion was wrong for every sequence but the first (issue #204)
+
+**Release `v13-097cf33d9-r108`**, 13 blocks, fork point `097cf33d9`, tip `70815f407`, tree
+`8e67f977c02faee882ce2966cdc9bd79db9134d3`.  One block amendment (**10**, which owns `mmvf.cu` and the
+PR #200 fusions per the r102 fold rule); blocks 00-09 are byte-identical commits, 11-12 re-cut with the same
+trees.  Reported by @briansp2020 with the fix; the campaign record (probe harness, the sweep, all raw logs)
+is in `archive/work/issue-204-gate-beta-multiseq/`, doctrine in `GREEDY-PURITY.md` §49.
+
+**What was broken.**  `ggml_cuda_gate_beta_bf16_try_fuse` (r102) collapses the GDN alpha/beta chain into one
+`mul_mat_vec_f` launch, and it passed the chain's gate `MUL` as the launch `dst`.  The launch takes its column
+count from `dst->ne[1]` and its channel count from `dst->ne[2]`; with one sequence the gate MUL is
+`[nr, n_tokens, 1]` and matches the projection, but in a multi-sequence ubatch it is
+`[nr, n_seq_tokens, n_seqs]` against `y = [ne10, n_tokens]` with one channel.  Every channel past the first
+therefore re-ran the beta rows and wrote the gate/beta values computed from `y`'s **first `n_seq_tokens`
+columns**: each sequence but the first silently took sequence 0's alpha/beta gates (and `n_seqs`x redundant
+beta work).  **Correction to the report's mechanism, same bug and same fix:** `y`'s channel index is
+`fastmodulo(channel, nchannels_y=1)`, so the kernel does not read `y` past its end and its writes stay inside
+`gate_mul`/`beta_w` (both have `n_seqs x n_seq_tokens` columns) - the defect is wrong values for sequences
+1..n-1, not an overrun.
+
+**Why the gates missed it.**  Single-sequence decode/verify is unaffected (identical shapes), the text stays
+coherent, and it needs a BF16 `ssm_alpha`/`ssm_beta` (a BF16-tensor GGUF - our Q8_0 set takes the separate,
+correct `GGML_CUDA_FUSE_GATE_BETA_VERIFY` arm, and F32 tensors take neither).  It was caught only with
+multi-sequence serving.  **New finding - the exposure band is per projection:** the fusion runs only where the
+plain matmul would be an MMVF, and `ggml_cuda_should_use_mmvf` returns `ne11 <= 3` for BF16 once
+`should_use_mmf` is applicable.  A 48-row projection (Qwen3.8-27B, Flash-Next) keeps the whole 8-token band on
+gfx1201 - so 4 concurrent requests x 2 tokens *is* exposed on our box - while a 32-row one (Qwen3.5-4B) only
+reaches 3.
+
+**The fix.**  Launch with the projection's own shape: `ggml_tensor dst_flat = *alpha_w;
+dst_flat.data = gate_mul->data;`.  Both tensors are contiguous with the same element count (the matcher already
+checks it), so it is the same memory written flat.  A single-sequence launch is byte-for-byte identical
+(ne/nb/data/op_params), so single-stream numerics cannot move; multi-sequence now matches the unfused chain
+exactly.
+
+**New regression gate (`tests/test-fusion-gate-beta-multiseq.cpp`, shipped, built by default, ctest-registered).**
+No model needed.  For `(n_seq_tokens, n_seqs)` = (1,1) (2,1) (3,1) (4,1) (1,2) (1,3) (1,4) (2,2) (3,2) (2,3)
+(2,4) it builds the chain on the GPU backend and compares the fused launch with the same graph made ineligible
+for fusion (one extra consumer of the `ADD` output makes `ggml_can_fuse_subgraph` reject the window), requiring
+**bit-identical** gate and beta values.  The fusion's fire is proven directly: the fused launch skips
+ADD/UNARY/MUL, so the `SOFTPLUS` output is left at a NaN sentinel - a change that made the matcher stop firing
+fails the test instead of passing it vacuously.  On the r107 build it exits **2 with 7 failing rows** (all
+multi-sequence rows, `maxdiff` 0.75-1.58); on r108 **PASS, 11/11 fused, 0 failed**.
+
+**Evidence (gfx1201, 2026-10-22, `ROCBLAS_USE_HIPBLASLT=0`).**  A lockstep probe (one token per sequence in one
+batch, distinct prompts) gives bit-identical logits for two runs of the same arm, so arms compare exactly:
+`n_seqs = 1` pre-fix == post-fix == fusion-off; `n_seqs = 2, 3` pre-fix **differ at every step** (sequence 0
+unaffected, sequences >= 1 wrong and equal to each other); post-fix all arms identical and equal to the pre-fix
+**unfused** reference.  Reproduced and fixed on Qwen3.8-27B-BF16 (3 GPU `-sm layer` **and** `-sm tensor`) and on
+Flash-Next GSQ IQ3_XXS (qwen4exp, 3 GPU - the reporter's model class, which does carry BF16 gate weights).
+Single-stream is unchanged: 4B/27B/35B-A3B greedy text identical between the r107 and r108 builds, and the
+prefill-logit A/B against the pre-fix build is mean KLD **0.000000** (same-top-p 100.000 %) at `-ub 8` and
+`-ub 512` on 27B Q8_0 - mmvf is the decode/verify band only, so the prefill gate is not applicable and this
+A/B is the stronger form of "prefill did not move".
+
+**Full fusion-family sweep (the report asked for the siblings).**  Seven switches x the models that fire each
+arm, switch on vs off, multi-sequence logits compared bit-exactly, and the fusion-skip signature compared to
+prove each arm fired: `GATE_BETA_BF16` (4B BF16, Flash-Next) - **was the only broken one**; `GATE_BETA_VERIFY`
+(27B Q8_0), `GDN_GATE` (all), `GDN_BETA_SIGMOID` (all), `GDN_CONV_NORM` (dummy qwen4exp), `CONT_GATE_Q8_1`
+(27B Q8_0, Flash-Next) and the GDN snapshot-copy fusion (`GGML_CUDA_DISABLE_GDN_CPY`) are all identical
+post-fix, and identical *pre-fix* too (so no second defect).  `GDN_NORM_GATE` never fired in any multi-sequence
+run - its guard bails on `xn->ne[3] != 1`, an explicit sequence dimension - and its kernel is
+`ggml_nelements`-based anyway.
+
+**Throughput.**  4B BF16 1 GPU, np = concurrent slots, 2 runs each: **64.2 / 114.6 / 165.6 t/s** pre-fix vs
+**64.2 / 114.4 / 165.5 t/s** post-fix at np = 1/2/3 - unchanged.  On our box the false gates cost no
+throughput at 2-3 streams; the reporter's 4-stream -3.5 % was mostly the draft-acceptance loss (0.85 -> 0.82
+with MTP), which is why the correctness fix is the whole of it.
+
+**Validation.**  `scripts/validate-set.sh` green (13/13 strict `git am` from a fresh tarball, applied tree ==
+`release.json.tree`); `scripts/gate-per-block-build.sh --changed-from f2ee094df` **2/2** (block 10 and the tip,
+the other 11 patch-identical); the new test PASS on the release tree and exit 2 on the r107 library.  Not run:
+`test-backend-ops` (no op, op instantiation or dispatch predicate changed - the diff is one launch argument in
+one fusion and a new test file) and `gate-per-block-build` for the untouched blocks (patch-identical).
+
 ## 261022.001 (r107) -- block 12: the MTP draft vocabulary subset (`--spec-draft-mtp-vocab N`, opt-in)
 
 **Release `v13-097cf33d9-r107`**, 13 blocks, fork point `097cf33d9`, tip `25bec484e`, tree

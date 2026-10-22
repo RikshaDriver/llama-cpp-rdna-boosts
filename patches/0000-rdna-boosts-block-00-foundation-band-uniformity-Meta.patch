@@ -1,7 +1,7 @@
-From a1ac43a35a4423d82713b0e47242387a97affcfb Mon Sep 17 00:00:00 2001
+From 7526f111a921ead4e3878e97ea68cfd430747ff0 Mon Sep 17 00:00:00 2001
 From: Stew Forster <ci@rdna-boosts.invalid>
 Date: Wed, 21 Oct 2026 10:40:31 -0500
-Subject: [PATCH 00/11] rdna-boosts: block 00: foundation - band-uniformity,
+Subject: [PATCH 00/12] rdna-boosts: block 00: foundation - band-uniformity,
  Meta-wrapper and allocator fixes
 
 Groundwork block (multiple base-level concerns, by design):

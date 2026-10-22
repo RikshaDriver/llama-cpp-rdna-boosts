@@ -108,6 +108,7 @@ numbers are **stable** — dozens of docs cite them — so they are never renumb
 | **§46** | a tile→WMMA family switch is judged at a calibrated point (base PPL in the gate's domain) against a same-kernel ubatch control; the r102 head-512 rows pass there | doctrine (r102, TODO #81 closed 2026-10-21) |
 | **§47** | an exact F32 GEMM in a different summation order is a family switch too; own the path in-code and judge it against the same-kernel control (12/12 fresh starts determinism, +4.2 % prefill) | fix (r104, TODO #82 closed; default extended to RDNA3_5 in r105) |
 | **§48** | a draft-side vocabulary restriction cannot change an accepted token, but the verify *schedule* can change the text: gate it inside `n_max <= 7` | doctrine (r107, block 12) |
+| **§49** | a fused chain's launch geometry comes from the *flat* projection, never from a consumer's `[…, n_seq_tokens, n_seqs]` view: gate the multi-sequence batch, not just `W = 1..8` single-stream | fix (r108, issue #204) |
 
 ---
 
@@ -1139,3 +1140,48 @@ changes).  Inside the band, all widths take the same kernels, so the schedule do
 So: gate the trim at `n_max <= 7` (text identity against plain decode is then a valid, strong check), or above
 it on acceptance + MTP-vs-plain — exactly what `benchmarks/mtp-adaptive-methodology.md` rule 4 already says for
 any speculator.  Recommended configuration for the block: `--spec-draft-n-max 7 --spec-draft-mtp-vocab 98304`.
+
+## 49. A fused chain's launch geometry comes from the flat projection, not from a consumer's reshaped view
+
+**Claim.**  The GDN gate/beta fusions replace an unfused chain whose tensors are reshaped for the graph
+(`alpha = MUL_MAT(wa, y)` is `[nr, n_tokens]`, then `RESHAPE3D` to `[nr, n_seq_tokens, n_seqs]`, then
+`ADD(dt)`, `SOFTPLUS`, `MUL(a)` and a `RESHAPE4D` back).  When that chain is collapsed into one `mmvf` /
+`mmvq` launch, the launch geometry must describe the **projection**: `dst->ne[1]` columns and `dst->ne[2]`
+channels with `y`'s own shape.  The r102 form (`GGML_CUDA_FUSE_GATE_BETA_BF16`, `mmvf.cu`) passed the gate
+chain's `MUL` as dst instead, so with more than one sequence in the ubatch the launch saw
+`[nr, n_seq_tokens, n_seqs]` against a flat `y` with one channel: every channel past the first re-ran the
+beta rows and wrote the values computed from `y`'s first `n_seq_tokens` columns.  **Every sequence but the
+first silently took sequence 0's alpha/beta gates.**  The text stays coherent (the gates are all plausible
+decays), so same-seed greedy text, `W = 1..8` width probes and MTP acceptance are all blind to it — only
+multi-sequence serving sees it (issue #204: 4-stream draft acceptance 0.85 → 0.82, 4-stream throughput
+−3.5 %).  The fix is to launch with the projection's own shape (`ggml_tensor dst_flat = *alpha_w;
+dst_flat.data = gate_mul->data;`): both tensors are contiguous with the same element count, so it is the
+same memory written flat, and a single-sequence launch is byte-for-byte unchanged.
+
+**Rule.**  Gate a fusion on the **multi-sequence** batch, not only on the single-stream width band:
+`tests/test-fusion-gate-beta-multiseq.cpp` (shipped in r108) builds the chain for a matrix of
+`(n_seq_tokens, n_seqs)` shapes with no model, compares the fused launch against the same graph with the
+fusion made ineligible (one extra consumer of the `ADD` output makes `ggml_can_fuse_subgraph` reject the
+window), requires bit-identical gate and beta values, and proves the fusion fired by leaving the skipped
+`SOFTPLUS` output at a NaN sentinel — so a change that silently stops matching fails the test instead of
+passing it vacuously.  Any new fusion that consumes a reshaped chain belongs in that matrix.
+
+Two facts a reviewer needs.  (1) **The exposure band is per model**, because a fusion only runs where the
+plain matmul would be an `MMVF`/`MMVQ` of the right family: `ggml_cuda_should_use_mmvf` returns
+`ne11 <= 3` for BF16 on a device with bf16 MMA when `should_use_mmf` is applicable (a 48-row projection such
+as Qwen3.8-27B / Flash-Next keeps the whole 8-token band; a 32-row one, e.g. Qwen3.5-4B, is limited to 3), so
+"4 streams × 2 tokens" is exposed on the 27B-class projections on gfx1201 too — the incident's shape.  (2)
+`GGML_CUDA_FUSE_GATE_BETA_VERIFY` (the Q8_0 sibling, `mmvq.cu`) was **never** affected: it sizes itself from
+`ggml_nelements(dst) == nrows*ncols` with contiguous dsts and asserts it, which is exactly the shape rule
+above.
+
+**Evidence (gfx1201, 2026-10-22).**  Lockstep probe (one token per sequence in one batch, distinct prompts,
+8× R9700/…): `n_seqs = 1` fused == unfused and pre-fix == post-fix (bit-identical logits); `n_seqs = 2, 3`
+(pre-fix) differ from the unfused arm at every step, sequence 0 unaffected, sequences ≥ 1 wrong and equal to
+each other; post-fix all arms bit-identical, and the post-fix fused arm equals the pre-fix **unfused**
+reference.  Same on Qwen3.8-27B-BF16 (3 GPU, `-sm layer` and `-sm tensor`) and on Flash-Next GSQ IQ3_XXS
+(qwen4exp, 3 GPU) — the reporter's model class.  `test-fusion-gate-beta-multiseq`: **exit 2 with 7 failing
+rows** on the r107 build, **PASS (11/11 fused, 0 failed)** on r108.  Single-stream is unchanged: 4B/27B/
+35B-A3B greedy text identical pre/post, and the prefill-logit A/B against the pre-fix build measures mean
+KLD **0.000000** at `-ub 8` and `-ub 512` (27B Q8_0) — mmvf is the decode/verify band only.  Full family
+sweep (7 switches × the models that fire each arm): every other arm was already multi-sequence-clean.

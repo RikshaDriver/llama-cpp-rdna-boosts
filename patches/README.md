@@ -607,7 +607,15 @@ fusions.
   `mul_mat_vec_f` launch (`GGML_CUDA_FUSE_GATE_BETA_BF16`), the q/k l2 norm pair folded into the direct conv
   kernel (`GGML_CUDA_FUSE_GDN_CONV_NORM`), the attention gate's row-strided view read in place by the
   gate → Q8_1 kernel so its `CONT` copies nothing (`GGML_CUDA_FUSE_CONT_GATE_Q8_1`), and qwen4exp's GDN
-  output `RMS_NORM * w` computed inside the gate kernel (`GGML_CUDA_FUSE_GDN_NORM_GATE`).  Two correctness
+  output `RMS_NORM * w` computed inside the gate kernel (`GGML_CUDA_FUSE_GDN_NORM_GATE`).  **Multi-sequence
+  fix (r108, issue #204):** `GGML_CUDA_FUSE_GATE_BETA_BF16` launched the gate chain's `MUL` as the `mmvf`
+  dst, so with more than one sequence in a ubatch the launch geometry was the consumer's
+  `[nr, n_seq_tokens, n_seqs]` view against a flat one-channel `y`: every sequence but the first got
+  sequence 0's alpha/beta gates (text stayed coherent; only multi-sequence serving saw it).  It now launches
+  with the projection's own shape, which is the same memory written flat, so single-sequence launches are
+  byte-identical and multi-sequence matches the unfused chain exactly.  `tests/test-fusion-gate-beta-multiseq.cpp`
+  (also r108) is the regression gate: it needs no model, compares fused vs forced-unfused for a matrix of
+  `(n_seq_tokens, n_seqs)` shapes and fails if the fusion stops firing (`GREEDY-PURITY.md` §49).  Two correctness
   rules came with them: the conv-norm fold is taken only when both SCALE outputs are disjoint from the
   conv's `x`/state/weight/output (the allocator may place them over the state or `x`, which the direct
   kernel still reads — without the check 35B-A3B varied run to run), and the GDN-norm fold has its skip and
@@ -662,7 +670,8 @@ fusions.
 `GGML_CUDA_SLAB_STATS` / `_GRAPH_TRACE`, `GGML_CUDA_ASYNC_INPUT_BATCH` / `_LAZY_DONE` / `_DEBUG`,
 `GGML_CUDA_GDN_TAIL`, `GGML_CUDA_GRAPH_MEM_GEN`, `GGML_META_SPLIT_COPY`, `GGML_META_SEG_ASYNC`,
 `GGML_CUDA_FUSE_GATE_BETA_BF16` / `GGML_CUDA_FUSE_GDN_CONV_NORM` / `GGML_CUDA_FUSE_CONT_GATE_Q8_1` /
-`GGML_CUDA_FUSE_GDN_NORM_GATE` (r102, all default-on kill-switches),
+`GGML_CUDA_FUSE_GDN_NORM_GATE` (r102, all default-on kill-switches; the first is multi-sequence-clean since
+r108 and has a shipped regression test),
 `GGML_CUDA_DISABLE_ROPE_FWHT_SET_ROWS` (now live on iSWA archs, not only on the non-iSWA builder),
 `LLAMA_KV_N_PAD_PREFILL`(+`_FROM`/`_MIN`), `LLAMA_QSA_*`, `GGML_QSA_*`, `LLAMA_HC_*` / `GGML_HC_*`,
 `LLAMA_MTP_SPARSE`.

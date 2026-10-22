@@ -1,7 +1,7 @@
-From 8dff73e5fb1974e7a93281c4170c1c1b36b3d92c Mon Sep 17 00:00:00 2001
+From 3c9aebe584324305ace96923c923db10a0edfd79 Mon Sep 17 00:00:00 2001
 From: Stew Forster <ci@rdna-boosts.invalid>
 Date: Wed, 21 Oct 2026 10:40:32 -0500
-Subject: [PATCH 10/11] rdna-boosts: block 10: qwen4exp (model,
+Subject: [PATCH 10/12] rdna-boosts: block 10: qwen4exp (model,
  hyper-connections, lazy reader, QSA/indexer)
 
 old-14's qwen4exp support plus old-15's qwen4exp/QSA/HC content, kept as ONE
@@ -165,6 +165,32 @@ RMS_NORM / SCALE / MUL_MAT oracles 0 failures; rule-5 batched decode within
 noise at B=1/4/8.  Decode: 27B MTP +0.2-0.3 %, Flash-Next 2 GPU tensor +0.7 %,
 35B-A3B 1 GPU tg128 -0.2 % (i.e. flat; the submitter's +0.5 % did not
 reproduce).  No GPU faults.
+
+GDN gate/beta BF16 fusion: multi-sequence fix + regression test (issue #204, r108).
+ggml_cuda_gate_beta_bf16_try_fuse passed the gate chain's MUL as the mmvf dst.  The
+launch takes its column count from dst->ne[1] and its channel count from dst->ne[2];
+with more than one sequence the gate MUL is [nr, n_seq_tokens, n_seqs] while the
+projections and y are flat [nr, n_tokens] / [ne10, n_tokens] with one channel, so
+every channel past the first re-ran the beta rows and wrote the alpha/beta values
+computed from y's first n_seq_tokens columns: every sequence but the first silently
+took sequence 0's gates.  The text stays coherent, which is why the same-seed and
+MTP gates never saw it - only multi-sequence serving did (reported 4-stream draft
+acceptance 0.85 -> 0.82 at n_seq_tokens 2).
+
+The launch now uses the projection's own shape: both tensors are contiguous with
+the same element count (checked by the matcher), so it is the same memory, written
+flat.  A single-sequence launch is unchanged (identical ne/nb/data), so single-stream
+numerics are bit-identical; multi-sequence decode/verify now matches the unfused
+chain exactly.
+
+tests/test-fusion-gate-beta-multiseq.cpp is the regression test.  It needs no model:
+it builds the chain for a matrix of (n_seq_tokens, n_seqs) shapes on the GPU
+backend, compares the fused launch against the same graph with the fusion made
+ineligible (one extra consumer of the ADD output makes ggml_can_fuse_subgraph
+reject the window), requires bit-identical gate and beta values, and proves the
+fusion actually fired (the skipped SOFTPLUS output is left at a NaN sentinel), so
+a change that silently stops matching fails the test instead of passing it
+vacuously.
 ---
  common/arg.cpp                                |    3 +-
  ggml/include/ggml-alloc.h                     |   13 +
@@ -221,7 +247,7 @@ reproduce).  No GPU faults.
  ggml/src/ggml-cuda/mmid.cu                    |  240 +-
  ggml/src/ggml-cuda/mmq.cu                     |  141 +
  ggml/src/ggml-cuda/mmq.cuh                    |    6 +
- ggml/src/ggml-cuda/mmvf.cu                    |  279 +-
+ ggml/src/ggml-cuda/mmvf.cu                    |  289 +-
  ggml/src/ggml-cuda/mmvf.cuh                   |   10 +-
  ggml/src/ggml-cuda/mmvq-moe.cu                |  359 ++
  ggml/src/ggml-cuda/mmvq-moe.cuh               |   14 +
@@ -270,13 +296,14 @@ reproduce).  No GPU faults.
  src/llama.cpp                                 |   18 +-
  src/models/models.h                           |   62 +-
  src/models/qwen4exp.cpp                       | 2295 ++++++-
- tests/CMakeLists.txt                          |    1 +
+ tests/CMakeLists.txt                          |    3 +
  tests/test-backend-ops.cpp                    |  406 +-
+ tests/test-fusion-gate-beta-multiseq.cpp      |  278 +
  tests/test-lazy-reader.cpp                    |  264 +
  tests/test-llama-archs.cpp                    |   12 +-
  tests/test-logits-width-probe.cpp             |   44 +-
  tools/server/server-context.cpp               |   30 +-
- 110 files changed, 23261 insertions(+), 5154 deletions(-)
+ 111 files changed, 23551 insertions(+), 5154 deletions(-)
  create mode 100644 ggml/src/ggml-cuda/fattn-qsa.cu
  create mode 100644 ggml/src/ggml-cuda/fattn-qsa.cuh
  create mode 100644 ggml/src/ggml-cuda/fattn-qsa3.cu
@@ -300,6 +327,7 @@ reproduce).  No GPU faults.
  create mode 100644 ggml/src/ggml-cuda/mmvq-vecdot.cuh
  create mode 100644 src/llama-lazy-reader.cpp
  create mode 100644 src/llama-lazy-reader.h
+ create mode 100644 tests/test-fusion-gate-beta-multiseq.cpp
  create mode 100644 tests/test-lazy-reader.cpp
 
 diff --git a/common/arg.cpp b/common/arg.cpp
@@ -22552,7 +22580,7 @@ index f849c2e01..01f33c5c2 100644
 +int ggml_cuda_mul_mat_q_swiglu_try_fuse(ggml_backend_cuda_context & ctx, const ggml_cgraph * cgraph, int i);
 +int ggml_cuda_mul_mat_q_swiglu_dense_try_fuse(ggml_backend_cuda_context & ctx, const ggml_cgraph * cgraph, int i);
 diff --git a/ggml/src/ggml-cuda/mmvf.cu b/ggml/src/ggml-cuda/mmvf.cu
-index 2870a51c6..8b0014088 100644
+index 2870a51c6..09dec576b 100644
 --- a/ggml/src/ggml-cuda/mmvf.cu
 +++ b/ggml/src/ggml-cuda/mmvf.cu
 @@ -4,22 +4,26 @@
@@ -22836,7 +22864,7 @@ index 2870a51c6..8b0014088 100644
                  ne02, nchannels_y, nchannels_dst, s02, stride_channel_y, stride_channel_dst,
                  ne03,              ne3,           s03, s13,              s3,                 ids_stride, prec, ctx.stream());
          } break;
-@@ -1041,3 +1241,68 @@ bool ggml_cuda_should_use_mmvf(enum ggml_type type, int cc, int warp_size, const
+@@ -1041,3 +1241,78 @@ bool ggml_cuda_should_use_mmvf(enum ggml_type type, int cc, int warp_size, const
              return false;
      }
  }
@@ -22902,7 +22930,17 @@ index 2870a51c6..8b0014088 100644
 +    gb.gb_dt    = (const float *) dt->data;
 +    gb.gb_a     = (const float *) ssm_a->data;
 +    gb.gb_nrows = (int) nr;
-+    ggml_cuda_mul_mat_vec_f(ctx, wa, y, nullptr, gate_mul, nullptr, &gb);
++    // Launch with the projection's own shape, not the gate MUL's.  The launch takes its column count from
++    // dst->ne[1] and its channel count from dst->ne[2], but with more than one sequence the unfused chain's
++    // shapes are [nr, n_seq_tokens, n_seqs] for the gate MUL (and for the beta store) while the projections
++    // and y are flat [nr, n_tokens] / [ne10, n_tokens].  Taking the gate MUL's dst, a multi-sequence decode
++    // (e.g. 2 sequences x 1 token: dst [nr, 1, 2] against y [ne10, 2], one channel) would run the beta rows
++    // once per channel and write every channel from y's first n_seq_tokens columns - i.e. sequences 1..n-1
++    // got sequence 0's alpha/beta gates (issue #204).  Both tensors are contiguous with the same element
++    // count (checked above), so the projection's shape is the same memory, written flat.
++    ggml_tensor dst_flat = *alpha_w;
++    dst_flat.data = gate_mul->data;
++    ggml_cuda_mul_mat_vec_f(ctx, wa, y, nullptr, &dst_flat, nullptr, &gb);
 +    return 7;
 +}
 diff --git a/ggml/src/ggml-cuda/mmvf.cuh b/ggml/src/ggml-cuda/mmvf.cuh
@@ -32447,10 +32485,19 @@ index c1771fcad..fa5935b86 100644
      ple_inp->rows = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_heads * n_tokens);
      ggml_set_input(ple_inp->rows);
 diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
-index 241d3915b..5c85070f6 100644
+index 241d3915b..a4f88b006 100644
 --- a/tests/CMakeLists.txt
 +++ b/tests/CMakeLists.txt
-@@ -216,6 +216,7 @@ if (NOT WIN32 OR NOT BUILD_SHARED_LIBS)
+@@ -169,6 +169,8 @@ endif ()
+ llama_build(test-recurrent-state-rollback.cpp)
+ llama_build(test-recurrent-state-depth.cpp)
+ llama_build(test-logits-width-probe.cpp)
++# multi-sequence gate/beta fusion regression (issue #204): no model needed, skips without a CUDA device
++llama_build_and_test(test-fusion-gate-beta-multiseq.cpp LINK ggml)
+ llama_build(test-save-load-state.cpp)
+ 
+ if (NOT WIN32 OR NOT BUILD_SHARED_LIBS)
+@@ -216,6 +218,7 @@ if (NOT WIN32 OR NOT BUILD_SHARED_LIBS)
      # llama_build_and_test(test-double-float.cpp) # SLOW
  
      llama_build(test-llama-archs.cpp)
@@ -33024,6 +33071,290 @@ index df66a5e17..3315266c4 100644
      // Flash attention perf: head 256 (default-on WMMA) vs 512/320/576 (DKQ != DV).
      // A/B with GGML_CUDA_FA_WMMA_256=0 (forces the tile kernel for head > 128 on RDNA4).
      for (const auto & fa : {std::tuple<int,int,int,int,int>{256, 256, 8, 4, 256},
+diff --git a/tests/test-fusion-gate-beta-multiseq.cpp b/tests/test-fusion-gate-beta-multiseq.cpp
+new file mode 100644
+index 000000000..03ac81bd2
+--- /dev/null
++++ b/tests/test-fusion-gate-beta-multiseq.cpp
+@@ -0,0 +1,278 @@
++// Multi-sequence regression test for the GDN gate/beta decode fusions (issue #204).
++//
++// The GPU gate/beta fusions (GGML_CUDA_FUSE_GATE_BETA_BF16, mmvf.cu, and its Q8_0 sibling
++// GGML_CUDA_FUSE_GATE_BETA_VERIFY, mmvq.cu) replace the unfused chain
++//
++//     alpha = MUL_MAT(alpha_w, y);  a3 = RESHAPE3D(alpha, nr, T, S);  bias = a3 + dt;
++//     sp = SOFTPLUS(bias);  gate = sp * ssm_a;  gate4 = RESHAPE4D(gate, 1, nr, T, S)
++//     beta = MUL_MAT(beta_w, y);    beta4 = RESHAPE4D(beta, 1, nr, T, S)
++//
++// with one mmvf/mmvq launch that writes the alpha rows (through the gate chain) and the beta rows.
++// The launch derives its geometry from the dst tensor, so it is only correct if the shapes it is
++// given describe the *flat* projection: y is [k, n_tokens] with n_tokens = T*S (one channel), the
++// gate MUL is [nr, T, S].  Passing the gate MUL as dst (as the r102..r107 code did) gave the launch
++// n_seq_tokens columns and n_seqs channels, so every channel past the first was computed from y's
++// first n_seq_tokens columns - i.e. every sequence but the first silently took sequence 0's
++// alpha/beta gates.  Single-sequence decode/verify was unaffected, which is why the same-seed text
++// and MTP gates never saw it.
++//
++// What this test checks, per (T, S) shape, with no model and no ubatch scheduler involved:
++//
++//   1. the fused chain and the unfused chain produce bit-identical gate and beta values
++//      (the unfused arm is the same graph plus one extra consumer of the ADD output, which makes
++//      ggml_can_fuse_subgraph reject the window - the intermediate is used outside it - so the two
++//      arms differ *only* in whether the fusion fires);
++//   2. the fusion really did fire in the fused arm: the fused launch skips the ADD/UNARY/MUL
++//      nodes, so the softplus output is never written.  It is pre-filled with NaN and must still
++//      be NaN afterwards.  Without this check a regression that made the fusion silently stop
++//      matching would make the test pass vacuously.
++//
++// At least one shape in the matrix must fire on the running device, otherwise the test fails
++// ("nothing exercised the fusion"): the fusions are band-limited (BF16: n_tokens <= 3 on a device
++// with bf16 MMA where MMF is applicable, <= 8 otherwise), so on some devices only the small shapes
++// fire.  (T, S) = (1, 2) and (1, 3) are the multi-sequence shapes that regressed in #204.
++//
++// usage: test-fusion-gate-beta-multiseq [device-index]
++// exit:  0 all cases bit-identical and at least one fused; 2 otherwise; 0 with a SKIP line when
++//        the build has no CUDA/ROCm/MUSA backend device (the fusions do not exist elsewhere).
++//
++// The sibling Q8_0 fusion (GGML_CUDA_FUSE_GATE_BETA_VERIFY) is covered through its own switch; the
++// gate/beta arms in gdn-conv.* / unary.* are unaffected by the dst-shape rule (they write their own
++// outputs) and are covered by the same-seed text gates.
++
++#include "ggml.h"
++#include "ggml-alloc.h"
++#include "ggml-backend.h"
++
++#include <cmath>
++#include <cstdint>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <random>
++#include <string>
++#include <vector>
++
++static bool is_cuda_family(const char * name) {
++    return strncmp(name, "CUDA", 4) == 0 || strncmp(name, "ROCm", 4) == 0 || strncmp(name, "MUSA", 4) == 0;
++}
++
++struct case_t {
++    int64_t T;   // n_seq_tokens
++    int64_t S;   // n_seqs
++};
++
++struct graph_t {
++    ggml_context * ctx = nullptr;
++    ggml_cgraph  * gf  = nullptr;
++    ggml_tensor  * gate    = nullptr;   // [nr, T, S]  -- what the fused launch writes
++    ggml_tensor  * beta    = nullptr;   // [nr, T*S]   -- what the fused launch's beta rows write
++    ggml_tensor  * bias    = nullptr;
++    ggml_tensor  * softplus= nullptr;   // fused arm: never written
++    ggml_tensor  * alpha_w = nullptr;
++    ggml_tensor  * beta_w  = nullptr;
++    ggml_tensor  * y       = nullptr;
++    ggml_tensor  * dt = nullptr;
++    ggml_tensor  * ssm_a   = nullptr;
++};
++
++// build the chain; `unfused` adds one extra consumer of the ADD output, which makes the fusion
++// window ineligible (the intermediate would be read outside the window) while leaving the
++// arithmetic identical.
++static graph_t build_graph(int64_t nr, int64_t k, int64_t T, int64_t S, bool unfused) {
++    graph_t g;
++    // no_alloc: the tensors are allocated below, into one backend buffer
++ggml_init_params ip = { /*.mem_size =*/ 16 * 1024 * 1024, /*.mem_buffer =*/ nullptr, /*.no_alloc =*/ true };
++    g.ctx = ggml_init(ip);
++    if (!g.ctx) { fprintf(stderr, "ggml_init failed\n"); exit(1); }
++
++    g.alpha_w = ggml_new_tensor_2d(g.ctx, GGML_TYPE_BF16, k, nr);
++    g.beta_w  = ggml_new_tensor_2d(g.ctx, GGML_TYPE_BF16, k, nr);
++    g.y       = ggml_new_tensor_2d(g.ctx, GGML_TYPE_F32,  k, T * S);
++    g.ssm_a   = ggml_new_tensor_1d(g.ctx, GGML_TYPE_F32,  nr);
++
++    g.dt = ggml_new_tensor_1d(g.ctx, GGML_TYPE_F32, nr);
++
++    ggml_tensor * alpha   = ggml_mul_mat(g.ctx, g.alpha_w, g.y);        // [nr, T*S]
++    ggml_tensor * alpha3  = ggml_reshape_3d(g.ctx, alpha, nr, T, S);
++    ggml_tensor * bias    = ggml_add(g.ctx, alpha3, g.dt);
++    g.bias = bias;
++    g.softplus            = ggml_softplus(g.ctx, bias);
++    g.gate                = ggml_mul(g.ctx, g.softplus, g.ssm_a);       // [nr, T, S]
++    ggml_tensor * gate4   = ggml_reshape_4d(g.ctx, g.gate, 1, nr, T, S);
++    g.beta                = ggml_mul_mat(g.ctx, g.beta_w, g.y);         // [nr, T*S]
++    ggml_tensor * beta4   = ggml_reshape_4d(g.ctx, g.beta, 1, nr, T, S);
++
++    g.gf = ggml_new_graph(g.ctx);
++    // this order is what the matcher sees: alpha chain, then the beta projection (the real graphs
++    // create beta first but the executed order is the dependency order below)
++    ggml_build_forward_expand(g.gf, gate4);
++    ggml_build_forward_expand(g.gf, beta4);
++    if (unfused) {
++        // one extra consumer of the ADD output, outside the fusion window: subgraph_uses (1) no
++        // longer matches the graph-wide use count (2), so the matcher declines and the plain
++        // chain runs
++        ggml_build_forward_expand(g.gf, ggml_sum(g.ctx, bias));
++    }
++
++    return g;
++}
++
++struct result_t {
++    bool            fused = false;
++    std::vector<float> gate;
++    std::vector<float> beta;
++};
++
++static result_t run_graph(graph_t & g, ggml_backend_t backend,
++                          const std::vector<ggml_bf16_t> & wa,
++                          const std::vector<ggml_bf16_t> & wb,
++                          const std::vector<float> & y,
++                          const std::vector<float> & dt,
++                          const std::vector<float> & ssm_a) {
++    ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors(g.ctx, backend);
++    if (!buf) { fprintf(stderr, "alloc_ctx_tensors failed\n"); exit(1); }
++
++    ggml_backend_tensor_set(g.alpha_w, wa.data(), 0, wa.size() * sizeof(ggml_bf16_t));
++    ggml_backend_tensor_set(g.beta_w,  wb.data(), 0, wb.size() * sizeof(ggml_bf16_t));
++    ggml_backend_tensor_set(g.y,       y.data(),  0, y.size()  * sizeof(float));
++    ggml_backend_tensor_set(g.ssm_a, ssm_a.data(), 0, ssm_a.size() * sizeof(float));
++    ggml_backend_tensor_set(g.dt, dt.data(), 0, dt.size() * sizeof(float));
++
++    // NaN sentinel: the fused launch skips ADD/UNARY/MUL, so softplus stays untouched
++    {
++        std::vector<float> nan(ggml_nelements(g.softplus), NAN);
++        ggml_backend_tensor_set(g.bias,     nan.data(), 0, nan.size() * sizeof(float));
++        ggml_backend_tensor_set(g.softplus, nan.data(), 0, nan.size() * sizeof(float));
++    }
++
++    if (ggml_backend_graph_compute(backend, g.gf) != GGML_STATUS_SUCCESS) {
++        fprintf(stderr, "graph compute failed\n");
++        exit(1);
++    }
++
++    result_t r;
++    std::vector<float> sp(ggml_nelements(g.softplus));
++    std::vector<float> bi(ggml_nelements(g.bias));
++    ggml_backend_tensor_get(g.softplus, sp.data(), 0, sp.size() * sizeof(float));
++    ggml_backend_tensor_get(g.bias,     bi.data(), 0, bi.size() * sizeof(float));
++    r.fused = true;
++    for (float v : sp) {
++        if (!std::isnan(v)) { r.fused = false; break; }
++    }
++
++    r.gate.resize(ggml_nelements(g.gate));
++    r.beta.resize(ggml_nelements(g.beta));
++    ggml_backend_tensor_get(g.gate, r.gate.data(), 0, r.gate.size() * sizeof(float));
++    ggml_backend_tensor_get(g.beta, r.beta.data(), 0, r.beta.size() * sizeof(float));
++
++    ggml_backend_buffer_free(buf);
++    return r;
++}
++
++int main(int argc, char ** argv) {
++    const int want_dev = argc > 1 ? atoi(argv[1]) : -1;
++
++    ggml_backend_load_all();
++
++    ggml_backend_dev_t dev = nullptr;
++    for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
++        ggml_backend_dev_t d = ggml_backend_dev_get(i);
++        if (ggml_backend_dev_type(d) != GGML_BACKEND_DEVICE_TYPE_GPU) { continue; }
++        if (!is_cuda_family(ggml_backend_dev_name(d))) { continue; }
++        if (want_dev >= 0 && (int) i != want_dev)      { continue; }
++        dev = d;
++        break;
++    }
++    if (!dev) {
++        printf("SKIP: no CUDA/ROCm/MUSA backend device (the gate/beta fusions only exist there)\n");
++        return 0;
++    }
++    const char * dev_name = ggml_backend_dev_name(dev);
++    printf("device: %s\n", dev_name);
++
++    ggml_backend_t backend = ggml_backend_dev_init(dev, nullptr);
++    if (!backend) { fprintf(stderr, "backend init failed\n"); return 1; }
++
++    const int64_t nr = 48;      // n_v_heads, as in the GDN models the fusion fires on
++    const int64_t k  = 1024;    // contraction length (n_embd of the smallest such models is larger)
++    const case_t cases[] = {
++        { 1, 1 }, { 2, 1 }, { 3, 1 }, { 4, 1 },
++        { 1, 2 }, { 1, 3 }, { 1, 4 },            // the multi-sequence shapes (#204)
++        { 2, 2 }, { 3, 2 }, { 2, 3 }, { 2, 4 },
++    };
++
++    std::mt19937 gen(42);
++    std::normal_distribution<float> dis(0.0f, 0.1f);
++
++    std::vector<ggml_bf16_t> wa(nr * k), wb(nr * k);
++    for (int64_t i = 0; i < nr * k; ++i) {
++        wa[i] = ggml_fp32_to_bf16(dis(gen));
++        wb[i] = ggml_fp32_to_bf16(dis(gen));
++    }
++    std::vector<float> ssm_a(nr);
++    for (int64_t i = 0; i < nr; ++i) {
++        ssm_a[i] = -fabsf(dis(gen));   // -A_log.exp(), negative as in the models
++    }
++
++    int n_fired = 0;
++    int n_failed = 0;
++
++    for (const case_t & c : cases) {
++        std::vector<float> y(k * c.T * c.S);
++        std::vector<float> dt(nr);
++        for (auto & v : y)  { v = dis(gen); }
++        for (auto & v : dt) { v = dis(gen); }
++
++        graph_t ga = build_graph(nr, k, c.T, c.S, /*unfused =*/ false);
++        graph_t gb = build_graph(nr, k, c.T, c.S, /*unfused =*/ true);
++
++        const result_t a = run_graph(ga, backend, wa, wb, y, dt, ssm_a);
++        const result_t b = run_graph(gb, backend, wa, wb, y, dt, ssm_a);
++
++        double max_diff = 0.0;
++        size_t n_bad = 0;
++        auto compare = [&](const std::vector<float> & x, const std::vector<float> & z) {
++            for (size_t i = 0; i < x.size(); ++i) {
++                if (memcmp(&x[i], &z[i], sizeof(float)) != 0) {
++                    ++n_bad;
++                    max_diff = std::max(max_diff, (double) fabsf(x[i] - z[i]));
++                }
++            }
++        };
++        compare(a.gate, b.gate);
++        compare(a.beta, b.beta);
++
++        // at n_tokens == 1 the ADD->SOFTPLUS->MUL chain also has its own fold (GGML_CUDA_FUSE_GDN_GATE,
++        // unary.cu), which skips the softplus node as well, so the sentinel cannot tell the two apart
++        // there and the reference arm is not guaranteed to be unfused.  From n_tokens >= 2 that fold is
++        // out of band and "softplus untouched" is specific to the gate/beta fusion.
++        const bool strict_ref = c.T * c.S > 1;
++        const bool ok = (n_bad == 0) && (!strict_ref || !b.fused);
++        if (!ok) { ++n_failed; }
++        if (a.fused) { ++n_fired; }
++
++        printf("nr=%2lld k=%4lld T=%lld S=%lld  fused=%s  reference_fused=%s  "
++               "maxdiff=%.9g  mismatches=%zu  %s\n",
++               (long long) nr, (long long) k, (long long) c.T, (long long) c.S,
++               a.fused ? "yes" : "no ", b.fused ? "YES" : "no ", max_diff, n_bad,
++               ok ? "OK" : "FAIL");
++
++        ggml_free(ga.ctx);
++        ggml_free(gb.ctx);
++    }
++
++    ggml_backend_free(backend);
++
++    printf("\n%d/%zu shapes fused; %d failed\n", n_fired, sizeof(cases) / sizeof(cases[0]), n_failed);
++    if (n_fired == 0) {
++        printf("FAIL: no shape exercised the fusion - the test verified nothing on %s\n", dev_name);
++        return 2;
++    }
++    if (n_failed != 0) {
++        printf("FAIL: the fused chain does not match the unfused chain (issue #204 class)\n");
++        return 2;
++    }
++    printf("PASS\n");
++    return 0;
++}
 diff --git a/tests/test-lazy-reader.cpp b/tests/test-lazy-reader.cpp
 new file mode 100644
 index 000000000..f4fd3f599

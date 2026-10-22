@@ -356,6 +356,12 @@ GDN output `RMS_NORM * w` computed inside the gate kernel).  Worth +0.2-0.3 % on
 Flash-Next 2 GPU `-sm tensor` + MTP, flat on 35B-A3B 1 GPU.  The GDN-norm pair is the only fusion in the set
 whose skip and emit are two decisions (the norm node comes before the gate that computes it): while a norm is
 pending no other fusion may start in between, so the two abort tripwires are unreachable.
+`GGML_CUDA_FUSE_GATE_BETA_BF16` is **multi-sequence-clean since r108** (issue #204): it used to launch with the
+gate chain's `MUL` as the `mmvf` dst, which gave the launch `n_seq_tokens` columns and `n_seqs` channels for a
+flat one-channel `y`, so every sequence but the first got sequence 0's alpha/beta gates (invisible to
+single-stream text/MTP gates; only multi-sequence serving saw it).  The switch still exists as an A/B
+kill-switch, and `tests/test-fusion-gate-beta-multiseq.cpp` is the gate that covers it — no model needed, so
+run it after touching any fusion that consumes a reshaped chain (`GREEDY-PURITY.md` §49).
 
 The same idiom — and therefore also default-on despite the name — covers
 `GGML_CUDA_DISABLE_IDX_RELU_SUM`, `GGML_CUDA_CONCAT_VERIFY` and (r46, block 15) `GGML_CUDA_FUSE_GDN_STATE_GATHER`.

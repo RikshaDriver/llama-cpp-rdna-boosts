@@ -1,0 +1,22 @@
+diff --git a/ggml/src/ggml-cuda/mmvf.cu b/ggml/src/ggml-cuda/mmvf.cu
+index 8b0014088..09dec576b 100644
+--- a/ggml/src/ggml-cuda/mmvf.cu
++++ b/ggml/src/ggml-cuda/mmvf.cu
+@@ -1303,6 +1303,16 @@ int ggml_cuda_gate_beta_bf16_try_fuse(ggml_backend_cuda_context & ctx, const ggm
+     gb.gb_dt    = (const float *) dt->data;
+     gb.gb_a     = (const float *) ssm_a->data;
+     gb.gb_nrows = (int) nr;
+-    ggml_cuda_mul_mat_vec_f(ctx, wa, y, nullptr, gate_mul, nullptr, &gb);
++    // Launch with the projection's own shape, not the gate MUL's.  The launch takes its column count from
++    // dst->ne[1] and its channel count from dst->ne[2], but with more than one sequence the unfused chain's
++    // shapes are [nr, n_seq_tokens, n_seqs] for the gate MUL (and for the beta store) while the projections
++    // and y are flat [nr, n_tokens] / [ne10, n_tokens].  Taking the gate MUL's dst, a multi-sequence decode
++    // (e.g. 2 sequences x 1 token: dst [nr, 1, 2] against y [ne10, 2], one channel) would run the beta rows
++    // once per channel and write every channel from y's first n_seq_tokens columns - i.e. sequences 1..n-1
++    // got sequence 0's alpha/beta gates (issue #204).  Both tensors are contiguous with the same element
++    // count (checked above), so the projection's shape is the same memory, written flat.
++    ggml_tensor dst_flat = *alpha_w;
++    dst_flat.data = gate_mul->data;
++    ggml_cuda_mul_mat_vec_f(ctx, wa, y, nullptr, &dst_flat, nullptr, &gb);
+     return 7;
+ }

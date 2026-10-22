@@ -1,7 +1,7 @@
-From 25bec484e31ba20a0464a2d2df65e0accbd17d9e Mon Sep 17 00:00:00 2001
+From 70815f4071db3e027cc7c8b02b831a57bef4b56c Mon Sep 17 00:00:00 2001
 From: Stew Forster <ci@rdna-boosts.invalid>
 Date: Thu, 22 Oct 2026 05:53:08 -0500
-Subject: [PATCH] rdna-boosts: block 12: MTP draft vocabulary subset
+Subject: [PATCH 12/12] rdna-boosts: block 12: MTP draft vocabulary subset
  (--spec-draft-mtp-vocab N)
 
 The MTP draft head scores only the LM-head rows for token ids < N plus every
@@ -645,7 +645,7 @@ index fa5935b86..e9aae8950 100644
      res->t_logits = cur;
  
 diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
-index 5c85070f6..ff6f4bc9c 100644
+index a4f88b006..27a31157f 100644
 --- a/tests/CMakeLists.txt
 +++ b/tests/CMakeLists.txt
 @@ -169,6 +169,7 @@ endif ()
@@ -653,9 +653,9 @@ index 5c85070f6..ff6f4bc9c 100644
  llama_build(test-recurrent-state-depth.cpp)
  llama_build(test-logits-width-probe.cpp)
 +llama_build(test-mtp-draft-vocab.cpp) # needs a qwen35/qwen35moe model with an MTP head: -m MODEL
+ # multi-sequence gate/beta fusion regression (issue #204): no model needed, skips without a CUDA device
+ llama_build_and_test(test-fusion-gate-beta-multiseq.cpp LINK ggml)
  llama_build(test-save-load-state.cpp)
- 
- if (NOT WIN32 OR NOT BUILD_SHARED_LIBS)
 diff --git a/tests/test-mtp-draft-vocab.cpp b/tests/test-mtp-draft-vocab.cpp
 new file mode 100644
 index 000000000..ca514151a
