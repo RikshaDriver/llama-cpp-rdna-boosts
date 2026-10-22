@@ -2,7 +2,7 @@
 
 ## 261021.016 (r106) -- DFlash2 under `-sm tensor`: the Meta `ALL_GATHER` collective (TODO #78 closed)
 
-**Release `v12-097cf33d9-r106`**, 12 blocks, fork point `097cf33d9`, tip `ee6a91147`, tree
+**Release `v12-097cf33d9-r106`**, 12 blocks, fork point `097cf33d9`, tip `2e258d3b1`, tree
 `d3c1e6c53ab60b027a51474eaca3a12fbff2ea7b`.  One block amendment: **11** (the whole fold -- see below for why
 it did not go to 09/10).  Campaign record: `archive/work/dflash-meta-split-impl/` (`FINDINGS-2026-10-21.md`,
 `RESOLUTION.md`, `all-gather.patch`, the as-validated change).
