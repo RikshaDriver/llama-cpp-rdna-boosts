@@ -1,0 +1,31 @@
+From 82955cdbbc7182959e4deaf0d7eca6c472e9f772 Mon Sep 17 00:00:00 2001
+From: Laurent Zuijdwijk <laurent.zuijdwijk@gmail.com>
+Date: Thu, 1 Oct 2026 17:42:07 +0100
+Subject: [PATCH 5/6] common : LLAMA_ARG_SPEC_DRAFT_MTP_VOCAB env var for
+ --spec-draft-mtp-vocab
+
+So env-file presets (agention-llama recipes) can set the MTP draft vocabulary subset.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013YKZhadEzjDiTwDc4tzi2g
+(cherry picked from commit d8841825cd318bddfb8fd302e9a0c6b12ce9adb8)
+---
+ common/arg.cpp | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/common/arg.cpp b/common/arg.cpp
+index ff079b3a3..e3e242f17 100644
+--- a/common/arg.cpp
++++ b/common/arg.cpp
+@@ -4197,7 +4197,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
+         [](common_params & params, int value) {
+             params.speculative.draft.mtp_vocab = std::max(0, value);
+         }
+-    ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
++    ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_DRAFT_MTP_VOCAB"));
+     add_opt(common_arg(
+         {"--spec-draft-n-min"}, "N",
+         string_format("minimum number of draft tokens to use for speculative decoding (default: %d)", params.speculative.draft.n_min),
+-- 
+2.56.0
+

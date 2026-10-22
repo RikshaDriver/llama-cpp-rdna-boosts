@@ -1,0 +1,68 @@
+From 5118e8a30c8d612416a1c2a62d2cf6c12434ae72 Mon Sep 17 00:00:00 2001
+From: Laurent Zuijdwijk <laurent.zuijdwijk@gmail.com>
+Date: Thu, 1 Oct 2026 17:22:24 +0100
+Subject: [PATCH 4/6] qwen4exp : MTP draft vocab subset
+ (--spec-draft-mtp-vocab)
+
+Port the qwen35/qwen35moe draft-vocabulary subset to the qwen4exp MTP graph: with
+--spec-draft-mtp-vocab N the draft context scores only token ids < N (plus control
+tokens) and scatters them into a -inf full-vocab row; the target still verifies over
+the full vocabulary. Enable LLM_ARCH_QWEN4EXP in mtp_draft_vocab_get.
+
+Flash-Next MTP draft step 4.3 -> 1.6 ms. Gyro-S, fork_speedbench (greedy, 384 tok),
+tok/s prose/json/code/copy: no draft 32.3/32.2/32.0/32.2; previous flags (Q8_0 draft,
+n-max 4) 38.2/51.3/49.0/55.8; Q4_K_M draft + vocab 32768 + n-max 6
+38.7/57.7/51.5/61.1. test-mtp-draft-vocab passes on the Flash-Next MTP draft.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013YKZhadEzjDiTwDc4tzi2g
+(cherry picked from commit 4021a93e818eb66e4ad566961de868325e4aba46)
+---
+ src/llama-model.cpp     |  4 ++--
+ src/models/qwen4exp.cpp | 15 ++++++++++++++-
+ 2 files changed, 16 insertions(+), 3 deletions(-)
+
+diff --git a/src/llama-model.cpp b/src/llama-model.cpp
+index 89c1d9c11..21e49472d 100644
+--- a/src/llama-model.cpp
++++ b/src/llama-model.cpp
+@@ -2898,8 +2898,8 @@ std::shared_ptr<const llama_mtp_draft_vocab> llama_model::mtp_draft_vocab_get(in
+     if (n_keep <= 0 || out == nullptr || out->buffer == nullptr || out->data == nullptr) {
+         return nullptr;
+     }
+-    // only the qwen35 and qwen35moe MTP graphs use the subset, and only when the MTP block scores with the model LM head
+-    if ((arch != LLM_ARCH_QWEN35 && arch != LLM_ARCH_QWEN35MOE) || hparams.n_layer_nextn == 0 ||
++    // only the qwen35, qwen35moe and qwen4exp MTP graphs use the subset, and only when the MTP block scores with the model LM head
++    if ((arch != LLM_ARCH_QWEN35 && arch != LLM_ARCH_QWEN35MOE && arch != LLM_ARCH_QWEN4EXP) || hparams.n_layer_nextn == 0 ||
+             layers[hparams.n_layer()].nextn.shared_head_head != nullptr) {
+         LLAMA_LOG_WARN("%s: mtp_draft_vocab = %d ignored: not supported for this model\n", __func__, n_keep);
+         return nullptr;
+diff --git a/src/models/qwen4exp.cpp b/src/models/qwen4exp.cpp
+index fa5935b86..0082cdce3 100644
+--- a/src/models/qwen4exp.cpp
++++ b/src/models/qwen4exp.cpp
+@@ -1305,7 +1305,20 @@ llama_model_qwen4exp::graph_mtp::graph_mtp(const llama_model & model, const llm_
+         GGML_ASSERT(head_w && "QWEN4EXP MTP: the target model has no LM head to borrow");
+     }
+ 
+-    cur = build_lora_mm(head_w, cur, head_s);
++    if (mtp_draft != nullptr && head_w == model.output && n_outputs == 1) {
++        // --spec-draft-mtp-vocab: this context drafts over a row subset of the LM head and scatters
++        // its logits into a full-vocab row of -inf (as in the qwen35/qwen35moe MTP graphs). Only the
++        // draft changes; the target still verifies against the full vocabulary.
++        GGML_ASSERT(mtp_draft->n_keep == cparams.mtp_draft_vocab);
++        const int64_t n_sel = mtp_draft->head->ne[1];
++        const int64_t n_row = model.output->ne[1];
++        ggml_tensor * sub = build_lora_mm(mtp_draft->head, cur, head_s);
++        cur = ggml_fill(ctx0, ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, 1, n_row), -INFINITY);
++        cur = ggml_set_rows(ctx0, cur, ggml_reshape_2d(ctx0, sub, 1, n_sel), mtp_draft->ids);
++        cur = ggml_reshape_2d(ctx0, cur, n_row, 1);
++    } else {
++        cur = build_lora_mm(head_w, cur, head_s);
++    }
+     cb(cur, "result_output", -1);
+     res->t_logits = cur;
+ 
+-- 
+2.56.0
+

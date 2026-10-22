@@ -26,6 +26,7 @@ top of `WORKLOG.md` is the newest record.
 | **65** | IQ4_NL field (MTP) + `--host-experts pool` decode collapses | memory | parked (maintainer 2026-10-15; the "after r67" condition is long past — never picked up, still parked) |
 | **70** | harden the expert-cache re-arm / wide-aux growth against a starved arena | robustness | open |
 | **79** | RDNA3_0 verify-band fusions: no multi-device measurement, and gfx1101/gfx1102 untested | platform validation | open (shipped default-on in r95; needs a 2+ card gfx1100 box).  `ssh fingon` is single-RDNA3 (`ROCm0`; its second rocm-smi entry is an iGPU and is not a HIP device), so it does **not** cover the multi-device arm — it validates single-GPU gfx1100 only.  gfx1101/gfx1102 still have no hardware |
+| **81** | `--spec-draft-mtp-vocab N`: the MTP draft scores a trimmed LM-head row subset | performance (decode) | imported, partially gated (`wip/spec-draft-mtp-vocab/`).  Reproduces on gfx1201: +5.7…+7.1 % on 27B Q8_0 (`-sm layer`, 2 GPU) with the greedy hash equal to the r106 build.  **Blocked under `-sm tensor`**: the subset build aborts on a row-range read out of a vocabulary-split Meta buffer (README F2) |
 
 Accepted limitations that are deliberately **not** fixed are listed at the end — do not re-report them.
 
@@ -173,6 +174,25 @@ Two gaps, both needing hardware the fleet does not have:
 **Do not re-report as a bug without one of those runs.**
 
 ---
+
+## 81. `--spec-draft-mtp-vocab N`: the MTP draft scores a trimmed LM-head row subset — PERFORMANCE (decode)
+
+Imported 2026-10-21 from discussion #202 (martino2k6) as [`wip/spec-draft-mtp-vocab/`](wip/spec-draft-mtp-vocab/README.md)
+— six format-patches cut on r101 that apply to the r106 tree with `git am -3` and **no conflict**.  The MTP
+draft context copies the LM-head rows for token ids `< N` plus every control/user-defined token into its own
+head, scores the draft matmul over that subset, and scatters the result into a full-vocab row of `-inf`, so
+the speculator still sees a full-vocabulary logit row.  **Verification is untouched, so greedy output is
+preserved by construction** — the trim can only lose proposals (their acceptance 0.6908 -> 0.6786, net
+x1.0648 decode on gfx1151 Qwen3.8-Flash-Next Q5_K_M, ctx 131k, `--spec-draft-n-max 3`).  Opt-in, `0` = off.
+
+Nothing was left to inference: the import was built and smoke-gated here on 2026-10-21 (gfx1201, 2x R9700).
+`-sm layer` works and reproduces the win (**+5.7…+7.1 %** on Qwen3.8-27B Q8_0, greedy text hash identical
+to the r106 delivery build's own run; the 4B gains +6…+14 %); **`-sm tensor` + trim aborts**, because the
+subset build reads a row range out of a vocabulary-split Meta buffer
+(`ggml-backend-meta.cpp:2319 GGML_ASSERT(size % chunk_size_full == 0)`).  That is the same shape family as
+the pre-r106 DFlash2 abort, so it is a `ggml/` fix, not a graph tweak — the report and the three fix routes
+are the campaign README's F2.  Other findings (gemma4 not in the arch list, the subset copy unaccounted by
+`--fit` — measured 332 MiB on the 27B, opt-in vs the default-on policy) are in §5.  Gate plan: README §4.
 
 ## Documented, deliberately NOT fixed (accepted limitations — do not re-report)
 

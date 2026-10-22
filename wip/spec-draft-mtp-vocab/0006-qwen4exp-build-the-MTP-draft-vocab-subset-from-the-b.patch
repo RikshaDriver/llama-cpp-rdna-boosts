@@ -1,0 +1,131 @@
+From 2c3426a8151fa6a4156d6048ee7dd77947d0b085 Mon Sep 17 00:00:00 2001
+From: Martin B <martino2k6@users.noreply.github.com>
+Date: Wed, 21 Oct 2026 10:05:02 +0100
+Subject: [PATCH 6/6] qwen4exp : build the MTP draft vocab subset from the
+ borrowed target head
+
+The donor feature builds the subset from the draft model's own output.weight, so it
+is inert on shared-NextN sidecars (nextn_shared_target_tensors) that borrow the
+target's LM head: the llama_context hook got nullptr from mtp_draft_vocab_get (the
+sidecar owns no output) and drafting silently stayed full-vocabulary. Fall back to
+building the subset from the target model reached via ctx_other - the same tensor the
+graph borrows in models/qwen4exp.cpp - skipping the target's own-MTP-block checks,
+and let the graph match its head against the new llama_mtp_draft_vocab::src identity
+instead of model.output. Fit-probe contexts (no_alloc) keep the old silent path.
+---
+ src/llama-context.cpp   |  8 ++++++++
+ src/llama-model.cpp     | 14 +++++++++++---
+ src/llama-model.h       |  9 +++++++--
+ src/models/qwen4exp.cpp |  8 +++++---
+ 4 files changed, 31 insertions(+), 8 deletions(-)
+
+diff --git a/src/llama-context.cpp b/src/llama-context.cpp
+index f638bc8ea..a6fbe0091 100644
+--- a/src/llama-context.cpp
++++ b/src/llama-context.cpp
+@@ -801,6 +801,14 @@ llama_context::llama_context(
+         // the draft vocabulary subset belongs to this context; contexts that ask for the same N share one copy
+         if (cparams.ctx_type == LLAMA_CONTEXT_TYPE_MTP && params.mtp_draft_vocab > 0) {
+             mtp_draft = model.mtp_draft_vocab_get(params.mtp_draft_vocab);
++            if (mtp_draft == nullptr && model.output == nullptr && !model.hparams.no_alloc && cparams.ctx_other != nullptr) {
++                // shared-NextN sidecar (nextn_shared_target_tensors): this draft owns no LM head and its graph scores
++                // with the head it borrows from the target model (see qwen4exp.cpp) - build the subset from that same
++                // head. Fit-probe contexts (no_alloc) never see an allocated head; skipping them keeps the fitting
++                // pass from allocating the subset outside its estimate
++                mtp_draft = llama_get_model(cparams.ctx_other)->mtp_draft_vocab_get(params.mtp_draft_vocab,
++                        /*shared_target_head=*/true);
++            }
+             if (mtp_draft) {
+                 cparams.mtp_draft_vocab = mtp_draft->n_keep;
+             }
+diff --git a/src/llama-model.cpp b/src/llama-model.cpp
+index 21e49472d..e6e6b4f4e 100644
+--- a/src/llama-model.cpp
++++ b/src/llama-model.cpp
+@@ -2892,15 +2892,22 @@ static bool mtp_draft_vocab_ids_follow_merge_order(const llama_vocab & vocab, st
+     return true;
+ }
+ 
+-std::shared_ptr<const llama_mtp_draft_vocab> llama_model::mtp_draft_vocab_get(int32_t n_keep) const {
++std::shared_ptr<const llama_mtp_draft_vocab> llama_model::mtp_draft_vocab_get(int32_t n_keep, bool shared_target_head) const {
+     const ggml_tensor * out = output;
+     // probe contexts (common_fit_params) use a model with unallocated weights: no subset
+     if (n_keep <= 0 || out == nullptr || out->buffer == nullptr || out->data == nullptr) {
+         return nullptr;
+     }
+     // only the qwen35, qwen35moe and qwen4exp MTP graphs use the subset, and only when the MTP block scores with the model LM head
+-    if ((arch != LLM_ARCH_QWEN35 && arch != LLM_ARCH_QWEN35MOE && arch != LLM_ARCH_QWEN4EXP) || hparams.n_layer_nextn == 0 ||
+-            layers[hparams.n_layer()].nextn.shared_head_head != nullptr) {
++    if (arch != LLM_ARCH_QWEN35 && arch != LLM_ARCH_QWEN35MOE && arch != LLM_ARCH_QWEN4EXP) {
++        LLAMA_LOG_WARN("%s: mtp_draft_vocab = %d ignored: not supported for this model\n", __func__, n_keep);
++        return nullptr;
++    }
++    // the nextn checks apply to a model whose own MTP block scores with this head. A shared-NextN target owns no MTP
++    // block (n_layer_nextn == 0) and the layers[n_layer()] access below would read past its layer array - the consumer
++    // of this subset is the sidecar's graph, checked against src there
++    if (!shared_target_head && (hparams.n_layer_nextn == 0 ||
++            layers[hparams.n_layer()].nextn.shared_head_head != nullptr)) {
+         LLAMA_LOG_WARN("%s: mtp_draft_vocab = %d ignored: not supported for this model\n", __func__, n_keep);
+         return nullptr;
+     }
+@@ -2953,6 +2960,7 @@ std::shared_ptr<const llama_mtp_draft_vocab> llama_model::mtp_draft_vocab_get(in
+ 
+     auto res = std::make_shared<llama_mtp_draft_vocab>();
+     res->n_keep = n_keep;
++    res->src    = out;
+ 
+     ggml_init_params ip = { 2 * ggml_tensor_overhead(), nullptr, true };
+     res->ctx.reset(ggml_init(ip));
+diff --git a/src/llama-model.h b/src/llama-model.h
+index 8ad4bb84f..7bba6859c 100644
+--- a/src/llama-model.h
++++ b/src/llama-model.h
+@@ -685,6 +685,9 @@ struct llama_hadamard {
+ struct llama_mtp_draft_vocab {
+     int32_t n_keep = 0;
+ 
++    const ggml_tensor * src = nullptr; // the LM head tensor the rows were taken from; a graph may score with the
++                                       // subset only when its own head pointer is identical to it
++
+     ggml_tensor * head = nullptr; // [n_embd, n_rows], same type as the LM head
+     ggml_tensor * ids  = nullptr; // [n_rows] I64, token id of each row
+ 
+@@ -862,8 +865,10 @@ struct llama_model {
+     const struct ggml_tensor * get_tensor(const char * name) const;
+ 
+     // draft vocabulary subset for mtp_draft_vocab = n_keep, built on first request and freed with the last context
+-    // holding it; nullptr if the subset cannot be used with this model (thread-safe)
+-    std::shared_ptr<const llama_mtp_draft_vocab> mtp_draft_vocab_get(int32_t n_keep) const;
++    // holding it; nullptr if the subset cannot be used with this model (thread-safe).
++    // shared_target_head = true: this model is the target of a shared-NextN sidecar whose MTP graph borrows this
++    // output as its LM head - the consumer is that sidecar's graph, so the model's own MTP-block checks are skipped
++    std::shared_ptr<const llama_mtp_draft_vocab> mtp_draft_vocab_get(int32_t n_keep, bool shared_target_head = false) const;
+ 
+     float get_rope_freq_base (const llama_cparams & cparams, int il) const;
+     float get_rope_freq_scale(const llama_cparams & cparams, int il) const;
+diff --git a/src/models/qwen4exp.cpp b/src/models/qwen4exp.cpp
+index 0082cdce3..e9aae8950 100644
+--- a/src/models/qwen4exp.cpp
++++ b/src/models/qwen4exp.cpp
+@@ -1305,13 +1305,15 @@ llama_model_qwen4exp::graph_mtp::graph_mtp(const llama_model & model, const llm_
+         GGML_ASSERT(head_w && "QWEN4EXP MTP: the target model has no LM head to borrow");
+     }
+ 
+-    if (mtp_draft != nullptr && head_w == model.output && n_outputs == 1) {
++    if (mtp_draft != nullptr && head_w == mtp_draft->src && n_outputs == 1) {
+         // --spec-draft-mtp-vocab: this context drafts over a row subset of the LM head and scatters
+         // its logits into a full-vocab row of -inf (as in the qwen35/qwen35moe MTP graphs). Only the
+-        // draft changes; the target still verifies against the full vocabulary.
++        // draft changes; the target still verifies against the full vocabulary. head_w may be the head
++        // borrowed from the target model (shared-NextN sidecar without its own output.weight): the
++        // context hook builds the subset from that same head, so src identifies both shapes.
+         GGML_ASSERT(mtp_draft->n_keep == cparams.mtp_draft_vocab);
+         const int64_t n_sel = mtp_draft->head->ne[1];
+-        const int64_t n_row = model.output->ne[1];
++        const int64_t n_row = head_w->ne[1];
+         ggml_tensor * sub = build_lora_mm(mtp_draft->head, cur, head_s);
+         cur = ggml_fill(ctx0, ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, 1, n_row), -INFINITY);
+         cur = ggml_set_rows(ctx0, cur, ggml_reshape_2d(ctx0, sub, 1, n_sel), mtp_draft->ids);
+-- 
+2.56.0
+
