@@ -1,11 +1,9 @@
-# `dflash-meta-split-impl` — Meta distributed `TOP_K` (or split→mirrored gather) for the DFlash2 selector (TODO #58 follow-up)
+# `dflash-meta-split-impl` — Meta distributed `TOP_K` / split→mirrored gather for the DFlash2 selector (TODO #78)
 
-**Status: IMPLEMENTED + VALIDATED 2026-10-21, awaiting the promotion decision** (`TODO.md` #78).
-Not part of the delivery yet — the change is `all-gather.patch` here and the working tree of `~/llama.cpp`;
-read [`FINDINGS-2026-10-21.md`](FINDINGS-2026-10-21.md) first (result, the two refuted routes, the
-`GGML_OP_ALL_GATHER` design, findings F1–F3, and the proposed block split).  The route taken is §1(b), the
-split→mirrored gather.  This is the *real fix* behind the clean rejection folded into r54
-([`archive/work/dflash-meta-split/RESOLUTION.md`](../../archive/work/dflash-meta-split/RESOLUTION.md)).
+**Status: RESOLVED (2026-10-21) — promoted as `GGML_OP_ALL_GATHER` in `v12-097cf33d9-r106` (block 11).**
+Read [`RESOLUTION.md`](RESOLUTION.md) first, then [`FINDINGS-2026-10-21.md`](FINDINGS-2026-10-21.md) (the
+result, the two refuted routes, the design, and the two delivery defects the work surfaced) and
+`all-gather.patch` (the change exactly as validated, identical to the folded block-11 hunks).
 
 > **Cold start.**  Read `AGENTS.md` ("Report findings before shipping", the WIP/promotion rules, the
 > Meta invariants under "Critical facts"), then the r54 resolution record, then the code sites below.

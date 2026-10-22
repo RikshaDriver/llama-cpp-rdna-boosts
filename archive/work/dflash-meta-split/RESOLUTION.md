@@ -2,7 +2,8 @@
 
 **Status: RESOLVED (2026-10-13), folded into delivery `v12-097cf33d9-r54` (block 11).**  Record:
 `WORKLOG.md` 261013.004.  Real fix tracked by the new campaign
-[`wip/dflash-meta-split-impl/`](../../../wip/dflash-meta-split-impl/README.md) (TODO #58).
+[`archive/work/dflash-meta-split-impl/`](../dflash-meta-split-impl/README.md) (TODO #58; implemented and
+promoted as `GGML_OP_ALL_GATHER` in r106 — see its `RESOLUTION.md`).
 
 ## Root cause
 

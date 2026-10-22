@@ -44,7 +44,7 @@ only as a rough shape.
 | 08 | `0008-…-block-08-fused-kernels-old-08-fusions-ol` | fused kernels + fused MoE | +5369 / −445 | 36 |
 | 09 | `0009-…-block-09-host-resident-MoE-iface-schedul` | host-resident MoE: iface, scheduler, cache, slab hooks | +14175 / −535 | 65 |
 | 10 | `0010-…-block-10-qwen4exp-model-hyper-connection` | qwen4exp, the slab TU, the fusion dispatcher, async input | +22660 / −5135 | 110 |
-| 11 | `0011-…-block-11-campaign-remainder-CPU-wins-bac` | campaign remainder | +931 / −95 | 16 |
+| 11 | `0011-…-block-11-campaign-remainder-CPU-wins-bac` | campaign remainder (+ r106: Meta `ALL_GATHER`, DFlash2 `-sm tensor`, slab narrow-2) | +1329 / −157 | 23 |
 
 Block 05's file count is `template-instances/*.cu` (the FA kernel instantiations); block 10's size is
 dominated by `qwen4exp` + the slab/fusion translation units that were split out of `ggml-cuda.cu`.
@@ -695,8 +695,40 @@ had no other home.
   scalar fallback preserved), and an AVX2 Q2_0 dot product that reproduces the generic two-rounding
   arithmetic bit-for-bit.
 * **DFlash**: the F1 device-resident layer-input path made default-on with a warn-once fallback
-  (`GGML_LF_DFLASH_DEV=0` disables), `GGML_LF_FAST_TOPK`, and the clean `-sm tensor` rejection for a
-  DFlash2 selector (a Meta distributed top-k is unstarted — TODO #78).
+  (`GGML_LF_DFLASH_DEV=0` disables), `GGML_LF_FAST_TOPK`, and — since **r106** — DFlash2 under
+  `-sm tensor` (see the fold below; the r54 clean rejection is gone).
+* **DFlash2 under `-sm tensor`** (r106, TODO #78): the selector builds `ggml_top_k` over the draft logits and
+  `ggml_get_rows` to read the candidate values back, and those logits are the *target's* `output.weight`
+  projection — placed vocabulary-split by the target's policy — so both ops reduce along the split axis and
+  the Meta backend aborted on the straddling row.  `build_dflash2_selector()` now pushes the logits through a
+  new **`GGML_OP_ALL_GATHER`** collective (this block; §"Facts that span blocks") when the draft is a
+  ≥ 2-device tensor split, so every device holds the whole row and the selector runs locally.
+  `extract_layer_inputs()` also takes its host path when the layer inputs live in a Meta buffer: the F1
+  "device" copy is one pointer range, which a Meta buffer cannot express, and it aborted in
+  `ggml_backend_meta_buffer_set_tensor` — **pre-existing for any** DFlash drafter that requests
+  `dflash.target_layers` (the r54 guard only covered selector models).  Measured (27B-Q4_K_XL + its DFlash2,
+  `-c 16384`, q8_0 KV, 5258-token prompt): **84.5 t/s vs 63.4 for the `-sm layer` config that used to be the
+  only one supported** (+33 %), draft acceptance identical to `-sm layer` (0.67742, same per-position
+  rates), 3-GPU 61.1 vs 60.8, `--parallel 2` green, `test-backend-ops` 3/3, prefill-logit KLD 0.000000 /
+  same-top-p 100.000 %.  `Qwen3.6-35B-A3B-Q8_0` + its DFlash2: 191.0 t/s vs 161.9 (+18 %).  No new knob:
+  `-sm layer` remains the escape hatch.  A true Meta *distributed* top-k (gathering `top_k × n_devices`
+  candidates instead of the whole row) was the alternative; it needs the same cross-device primitive plus a
+  merge, and the gather measured inside the draft step's noise, so the simpler shape shipped.
+* **The slab's narrow-2 region yields from the arena** (r106): the draft context's compute buffer is pinned
+  into the slab's narrow-2 region at the top of the reserved VA, and that placement only accepted the VA the
+  creation reservation left unmapped — i.e. the *draft-context estimate* (`reserve − headroom`), whose
+  `compute` term is a measured 512 MiB tier.  A **tensor-split** drafter runs the whole draft graph on every
+  device, so its per-device compute buffer measured 1280 MiB, larger than the whole spare: the pin refused,
+  the draft fell back to `cudaMalloc`, and with the slab holding the VRAM that failed
+  (`graph_reserve: failed to allocate compute buffers`) for `-sm tensor` + a draft + `-ncmoe`.  The pin is
+  now two-phase: decide under the lock, evict the arena tables in `[off, mapped)` via
+  `moe_cache_evict_slab_range` outside it (the callback re-enters through `arena_free`), then commit —
+  mapping the region when it lies above `mapped`, else capping the arena at `off` (`arena_limit` already
+  returns `narrow2_off`) and dropping every free run at or above the new top so no later table can land on
+  the draft's view.  The unmapped-spare placement is still preferred and unchanged when it fits (1 GPU
+  `-ncmoe 40`: "… 0.75 GiB, unmapped VA spare"); plain `-ncmoe` never arms narrow-2.  Measured (35B-A3B-Q8_0
+  + DFlash2, `-ncmoe 20 -c 8192`, no override env): 2 GPU **abort → 138.6 t/s**, 3 GPU **abort → 87.4 t/s**,
+  acceptance 0.849 both.  `GGML_CUDA_SLAB_RESERVE_MIB` is no longer needed as a workaround.
 * **Allocator/model**: `ggml_gallocr_drop_buffers` (free compute buffers and invalidate the layout so the
   next reserve sizes from the current graph), the per-device `max_host_expert_slice_bytes` split rule, the
   application of the embeddings-layer-input preset, and the `-sm tensor` H2D-ring auto-size + narrow-band
@@ -737,7 +769,18 @@ a hook is CUDA-only (the non-CUDA entries stay NULL and the feature is simply in
   of it; `GREEDY-PURITY.md` is the rulebook.
 * **A block owns its code.**  A fix goes into the block whose surface it changes (even an early block); the
   per-block build gate (`scripts/gate-per-block-build.sh`) exists because appending fixes to the last block
-  once broke blocks 06-14 silently.
+  once broke blocks 06-14 silently.  **Two recent exceptions are deliberate and documented**: r106's
+  `GGML_OP_ALL_GATHER` collective and the slab narrow-2 fix both landed in **block 11** rather than blocks
+  09/10, because `ggml-cuda-slab.cu` does not exist before block 10 and re-cutting blocks 09/10's history for
+  an additive, last-block-applied change would have rebuilt the whole chain for no delivery difference.
+  Blocks 00-10 are byte-identical to r105; only block 11 changed.
+* **The Meta backend's only cross-device primitive was a sum-reduce (`PARTIAL`)** until r106 added
+  `GGML_OP_ALL_GATHER` (block 11): the result is `MIRRORED`, it is its own subgraph boundary, it is dropped
+  from every per-device child graph, and the collective copies each device's slice into every device's copy
+  **one row (of every dim above the split axis) at a time** — the slice is contiguous in its own copy but
+  strided in the full tensor, and the destination offsets are the canonical cumulative extents from
+  `ggml_backend_meta_get_tensor_impl` (device order = tensor order; `rotation` only rotates which fraction a
+  device gets).  Only a plain axis-0 split is implemented; anything else aborts by design.
 * **Cross-backend consistency.**  The set is AMD-targeted but generic code: a new predicate, KV type or
   iface entry must stay consistent on every backend (an inconsistent set is a crash on whichever backend
   reaches it).  Behaviour/perf on non-AMD is out of scope — see AGENTS.md.

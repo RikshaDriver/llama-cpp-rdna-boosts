@@ -184,6 +184,21 @@ stub alive to serve them, and treat a `wip/` path in an old record as a historic
   probe.  **Keep hipBLASLt enabled in the delivery** (disabling it costs up to -15 % decode; the switch is
   for reproducible runs and bisection only).  `GREEDY-PURITY.md` §44,
   `archive/work/fix-gemma-4/evidence/MEASUREMENTS-2026-10-21d.md`.
+- **DFlash2 under `-sm tensor` is supported (r106, TODO #78 closed):** the selector's `ggml_top_k` /
+  `ggml_get_rows` over the draft logits -- which are the *target's* `output.weight` projection, placed
+  vocabulary-split -- are served by a new general collective **`GGML_OP_ALL_GATHER`** (`ggml_all_gather()`)
+  that `build_dflash2_selector()` emits when the draft is a >= 2-device tensor split.  On the Meta backend it
+  is `MIRRORED`, its own subgraph boundary, and dropped from every per-device child graph; the collective
+  copies one row (of every dim above the split axis) at a time because a slice is contiguous in its own copy
+  but strided in the full tensor.  **Only a plain axis-0 split is implemented** (anything else aborts by
+  design), and there is no env knob: `-sm layer` is the escape hatch.  Mirroring the *drafter* does not work
+  (the offending tensor is the target's), and neither does demoting only the drafter to `-sm layer` (a
+  layer-split context cannot read the target's Meta-buffer weights).  Two related fixes ship with it: the F1
+  `extract_layer_inputs()` device copy cannot express a Meta buffer (host path instead; it aborted for **any**
+  DFlash drafter with `dflash.target_layers`), and the **slab narrow-2** pin must yield from the arena when
+  the draft's compute buffer exceeds the unmapped VA spare (a tensor-split drafter's is 1280 MiB against the
+  estimator's 512 MiB tier; without it `-sm tensor` + draft + `-ncmoe` aborts in `graph_reserve`).  Rule:
+  `patches/README.md` (block 11, "Facts that span blocks").
 - **Thread sizing is not optional.** `/usr/local/bin/pin_gpu_irqs.sh` puts the GPU IRQs on the top
   `NUM_GPUS` cores (13,14,15 with 3 GPUs); the default `-t` puts the worker pool there and starves the
   GPU (Q4_K_M `-ncmoe 99` tg1024: `-t 16` 19.6 vs `-t 8` 38.9). Size `-t` (or `--cpu-mask` with `-t`

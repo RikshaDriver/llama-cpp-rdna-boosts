@@ -1,5 +1,78 @@
 # WORKLOG - dated delivery records
 
+## 261021.016 (r106) -- DFlash2 under `-sm tensor`: the Meta `ALL_GATHER` collective (TODO #78 closed)
+
+**Release `v12-097cf33d9-r106`**, 12 blocks, fork point `097cf33d9`, tip `ee6a91147`, tree
+`d3c1e6c53ab60b027a51474eaca3a12fbff2ea7b`.  One block amendment: **11** (the whole fold -- see below for why
+it did not go to 09/10).  Campaign record: `archive/work/dflash-meta-split-impl/` (`FINDINGS-2026-10-21.md`,
+`RESOLUTION.md`, `all-gather.patch`, the as-validated change).
+
+**What was broken.** A DFlash2 drafter with a selector (`dflash.selector_rank > 0`) aborted under
+`-sm tensor` and was cleanly rejected since r54: its selector reduces along the vocabulary axis
+(`ggml_top_k` picks the candidates, `ggml_get_rows` reads their values), and the draft logits come from the
+**target's** `output.weight` projection, which the target's policy places vocabulary-split.  Two obvious
+routes were refuted first, with evidence: **mirroring the drafter** changes nothing (the offending tensor is
+the target's, resolved through the *buffer's* buft device, and it stayed `SPLIT_AXIS_0` with extents
+`[124160, 124160]`), and **demoting only the drafter to `-sm layer`** aborts at load (a layer-split draft
+context cannot read the target's shared embedding/lm-head out of the target's `Meta()` buffers).
+
+**The fix.** The campaign's route (b): a **split→mirrored gather**, as a new general ggml collective
+`GGML_OP_ALL_GATHER` (`ggml_all_gather()`), used in `build_dflash2_selector()` whenever the draft is a
+≥ 2-device tensor split.  On the Meta backend the result is `MIRRORED`, the op is its own subgraph boundary,
+the node is dropped from every per-device child graph, and the collective copies each device's slice into
+every device's copy **one row at a time** (the slice is contiguous in its own copy but strided in the full
+tensor; the destination offsets are the canonical cumulative extents of
+`ggml_backend_meta_get_tensor_impl`).  Only a plain axis-0 split is implemented -- anything else aborts by
+design.  CPU/CUDA execute the op as a copy, `RPC_PROTO_PATCH_VERSION` goes 7 → 8 (the op enum is on the wire),
+and the r54 rejection is removed.  The gather was verified **byte-exact** against the canonical host
+assembly for `[248320,2]` and `[248320,4]` tensors while it was instrumented.
+
+**Two defects the work surfaced, both fixed here.**  (1) `extract_layer_inputs()`'s F1 "device" copy is one
+pointer range, which a Meta buffer cannot express: under `-sm tensor` it aborted in
+`ggml_backend_tensor_set(NULL)` (via `ggml_backend_meta_buffer_set_tensor`).  **Pre-existing for any** DFlash
+drafter that requests `dflash.target_layers` -- the r54 guard only covered selector models.  It now takes the
+host path (byte-identical output; the escape hatch the allocation failure already used).  (2) The slab's
+**narrow-2** region only accepted the VA the creation reservation left unmapped, i.e. the *draft-context
+estimate* whose `compute` term is a measured 512 MiB tier; a tensor-split drafter runs the whole draft graph
+on every device, so its per-device compute buffer measured **1280 MiB** and did not fit, and the fallback
+`cudaMalloc` could not fit either with the slab holding the VRAM (`graph_reserve: failed to allocate compute
+buffers` for `-sm tensor` + a draft + `-ncmoe`).  The pin is now two-phase -- decide under the lock, evict
+the arena tables in `[off, mapped)` **outside** it (`moe_cache_evict_slab_range` re-enters through
+`arena_free`), then commit by capping the arena at the new top when the region is below `mapped` -- so the
+arena yields (r20) instead of the run aborting.
+
+**Measured** (`Qwen3.8-27B-UD-Q4_K_XL` + `Qwen3.8-27B-DFlash2-Q4_K_M`, `-c 16384`, q8_0 K/V, 5258-token
+prompt, `-n 128 --seed 42 --temp 0`):
+
+| config | 2 GPU decode | 3 GPU decode |
+|---|---|---|
+| plain, `-sm tensor` | 44.7 t/s | 40.8 t/s |
+| DFlash2, `-sm layer` (the only config that worked before) | 63.4 t/s | 60.8 t/s |
+| **DFlash2, `-sm tensor` (r106)** | **84.5 t/s** | **61.1 t/s** |
+
+Draft acceptance is **identical to `-sm layer`** (0.67742, per-position rates `0.857/0.714/0.429`), the text is
+deterministic across runs, `--parallel 2` is coherent on both slots, and `Qwen3.6-35B-A3B-Q8_0` + its DFlash2
+goes 161.9 → **191.0 t/s**.  The slab fix, no override env anywhere: 35B-A3B-Q8_0 + DFlash2 `-ncmoe 20
+-c 8192` **2 GPU abort → 138.6 t/s** and **3 GPU abort → 87.4 t/s** (acceptance 0.849), while the
+fits-in-the-spare arm is unchanged (1 GPU `-ncmoe 40`: 0.75 GiB from the *unmapped VA spare*, 98.5 t/s).
+
+**Gates.**  `test-backend-ops` **3/3**; `scripts/gate-prefill-logits.sh` against the r105 base (Qwen3.8-27B-Q8_0)
+**mean KLD 0.000000 / same-top-p 100.000 %**; the 4B/9B dense greedy text **byte-identical to the r105 build**;
+`scripts/validate-set.sh` green (12/12 strict `git am`, applied tree == `release.json.tree`);
+`gate-per-block-build.sh` not re-run: blocks 00-10 are **byte-identical commits** to r105 and only block 11
+changed, so their per-block builds are the ones r105 already validated.
+
+**Why block 11 and not 09/10** (recorded because it bends the "a fix goes into the block that owns it" rule):
+`ggml-cuda-slab.cu` does not exist before block 10, and amending blocks 09/10 would have re-cut the entire
+chain (conflicts in `ggml.h`/`ggml.c`/`ggml-rpc.h`/`ggml-backend-meta.cpp`, all of which block 10 edits) for an
+entirely additive change that applies last.  The delivery content is identical either way; blocks 00-10 stay
+untouched and the r105 validation of them still holds.
+
+**States.**  `-sm tensor` + DFlash2 is a supported configuration; `-sm layer` remains the escape hatch (no new
+environment variable, by the maintainer's decision).  A true Meta *distributed* top-k (gathering
+`top_k × n_devices` candidates instead of the whole row) stays available as a later optimisation -- the gather
+measured inside the draft step's noise.  `TODO` #78 is closed and its campaign is archived.
+
 ## 261021.015 (r105) -- issue #201 fixed (the async-input ring is actually per-origin) + `mmf32` default-on for RDNA3_5
 
 **Release `v12-097cf33d9-r105`**, 12 blocks, fork point `097cf33d9`, tip `dfb7fe80d`, tree
