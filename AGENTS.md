@@ -12,7 +12,7 @@ release history here — this file is the policy layer, not the log.
 ## What this repo is
 
 A **delivery repo**. It packages the RDNA/ROCm work of the [`stew675/llama.cpp`](https://github.com/stew675/llama.cpp)
-fork (`rdna-boosts` branch) as a **13-block set (V2.0)** (block 00 + blocks 01-12) that applies to a clean
+fork (`rdna-boosts` branch) as a **14-block set (V2.1)** (block 00 + blocks 01-13) that applies to a clean
 llama.cpp checkout at the fork point named in `release.json`. This repo is NOT the fork: the fork
 lives at `~/llama.cpp`; its `rdna-boosts` branch is re-cut from `patches/` on every release and
 force-pushed to the personal fork so it never goes stale (see the Pushing policy). `patches/` is the
@@ -80,7 +80,7 @@ amendment, or a note in the relevant record).
 | `BASELINE.md` | fork point, what the patches are, how they are cut, drift policy. Its dated baseline/re-base records are in `archive/docs/baseline-history.md` |
 | `TODO.md` | **forward-looking only**: open items, items waiting on someone else, accepted limitations, parked ideas. A closed item is one `WORKLOG.md` entry — never a TODO entry. `#NN` numbers are permanent handles and are never reused |
 | `GREEDY-PURITY.md` | the purity rulebook (index + invariants + per-finding claims); dated narratives/evidence are in `archive/docs/GREEDY-PURITY-FINDINGS.md` under the same `§` numbers |
-| `patches/` | **the delivery set** (0000-0012: block 00 + blocks 01-12) + `README.md`, the per-block reference (what each block contains, its knobs, its purity notes). The dated amendment notes moved to `archive/docs/patch-notes-history.md` |
+| `patches/` | **the delivery set** (0000-0013: block 00 + blocks 01-13) + `README.md`, the per-block reference (what each block contains, its knobs, its purity notes). The dated amendment notes moved to `archive/docs/patch-notes-history.md` |
 | `scripts/` | `apply-all.sh` (the tested apply flow, strict tree check + `git am -3` fallback), `gate-prefill-logits.sh` (the prefill-logit KLD release gate, issue #113), `gate-per-block-build.sh` (a clean `all` build per block commit), `gate-qwen4exp-quant-coherence.sh`, `check-gpu-faults.sh` (reads the kernel journal and scans a llama log for **real** GPU faults, filtering the echoed prompt lines — never grep a log for `page fault`/`slab` by hand), `make-patches.sh`, `make-release.sh`, `validate-set.sh` (checksums + fresh-tarball strict apply, runs in CI), `build-containers.sh` (the image build itself), `container-watch.sh` (the off-host release watcher, run on `radiance`), `cleanup-ghcr.py` (GHCR version retention; called by `build-containers.sh --push`), `extract-generated.py` (hashes llama-cli generated text; a naive sed/grep slice does not reproduce the hashes), `check-windows-paths.sh` (fails on a path that Windows cannot check out). **Index: `scripts/README.md`** |
 | `rdna-boosts-all.patch` | the entire 12-patch net as ONE patch (fork point only) |
 | `benchmarks/` | dated bench records + methodology; **`mtp-adaptive-methodology.md` = the adaptive-MTP baseline gate** (run before shipping any decode/fusion change) and **`prefill-logit-methodology.md` = the prefill-logit KLD gate** (run before shipping any prefill-kernel change or release) |
@@ -162,14 +162,18 @@ stub alive to serve them, and treat a `wip/` path in an old record as a historic
 
 - **`llama-cli` MUST be run with `--single-turn`** (plus `--no-display-prompt` for scripted output).
   Without it, the interactive chat loop blocks forever. Wrap potentially blocking commands in `timeout`.
-- **Apply method:** all 13 blocks with **`git am`**; `scripts/apply-all.sh` is the tested path. Plain
+- **Apply method:** all 14 blocks with **`git am`**; `scripts/apply-all.sh` is the tested path. Plain
   `git apply` of the concatenated series **silently drops hunks**. Every block is a normal commit.
-- **Naming (V2.0):** the current set is **13 blocks, 00-12** (`v13-097cf33d9-r107`).  Every `block NN`
-  reference elsewhere in this file that is not one of the V2.0 numbers below is the **pre-V2.0 16-block
-  numbering** and is kept as a historical handle.  The V2.0 map: **01** all-reduce, **02** adaptive MTP,
+- **Naming (V2.1):** the current set is **14 blocks, 00-13** (`v14-097cf33d9-r109`).  Every `block NN`
+  reference elsewhere in this file that is not one of the V2.1 numbers below is the **pre-V2.1 16-block
+  numbering** and is kept as a historical handle.  The V2.1 map: **01** all-reduce, **02** adaptive MTP,
   **03** chunked GDN, **04** BF16 KV, **05** FA band/native/derived, **06** MMB, **07** k-quant,
-  **08** fused kernels (fused MoE), **09** host-resident MoE (slab/cache), **10** qwen4exp, **11**
-  campaign remainder, **12** MTP draft vocabulary subset (opt-in).
+  **08** fused kernels (fused MoE), **09** host-resident MoE (slab/cache), **10** slab + fusion dispatcher
+  + async input ring (infrastructure), **11** qwen4exp (model/QSA/HC/lazy reader), **12** campaign
+  remainder, **13** MTP draft vocabulary subset (opt-in).  V2.1 split r109's old block 10 in two: the
+  **infrastructure stays 10**, the **qwen4exp architecture is 11** (QSA went with it by decision), so
+  every pre-r109 "block 10" note about slab / dispatcher / async-input is still block 10 while a note
+  about qwen4exp / QSA / HC / the lazy reader is now block 11.
 - **Throughput is NOT a correctness signal.** Verify coherence (same-seed `llama-cli` diff, or
   `archive/work/tools/ar_kernel_unit.cpp`). Decode perf work is validated at **depth-16384**, not
   shallow `llama-bench`. **Never run parallel/background benches.**
@@ -198,7 +202,7 @@ stub alive to serve them, and treat a `wip/` path in an old record as a historic
   DFlash drafter with `dflash.target_layers`), and the **slab narrow-2** pin must yield from the arena when
   the draft's compute buffer exceeds the unmapped VA spare (a tensor-split drafter's is 1280 MiB against the
   estimator's 512 MiB tier; without it `-sm tensor` + draft + `-ncmoe` aborts in `graph_reserve`).  Rule:
-  `patches/README.md` (block 11, "Facts that span blocks").
+  `patches/README.md` (block 12, "Facts that span blocks").
 - **Thread sizing is not optional.** `/usr/local/bin/pin_gpu_irqs.sh` puts the GPU IRQs on the top
   `NUM_GPUS` cores (13,14,15 with 3 GPUs); the default `-t` puts the worker pool there and starves the
   GPU (Q4_K_M `-ncmoe 99` tg1024: `-t 16` 19.6 vs `-t 8` 38.9). Size `-t` (or `--cpu-mask` with `-t`
@@ -245,7 +249,7 @@ stub alive to serve them, and treat a `wip/` path in an old record as a historic
   Protocol: `benchmarks/prefill-logit-methodology.md`, `GREEDY-PURITY.md` §46.
 - **Mixed K/V cache types are HARD-REJECTED** at context creation (`params.type_k != params.type_v`);
   every mixed pair measured 1.7-3.6x slower and never smaller. Pass matching `-ctk`/`-ctv`.
-- **The MTP draft-vocabulary trim is opt-in and draft-only (block 12, r107).**  `--spec-draft-mtp-vocab N`
+- **The MTP draft-vocabulary trim is opt-in and draft-only (block 13, r107).**  `--spec-draft-mtp-vocab N`
   copies the LM-head rows for ids `< N` (+ control/user ids) into the draft context, scores the draft over them
   and scatters into a full-vocab row of `-inf`; the target still verifies the full vocabulary, so the trim can
   only lose proposals.  `0` = off = today's code path.  **N is payload-specific** (98304 on Qwen3.8-27B Q8_0,
@@ -418,10 +422,10 @@ stub alive to serve them, and treat a `wip/` path in an old record as a historic
 ```bash
 git clone https://github.com/ggml-org/llama.cpp && cd llama.cpp
 git checkout <release.json.base>
-bash <this-repo>/scripts/apply-all.sh .     # creates branch rdna-boosts, 12 commits
+bash <this-repo>/scripts/apply-all.sh .     # creates branch rdna-boosts, 14 commits
 
 # with the beta candidates on top (NOT the release tree; for a beta test only)
-bash <this-repo>/scripts/apply-all.sh --include-beta .   # 13 blocks + beta/*/*.patch (14 commits)
+bash <this-repo>/scripts/apply-all.sh --include-beta .   # 14 blocks + beta/*/*.patch (15 commits)
 ```
 
 ### Verify (the coherence gate — mandatory after any change)

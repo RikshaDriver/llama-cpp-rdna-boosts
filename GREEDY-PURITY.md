@@ -11,10 +11,12 @@ which false trails were ruled out) are in
 numbers.  The delivery-side record of each amendment is in `patches/README.md` and `WORKLOG.md`.  Section
 numbers are **stable** — dozens of docs cite them — so they are never renumbered; new findings append.
 
-> **Numbering.**  This document uses the **V2.0 block** numbering for new text (13 blocks, `00`-`12`).  Entries written
+> **Numbering.**  This document uses the **V2.1 block** numbering for new text (14 blocks, `00`-`13`; r109
+> split the old block 10 into block 10 = infrastructure and block 11 = qwen4exp, and moved the campaign
+> remainder to block 12 and the MTP-vocab trim to block 13).  Entries written
 > before 2026-10-13 use the **pre-V2.0 16-block** numbering ("block 10" = the k-quant/VDR umbrella, now
-> **block 07**; "block 13" = fused MoE/`mmvq`, now **block 08**; "block 14" = qwen4exp, now **block 10**;
-> "block 15" = the campaign remainder, now **block 11**).  §39/§40 appear twice in the original numbering;
+> **block 07**; "block 13" = fused MoE/`mmvq`, now **block 08**; "block 14" = qwen4exp, now **block 11**;
+> "block 15" = the campaign remainder, now **block 12**).  §39/§40 appear twice in the original numbering;
 > the later pair is labelled **§39b/§40b** here.
 
 ## The invariants (everything below is evidence for these)
@@ -107,7 +109,7 @@ numbers are **stable** — dozens of docs cite them — so they are never renumb
 | **§45** | a split the op cannot serve locally must be rejected, never approximated — and "locally" means no device straddles the reduction | fix (r101) |
 | **§46** | a tile→WMMA family switch is judged at a calibrated point (base PPL in the gate's domain) against a same-kernel ubatch control; the r102 head-512 rows pass there | doctrine (r102, TODO #81 closed 2026-10-21) |
 | **§47** | an exact F32 GEMM in a different summation order is a family switch too; own the path in-code and judge it against the same-kernel control (12/12 fresh starts determinism, +4.2 % prefill) | fix (r104, TODO #82 closed; default extended to RDNA3_5 in r105) |
-| **§48** | a draft-side vocabulary restriction cannot change an accepted token, but the verify *schedule* can change the text: gate it inside `n_max <= 7` | doctrine (r107, block 12) |
+| **§48** | a draft-side vocabulary restriction cannot change an accepted token, but the verify *schedule* can change the text: gate it inside `n_max <= 7` | doctrine (r107, block 13) |
 | **§49** | a fused chain's launch geometry comes from the *flat* projection, never from a consumer's `[…, n_seq_tokens, n_seqs]` view: gate the multi-sequence batch, not just `W = 1..8` single-stream | fix (r108, issue #204) |
 
 ---
@@ -1111,7 +1113,7 @@ protocol at the shipped point: base PPL 1.4345, candidate **0.013016 / 98.673 %*
 
 ## 48. A draft-side vocabulary restriction cannot change an accepted token — the schedule can change the text
 
-**Claim.**  `--spec-draft-mtp-vocab N` (block 12) makes the MTP draft score only the LM-head rows for token ids
+**Claim.**  `--spec-draft-mtp-vocab N` (block 13; block 12 before the r109 split) makes the MTP draft score only the LM-head rows for token ids
 `< N` (+ control/user ids) and scatters them into a full-vocab row of `-inf`.  A speculative token is accepted
 only if the *target* agrees, and the target still scores the full vocabulary, so the trim can only **lose
 proposals** — it can never change an accepted token.  The `-inf` also guarantees the draft sampler cannot pick

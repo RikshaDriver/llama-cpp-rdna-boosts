@@ -12,7 +12,7 @@ upstream moves.  It is not a changelog — the current release, tip/tree and per
 | item | value |
 |---|---|
 | fork point (upstream `ggml-org/llama.cpp` master) | **`release.json .base`** |
-| delivery | 13 blocks, `block 00` + `blocks 01-12` (`release.json .n_blocks`) |
+| delivery | 14 blocks, `block 00` + `blocks 01-13` (`release.json .n_blocks`) |
 | canonical chain | `release.json .tip` / `.tree` |
 | release identity | `release.json .release` (`v12-<base>-r<N>`) |
 
@@ -39,12 +39,15 @@ wrapper, allocator/graph-layout fixes).
 | 07 | k-quant boosts | `mmvq` VDR, Q6_K MMQ, Q1_0, grid pad — **the decode-numerics block** |
 | 08 | fused kernels | conv1d/RMS/top-k MoE/verify fusions, fused MoE gate+up+GLU, per-shape `mmvq` `nwarps` |
 | 09 | host-resident MoE | iface, scheduler, Meta, movable-boundary slab, expert cache, prefill cache staging |
-| 10 | qwen4exp | model, hyper-connections, lazy reader, QSA/indexer, the async graph-input ring |
-| 11 | campaign remainder | CPU wins, backend iface fills, DFlash, FA build grouping, mmap reclaim |
+| 10 | infrastructure: slab, fusion dispatcher, async input ring | the TUs split out of `ggml-cuda.cu` (slab/arena/vmm, `try-fuse`, MoE cache hooks), the async graph-input ring, the GDN/rope/MMB fusions |
+| 11 | qwen4exp | model, hyper-connections, lazy reader, QSA/indexer, the keys-only indexer cache (r109 split of the old block 10) |
+| 12 | campaign remainder | CPU wins, backend iface fills, DFlash, FA build grouping, mmap reclaim |
+| 13 | MTP draft vocabulary subset | `--spec-draft-mtp-vocab N` (opt-in, default off) |
 
 Per-block *content* and edit history is [`patches/README.md`](patches/README.md); per-block verification is
 [`MANIFESTS.md`](MANIFESTS.md).  (`patches/README.md`'s dated notes below its header use the **pre-V2.0
-16-block** numbering and are kept as provenance.)
+16-block** numbering and are kept as provenance; r109's split kept the infrastructure at block 10 and moved
+qwen4exp to block 11.)
 
 ## How the patches are cut
 

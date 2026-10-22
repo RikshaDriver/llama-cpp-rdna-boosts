@@ -13,8 +13,9 @@
 # matters: a version sort (`-v:refname`) mis-orders tags across a re-base, because the
 # base SHA is part of the tag name (`v12-<base>-rN`) and the next base need not sort
 # higher.  The tag *pattern* must not pin the block count: the release id's `v<blocks>`
-# component changed from `v12-` to `v13-` with the V2.0 (13-block) set at r107, and a
-# hardcoded `v12-*` glob then silently reports "up to date" forever (it did for r107
+# component changed from `v12-` to `v13-` with the V2.0 (13-block) set at r107 and to
+# `v14-` with the V2.1 (14-block) set at r109, and a hardcoded `v12-*` glob then
+# silently reports "up to date" forever (it did for r107
 # and r108, caught 2026-10-22).  A `flock` prevents two builds at once and a state
 # file stops a tag being rebuilt.  See CONTAINERS.md, "Offload the image build".
 #

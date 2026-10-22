@@ -10,9 +10,9 @@ support, and an attention-memory campaign that frees several GiB of VRAM.
 [`ENVIRONMENT.md`](ENVIRONMENT.md) documents every variable the set adds or repoints: its default, and
 whether it is a kill-switch (default-on, set to disable), an opt-in, a tuning value, or a diagnostic.
 
-It ships as **13 patches** (block 00 + blocks 01-12) for a clean llama.cpp checkout at the fork point
+It ships as **14 patches** (block 00 + blocks 01-13) for a clean llama.cpp checkout at the fork point
 **`097cf33d9`** (upstream master).  Each block is one `git am` commit, and the series is linear (a block
-assumes its predecessors), so the set is applied whole.  The current release is **`v13-097cf33d9-r108`**: the release
+assumes its predecessors), so the set is applied whole.  The current release is **`v14-097cf33d9-r109`**: the release
 identity (fork point, canonical tip/tree, block count and per-artifact sha256) is
 [`release.json`](release.json), and the release note for it -- and for every earlier `rN` -- is the top of
 [`WORKLOG.md`](WORKLOG.md) (newest first; it is the only dated record).  This README describes the set,
@@ -21,13 +21,13 @@ not the changelog.
 ```bash
 git clone https://github.com/ggml-org/llama.cpp && cd llama.cpp
 git checkout 097cf33d9
-bash <path-to-this-repo>/scripts/apply-all.sh .   # creates branch rdna-boosts (13 commits)
+bash <path-to-this-repo>/scripts/apply-all.sh .   # creates branch rdna-boosts (14 commits)
 
 # OPTIONAL: a beta candidate on top (NOT the release tree -- for beta testing only)
-bash <path-to-this-repo>/scripts/apply-all.sh --include-beta .   # 13 blocks + beta/*/*.patch
+bash <path-to-this-repo>/scripts/apply-all.sh --include-beta .   # 14 blocks + beta/*/*.patch
 ```
 
-- One-line summary of each block: [The 13 blocks](#the-13-blocks-v20)
+- One-line summary of each block: [The 14 blocks](#the-14-blocks-v21)
 - What each block contains, its knobs and its purity notes: [`patches/README.md`](patches/README.md)
 - The folded `mmb`/QSA campaign: [The `mmb` campaign is in the delivery](#the-mmb-campaign-is-in-the-delivery)
 - Every environment variable, with its default and class: [`ENVIRONMENT.md`](ENVIRONMENT.md)
@@ -147,9 +147,9 @@ MoE MMQ gate now covers RDNA4 + RDNA3_5 + RDNA3_0 (gfx1151 validated
 > in `archive/docs/` (see also `archive/work/` for the closed experiments).
 > Do not mix them with the current `patches/` files.
 
-## The 13 blocks (V2.0)
+## The 14 blocks (V2.1)
 
-`release.json` (V2.0; the current release).  Each row is one `git am` commit.
+`release.json` (V2.1; the current release).  Each row is one `git am` commit.
 
 | patch | subject | concern |
 |-------|---------|---------|
@@ -163,9 +163,10 @@ MoE MMQ gate now covers RDNA4 + RDNA3_5 + RDNA3_0 (gfx1151 validated
 | `0007` | **k-quant boosts** (mmvq VDR, Q6_K MMQ, Q1_0, grid pad) | old-10 + old-04 MMQ + old-15 Q1_0/grid/PR57; + the RDNA3_0 per-shape mmvq `nwarps` (r93) |
 | `0008` | **fused kernels** (conv1d/RMS/top-k MoE/verify fusions + fused MoE gate+up+GLU) | old-08 fusions + old-13 fused MoE + old-15 PR63/114; + `topk_moe` sorted-key argmax (r52); + the RDNA3_0 per-shape mmvq `nwarps` (r93) |
 | `0009` | **host-resident MoE** (iface, scheduler, Meta, movable-boundary slab, cache engine, prefill cache staging) | old-06 MoE + old-09b + old-11 + old-13 engine + old-15 hooks/arena; + the arena-host staging engine and its residency snapshot (r83); + the slab drop reference (r85); + the slab transient absorption common half and the derived draft reserve (r86); + the complete device-iface fills and the pre-loaded draft-model handoff (r94 block-boundary repair); + the batched f32 CPY run on RDNA3_0 (r95, PR #193); + the restored copy callback, so the upstream `--moe-cache-mib` engine works (r99, TODO #56); + the split-state walk's per-thread scratch arena, so a graph re-allocation stops allocating one heap node per visited tensor (r100, issue #184); + the `--fit` draft reserve charged only to the KV layers a drafter owns (r101), and a loaded-but-unused draft model is not loaded or given a context (r101) |
-| `0010` | **qwen4exp** (model, hyper-connections, lazy reader, QSA/indexer) | old-14 + old-15 HC16/policy; + short-K MoE rows-per-block (r52); + the `stage_from_cache` hook (r83); + the slab narrow band (r85); + the slab transient absorption CUDA/slab half (r86); + the async graph-input ring and its r90 split-input snapshot fix (default-on); + the fixed-D sequential GDN snapshot tail (r91, `GGML_CUDA_GDN_TAIL=0`); + the work-boundary shrink invalidates captured graphs (r94, issue #187); + the verify-band Q8_1 fusions and the GDN conv verify path on RDNA3_0 (r95, PR #192 + #193); + gemma4 dense `-sm tensor` (the Meta split state accepts an empty-or-whole slice for per-row ops, the rotated-K `mul_mat` and flash-attention K/V), the expert cache sizing / multi-slice tables / segmented async upload, the iSWA `q, v, k` KV-builder order and the per-origin async-input ring (r101) |
-| `0011` | **campaign remainder** (CPU wins, DFlash, FA build grouping, mmap reclaim) | old-14 QSA + old-15 W1-W3 + old-06/15 mmap reclaim + old-16; + the expected `--fit` `ctx_other` probe failure logs as a warning, and the draft-context creation is gated on an enabled type that uses it (r101) |
-| `0012` | **MTP draft vocabulary subset** (`--spec-draft-mtp-vocab N`, **opt-in**, default off) | the MTP draft scores only the LM-head rows for token ids < N (+ control/user ids) and scatters them into a full-vocab row of `-inf` — the target's verification is untouched, so the draft can only lose proposals; the `ggml-backend-meta` row-range read that makes it work under `-sm tensor` (r107) |
+| `0010` | **infrastructure** — slab, fusion dispatcher, async input ring, GDN/rope fusions | the translation units split out of `ggml-cuda.cu` (`try-fuse`, slab/arena/vmm, MoE cache hooks) + short-K MoE rows-per-block (r52); + the `stage_from_cache` hook (r83); + the slab narrow band (r85); + the slab transient absorption CUDA/slab half (r86); + the async graph-input ring and its r90 split-input snapshot fix (default-on); + the fixed-D sequential GDN snapshot tail (r91, `GGML_CUDA_GDN_TAIL=0`); + the work-boundary shrink invalidates captured graphs (r94, issue #187); + the verify-band Q8_1 fusions and the GDN conv verify path on RDNA3_0 (r95, PR #192 + #193); + gemma4 dense `-sm tensor` (the Meta split state accepts an empty-or-whole slice for per-row ops, the rotated-K `mul_mat` and flash-attention K/V), the expert cache sizing / multi-slice tables / segmented async upload, the iSWA `q, v, k` KV-builder order and the per-origin async-input ring (r101); + the GDN/attention-gate decode fusions (r102, PR #200) with the r108 multi-sequence fix, and the bf16 RoPE destinations (r103) |
+| `0011` | **qwen4exp** (model, hyper-connections, lazy reader, QSA/indexer) | old-14 + old-15 HC16/policy/QSA; the model graph, the QSA/indexer/HC ops and kernels, the managed lazy reader and the keys-only indexer cache, the qwen4exp tensor-split arch gate, and the qwen4exp fusion arms; split out of `0010` in r109 (tree-identical) |
+| `0012` | **campaign remainder** (CPU wins, DFlash, FA build grouping, mmap reclaim) | old-15 W1-W3 + old-06/15 mmap reclaim + old-16; + the expected `--fit` `ctx_other` probe failure logs as a warning, and the draft-context creation is gated on an enabled type that uses it (r101) |
+| `0013` | **MTP draft vocabulary subset** (`--spec-draft-mtp-vocab N`, **opt-in**, default off) | the MTP draft scores only the LM-head rows for token ids < N (+ control/user ids) and scatters them into a full-vocab row of `-inf` — the target's verification is untouched, so the draft can only lose proposals; the `ggml-backend-meta` row-range read that makes it work under `-sm tensor` (r107) |
 
 Phase-2 additionally moved each concern into a self-contained file: the `ggml_cuda_try_fuse` arms, the
 MMVQ vec-dot/VDR selectors + MoE kernel (`mmvq-vecdot.cuh`, `mmvq-moe.cu`), the FA native-KV/band
@@ -218,13 +219,13 @@ cmake --build build -j
 ### Manual equivalent
 
 ```bash
-git am patches/000[1-9]-*.patch patches/001[0-2]-*.patch   # blocks 01-12
+git am patches/000[1-9]-*.patch patches/001[0-3]-*.patch   # blocks 01-13
 ```
 
 ### The `mmb` campaign is in the delivery
 
 On the **`beta-integration`** branch the `mmb` (bf16-WMMA dequant weight GEMM) / QSA / indexer
-campaign — the former 28-patch `archive/work/mmb-general/` set — is **folded directly into the 13 delivery
+campaign — the former 28-patch `archive/work/mmb-general/` set — is **folded directly into the 14 delivery
 blocks**, so the normal workflow above is all there is to apply.  There is **no separate beta layer
 any more**:
 
@@ -233,18 +234,19 @@ any more**:
   MMVQ routed band;
 * **block 09** absorbs the host-buffer input layer and the tiny-CPU-split single-thread fix (the system
   work of the old catch-all block 06);
-* **block 10** absorbs the deferred `mmb` pair-fusion stand-down and the qwen4exp group (the old block 14);
-* **block 11** absorbs `qsa3`, the fused indexer top-k + prefill score fusions, HC16, `hc_gate_mix`,
-  sparse MTP-draft attention, the sparse-QSA/derived-indexer defaults, and the meta/CPU backend fixes
-  (the old block 15 remainder).
+* **block 10** absorbs the deferred `mmb` pair-fusion stand-down and the infrastructure split out of
+  `ggml-cuda.cu` (slab, fusion dispatcher, async input ring, the GDN/rope fusions);
+* **block 11** absorbs the qwen4exp group: `qsa3`, the fused indexer top-k + prefill score fusions, HC16,
+  `hc_gate_mix`, sparse MTP-draft attention, the sparse-QSA/derived-indexer defaults and the lazy reader
+  (the old block 14 + the old block 15 remainder).
 
-Applying the 13 patches to the fork point in [`release.json`](release.json) therefore reproduces the
+Applying the 14 patches to the fork point in [`release.json`](release.json) therefore reproduces the
 **full campaign tree** in one pass:
 
 ```bash
 git clone https://github.com/ggml-org/llama.cpp && cd llama.cpp
 git checkout 097cf33d9          # the base recorded in release.json
-bash <path-to-this-repo>/scripts/apply-all.sh .   # 12/12 strict, tree checked against release.json
+bash <path-to-this-repo>/scripts/apply-all.sh .   # 14/14 strict, tree checked against release.json
 ```
 
 The per-patch fold mapping and validation record are in

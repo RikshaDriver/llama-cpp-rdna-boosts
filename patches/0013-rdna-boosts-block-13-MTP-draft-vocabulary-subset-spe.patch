@@ -1,7 +1,7 @@
-From 70815f4071db3e027cc7c8b02b831a57bef4b56c Mon Sep 17 00:00:00 2001
+From 933b964c760a181ce0107771b9d439370528ee89 Mon Sep 17 00:00:00 2001
 From: Stew Forster <ci@rdna-boosts.invalid>
 Date: Thu, 22 Oct 2026 05:53:08 -0500
-Subject: [PATCH 12/12] rdna-boosts: block 12: MTP draft vocabulary subset
+Subject: [PATCH 13/13] rdna-boosts: block 13: MTP draft vocabulary subset
  (--spec-draft-mtp-vocab N)
 
 The MTP draft head scores only the LM-head rows for token ids < N plus every

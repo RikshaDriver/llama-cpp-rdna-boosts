@@ -11,8 +11,8 @@ Details never live here: they live in `AGENTS.md`, `patches/README.md`, `MANIFES
 **Numbers are never reused.**  `#NN` is a permanent handle: an old `WORKLOG.md` entry that cites `TODO #74`
 still means the same subject after that item is closed and removed from this file.  New items append.
 
-**Current state:** the **13-block V2.0 set** (block 00 + blocks 01-12) at fork point **`097cf33d9`**,
-release **`v13-097cf33d9-r108`**.  `release.json` is the source of truth for the tip/tree and hashes; the
+**Current state:** the **14-block V2.1 set** (block 00 + blocks 01-13) at fork point **`097cf33d9`**,
+release **`v14-097cf33d9-r109`**.  `release.json` is the source of truth for the tip/tree and hashes; the
 top of `WORKLOG.md` is the newest record.
 
 | # | subject | kind | status |
@@ -26,7 +26,7 @@ top of `WORKLOG.md` is the newest record.
 | **65** | IQ4_NL field (MTP) + `--host-experts pool` decode collapses | memory | parked (maintainer 2026-10-15; the "after r67" condition is long past — never picked up, still parked) |
 | **70** | harden the expert-cache re-arm / wide-aux growth against a starved arena | robustness | open |
 | **79** | RDNA3_0 verify-band fusions: no multi-device measurement, and gfx1101/gfx1102 untested | platform validation | open (shipped default-on in r95; needs a 2+ card gfx1100 box).  `ssh fingon` is single-RDNA3 (`ROCm0`; its second rocm-smi entry is an iGPU and is not a HIP device), so it does **not** cover the multi-device arm — it validates single-GPU gfx1100 only.  gfx1101/gfx1102 still have no hardware |
-| **83** | `--spec-draft-mtp-vocab N`: the MTP draft scores a trimmed LM-head row subset | performance (decode) | **shipped in r107 as block 12** (opt-in, default off).  Remaining arms below.  27B Q8_0 2 GPU `-sm tensor` works and gives +3.4 % (adaptive n-max 9) to +5.5 %; trim 0 == today.  gemma4 supported but not beneficial (useful cutoff 245760/262144 = a no-op).  Remaining: full adaptive gate, depth 16384, 3 GPU, `ggml` regression for the new meta read path |
+| **83** | `--spec-draft-mtp-vocab N`: the MTP draft scores a trimmed LM-head row subset | performance (decode) | **shipped in r107 as block 12 (now block 13 since the r109 split)** (opt-in, default off).  Remaining arms below.  27B Q8_0 2 GPU `-sm tensor` works and gives +3.4 % (adaptive n-max 9) to +5.5 %; trim 0 == today.  gemma4 supported but not beneficial (useful cutoff 245760/262144 = a no-op).  Remaining: full adaptive gate, depth 16384, 3 GPU, `ggml` regression for the new meta read path |
 
 Accepted limitations that are deliberately **not** fixed are listed at the end — do not re-report them.
 
@@ -177,7 +177,7 @@ Two gaps, both needing hardware the fleet does not have:
 
 ## 83. `--spec-draft-mtp-vocab N`: the MTP draft scores a trimmed LM-head row subset — PERFORMANCE (decode)
 
-**Shipped in `v13-097cf33d9-r107` as block 12** (opt-in, default off: `--spec-draft-mtp-vocab 0` builds no
+**Shipped in `v13-097cf33d9-r107` as block 12** (block 13 since the r109 split) (opt-in, default off: `--spec-draft-mtp-vocab 0` builds no
 subset and adds no graph node).  Record: `WORKLOG.md` 261022.001; campaign + numbers:
 [`archive/work/spec-draft-mtp-vocab/`](archive/work/spec-draft-mtp-vocab/README.md); PR #205 archived verbatim
 in [`archive/work/pr205-spec-draft-mtp-vocab/`](archive/work/pr205-spec-draft-mtp-vocab/IMPORT.md).

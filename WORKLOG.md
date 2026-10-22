@@ -1,5 +1,68 @@
 # WORKLOG - dated delivery records
 
+## 261022.003 (r109) -- block 10 split in two: the infrastructure stays 10, qwen4exp becomes block 11
+
+**Release `v14-097cf33d9-r109`**, **14 blocks**, fork point `097cf33d9`, tip `933b964c7`, tree
+`8e67f977c02faee882ce2966cdc9bd79db9134d3` -- **the tree is unchanged from r108**.  This is a
+delivery-structure change only: no shipped code, default or knob moved, so every r108 gate result still
+describes the same tree.  Old blocks 00-09 are byte-identical commits; the old block 10 is split into
+**block 10 (infrastructure)** and **block 11 (qwen4exp)**, and the old blocks 11/12 are re-cut as blocks
+**12/13** with unchanged trees (only the subject line and the `[PATCH NN/13]` series counter differ).
+
+**Why.**  Old block 10 was 33.8 k patch lines across 110 files, and it owned four unrelated things: the
+qwen4exp model graph, the movable-boundary slab, the `ggml_cuda_try_fuse` dispatcher TU and the async
+graph-input ring (plus the GDN/MMB/rope fusion work).  A change to any one of them re-cut a block that
+touches all four, which is why every r94-r108 amendment "block 10" needed a whole-file conflict review, and
+why the qwen4exp-only concerns could not be reviewed or reverted on their own.  QSA moved with qwen4exp by
+the maintainer's decision (it was added along with the model).
+
+**How it was cut (tree-identical).**  New block 10 = the old block-10 tree with the qwen4exp/QSA/HC
+surface reverted to its block-09 state; new block 11 = the old block-10 tree exactly
+(`0d79622d9c94930a30254e1c3bf9b79b49883889`, verified equal).  Old blocks 11/12 were then replayed on top;
+the tip tree is `8e67f977...` as before, and `rdna-boosts-all.patch` is **byte-identical**
+(`sha256 79ed963b...`).  Both new blocks build the `all` target on their own.
+
+**Boundary (the rule to apply to a future fix).**  Block 10 keeps the general infrastructure: the slab /
+arena / VMM TUs, the fusion dispatcher and every fusion arm implemented inside a pre-existing kernel TU,
+the async input ring, the rope/FWHT and GDN/MMB fusions.  **Block 11 owns everything that exists only
+because of qwen4exp**: `src/models/qwen4exp.cpp`, `llama-memory-hybrid-idx`, the QSA + indexer ops and
+kernels (`fattn-qsa*`, `indexer-*`, the 4-head WMMA scorer in `lightning-indexer.cu`), the HC ops
+(`hc-mix`, `hyperconn`), the managed lazy reader, the keys-only indexer cache (`llama_kv_cache::v_enabled`),
+the qwen4exp arch gate, and **the fusion arms whose matchers live in those files** (the HC combine-mix /
+mix / combine-norm / gate-mix arms, the indexer relu-sum and its alloc dep, the HC_BLK16/RES16 marking
+pass).  Deliberate exceptions, kept with the TU that owns them in block 10: `GGML_CUDA_FUSE_GATE_BETA_BF16`
+(`mmvf.cu`), the HC16 MMB BF16 streams (`mmb.cu` / `norm.cu` / `unary.cu` / `dsv4-hc.cu` / the optimizer
+marks), `GGML_CUDA_DISABLE_WEIGHTED_DOWN` (`mmvq.cu`), the PLE conv fusion (`ple-conv.cu`) and the
+`GGML_CUDA_FUSE_GDN_CONV_NORM` / `CONT_GATE_Q8_1` / `GDN_NORM_GATE` arms -- all default-on (or gated off)
+behaviour is unchanged.  One qwen-side leftover stays in block 10 on purpose: the
+`cparams.fused_hc_mix` / `fused_hc_combine` initialisation in the `llama_context` constructor
+(`llama-cparams.h` declares both fields but nothing initialised them before r109, so moving it back to
+block 11 would leave block 10 with an uninitialised flag; nothing reads it there).
+
+**Gates.**  `scripts/validate-set.sh` green (checksums, strict **14/14** `git am` on a fresh codeload
+tarball, applied tree `8e67f977` == `release.json.tree`).  `scripts/gate-per-block-build.sh
+--changed-from 70815f407` **4/4** (blocks 10, 11, 12 and the tip each build `all` from a clean build
+directory; blocks 00-09 skipped as delta-identical).  Coherence and the prefill-logit gate re-run on the
+rebuilt tip below.
+
+**Fork refresh (done).**  Per the pushing policy the fork's `rdna-boosts` branch was deleted and
+re-created in a clean `~/llama.cpp` at `097cf33d9` with `scripts/apply-all.sh`: strict `git am`, **14
+commits**, applied tree `8e67f977` == `release.json.tree`.  That fresh chain is the published one (tip
+`933b964c7`; `git am` re-creates the commits, so the SHAs differ from the working chain's `892f9be6a`
+while every block tree is identical — the delivered patches were regenerated from it, so their `From`
+lines name the commits on the branch and `rdna-boosts-all.patch` is still byte-identical `79ed963b`).
+
+**Gates on the refreshed tip (2x R9700, gfx1201).**  MTP Protocol A, four axes, `-n 3000`, 27B Q8_0
+2 GPU `-sm tensor`, `--spec-type none` vs `draft-mtp-adaptive` n-max 7: generation t/s plain -> MTP
+**R 34.5 -> 69.8** (acc 0.588), **P 34.1 -> 94.8** (0.670), **C 34.4 -> 113.4** (0.740), **K 34.3 ->
+115.6** (0.972) — acceptance healthy on every axis and MTP ahead of plain on all four.  Prefill-logit
+gate on this build **0.000000 KLD / 100.000 % same-top-p** against the r108 base; `check-gpu-faults.sh`
+clean on the kernel journal and every run log; `validate-set.sh` green (14/14, tree `8e67f977`).  Docs updated: `AGENTS.md`
+(V2.1 14-block map + naming), `patches/README.md` (block 10 split, blocks 11/12/13 renumbered, the
+knob/purity split), `MANIFESTS.md`, `BASELINE.md`, `README.md`, `ENVIRONMENT.md` (block tags),
+`upstream/*` candidate block references, `CONTAINERS.md` / `scripts/container-watch.sh` tag examples,
+`beta/README.md` numbering example, `TODO.md` (MTP-vocab block number).
+
 ## 261022.002 (r108) -- block 10 amendment: the gate/beta BF16 fusion was wrong for every sequence but the first (issue #204)
 
 **Release `v13-097cf33d9-r108`**, 13 blocks, fork point `097cf33d9`, tip `70815f407`, tree

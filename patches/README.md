@@ -1,6 +1,6 @@
 # The delivery patches — what each block is and what it does
 
-**13 blocks** (block 00 + blocks 01-12) against `release.json.base`, one `git am` commit each.  This file
+**14 blocks** (block 00 + blocks 01-13) against `release.json.base`, one `git am` commit each.  This file
 is the per-block reference: what a block contains, what it changes, the knobs its code reads and the
 purity notes that constrain it.  It is **not** a changelog — the release-by-release record is
 [`../WORKLOG.md`](../WORKLOG.md), the apply order and verification contract is
@@ -18,12 +18,12 @@ and every environment variable is catalogued in [`../ENVIRONMENT.md`](../ENVIRON
 ```bash
 git clone https://github.com/ggml-org/llama.cpp && cd llama.cpp
 git checkout "$(jq -r .base /path/to/rdna-boosts/release.json)"
-bash /path/to/rdna-boosts/scripts/apply-all.sh .          # creates branch rdna-boosts, 12 commits
+bash /path/to/rdna-boosts/scripts/apply-all.sh .          # creates branch rdna-boosts, 14 commits
 bash /path/to/rdna-boosts/scripts/apply-all.sh --include-beta .   # + beta/*/*.patch (NOT the release tree)
 ```
 
 All blocks with **`git am`**, in order.  `git apply` on the concatenated series silently drops hunks; the
-manual equivalent is `git am patches/000[0-9]-*.patch patches/001[01]-*.patch`.  `apply-all.sh` asserts
+manual equivalent is `git am patches/000[0-9]-*.patch patches/001[0-3]-*.patch`.  `apply-all.sh` asserts
 the applied tree equals `release.json.tree` on the strict path.
 
 ## Block index
@@ -43,12 +43,15 @@ only as a rough shape.
 | 07 | `0007-…-block-07-k-quant-boosts-mmvq-VDR-Q6_K-MM` | k-quant boosts (VDR, Q6_K MMQ, Q1_0, grid pad) | +884 / −140 | 9 |
 | 08 | `0008-…-block-08-fused-kernels-old-08-fusions-ol` | fused kernels + fused MoE | +5369 / −445 | 36 |
 | 09 | `0009-…-block-09-host-resident-MoE-iface-schedul` | host-resident MoE: iface, scheduler, cache, slab hooks | +14175 / −535 | 65 |
-| 10 | `0010-…-block-10-qwen4exp-model-hyper-connection` | qwen4exp, the slab TU, the fusion dispatcher, async input | +22660 / −5135 | 110 |
-| 11 | `0011-…-block-11-campaign-remainder-CPU-wins-bac` | campaign remainder (+ r106: Meta `ALL_GATHER`, DFlash2 `-sm tensor`, slab narrow-2) | +1329 / −157 | 23 |
-| 12 | `0012-…-block-12-MTP-draft-vocabulary-subset-spe` | MTP draft vocabulary subset (`--spec-draft-mtp-vocab N`, opt-in) | +569 / −6 | 19 |
+| 10 | `0010-…-block-10-slab-fusion-dispatcher-async-in` | slab + fusion dispatcher + async input ring (infrastructure) | +11794 / −4753 | 75 |
+| 11 | `0011-…-block-11-qwen4exp-model-hyper-connection` | qwen4exp model/QSA/HC/lazy reader/indexer cache | +11775 / −419 | 46 |
+| 12 | `0012-…-block-12-campaign-remainder-CPU-wins-bac` | campaign remainder (+ r106: Meta `ALL_GATHER`, DFlash2 `-sm tensor`, slab narrow-2) | +1329 / −157 | 23 |
+| 13 | `0013-…-block-13-MTP-draft-vocabulary-subset-spe` | MTP draft vocabulary subset (`--spec-draft-mtp-vocab N`, opt-in) | +569 / −6 | 19 |
 
-Block 05's file count is `template-instances/*.cu` (the FA kernel instantiations); block 10's size is
-dominated by `qwen4exp` + the slab/fusion translation units that were split out of `ggml-cuda.cu`.
+Block 05's file count is `template-instances/*.cu` (the FA kernel instantiations); block 10 is the
+infrastructure split out of `ggml-cuda.cu` (slab/arena/try-fuse TUs) and block 11 is the qwen4exp
+architecture (model, QSA/indexer/HC kernels, lazy reader) that used to share block 10 with it — the r109
+split, tree-identical.
 
 ---
 
@@ -573,19 +576,17 @@ routing's slots — `GREEDY-PURITY.md` §43).
 
 ---
 
-## Block 10 — qwen4exp, the slab, the fusion dispatcher, the async input ring
+## Block 10 — the slab, the fusion dispatcher, the async input ring (infrastructure)
 
-**What it is.**  The largest block, and the one that owns the translation units split out of
-`ggml-cuda.cu`: the qwen4exp (Qwen3.8-Flash-Next) model support, the movable-boundary **slab** allocator,
-the `ggml_cuda_try_fuse` dispatcher, the async graph-input ring's batched uploads, and the qwen4exp-family
-fusions.
+**What it is.**  The infrastructure half of the pre-r109 block 10: it owns the translation units split out
+of `ggml-cuda.cu` (the movable-boundary **slab**, its arena, and the `ggml_cuda_try_fuse` dispatcher), the
+async graph-input ring, and the GDN/MMB/rope decode fusions.  The **qwen4exp architecture it used to carry
+is block 11** (r109 split; the tree is unchanged by the split).  Rule of thumb: a qwen4exp-only piece that
+is implemented inside a general kernel TU (the GDN gate/beta fusion, the HC16 MMB BF16 streams, the
+weighted-down reduction, the PLE conv fusion) stays here with the TU that owns it; a piece that needs this
+block's own symbols (QSA/HC matchers, the indexer relu-sum, the HC_BLK16/RES16 marking pass) is block 11.
 
 **Contents.**
-
-* **qwen4exp** (`src/models/qwen4exp.cpp`, `src/llama-memory-hybrid-idx.cpp`): QSA sparse attention and the
-  fused indexer top-k/score (`indexer-topk.cu`, `lightning-indexer`), hyper-connections (`hc-mix.cu`,
-  `hyperconn.cu`), the managed lazy reader, PLE n-gram loading, the MTP draft head, and the **keys-only
-  indexer cache** (`LLAMA_QSA_KEYS_ONLY`; no V tensor at all).
 * **The slab** (`ggml-cuda-slab.cu`, `ggml-cuda-arena.cu`): one VMM reserve per device split by a movable
   boundary — compute below, MoE arena above, no HIP call at runtime.  Plus the narrow-band learning, the
   wide-phase auxiliary region, pool-wide routing, and the slab transient absorption.
@@ -673,13 +674,58 @@ fusions.
 `GGML_CUDA_FUSE_GDN_NORM_GATE` (r102, all default-on kill-switches; the first is multi-sequence-clean since
 r108 and has a shipped regression test),
 `GGML_CUDA_DISABLE_ROPE_FWHT_SET_ROWS` (now live on iSWA archs, not only on the non-iSWA builder),
-`LLAMA_KV_N_PAD_PREFILL`(+`_FROM`/`_MIN`), `LLAMA_QSA_*`, `GGML_QSA_*`, `LLAMA_HC_*` / `GGML_HC_*`,
-`LLAMA_MTP_SPARSE`.
+`LLAMA_KV_N_PAD_PREFILL`(+`_FROM`/`_MIN`).
 
 **Split-state rule (r101).**  The Meta handlers may only accept a split the op can serve **locally**:
 empty-or-whole per device for a per-row op, for a rotated-K `mul_mat`, and for the FA K/V of a
 multi-sequence ubatch; a split that straddles the reduction is rejected, never approximated.  Every new
 acceptance must come with the same-shape refusal for the straddling case (`GREEDY-PURITY.md` §45).
+
+**Gate.**  Debugging the slab or the arena: `GGML_CUDA_SLAB_STATS=1` (arm/drop/destructor accounting,
+`hole=0` and `outside_failed=0` are the acceptance signals).
+
+---
+
+## Block 11 — qwen4exp: model, hyper-connections, lazy reader, QSA/indexer
+
+**What it is.**  The qwen4exp (Qwen3.8-Flash-Next) architecture support, split out of block 10 in r109 so
+the model graph, the sparse-attention op and the hyper-connections no longer share a commit with the slab,
+the fusion dispatcher and the async input ring.  QSA moves with the model by the maintainer's decision
+(it was added along with qwen4exp).  **The infrastructure it builds on is block 10** — this block adds no
+slab/dispatcher/ring code of its own beyond the arms implemented in its own TUs.
+
+**Contents.**
+
+* **qwen4exp** (`src/models/qwen4exp.cpp`, `src/llama-memory-hybrid-idx.cpp`): QSA sparse attention and the
+  fused indexer top-k/score (`indexer-topk.cu`, `lightning-indexer`), hyper-connections (`hc-mix.cu`,
+  `hyperconn.cu`), the managed lazy reader, PLE n-gram loading, the MTP draft head, and the **keys-only
+  indexer cache** (`LLAMA_QSA_KEYS_ONLY`; no V tensor at all — `llama_kv_cache` gains `v_enabled`).
+* **The QSA/indexer ops**: `fattn-qsa.{cu,cuh}` (VEC and the attached packed-block views),
+  `fattn-qsa3.cu` (the packed-block WMMA prefill kernel, which takes its wide-phase workspace from the
+  block-10 slab), `indexer-score.{cu,cuh}` (the fused score / fill plus the prefill relu-sum fusion),
+  `indexer-topk.{cu,cuh}`, the 4-head WMMA scorer in `lightning-indexer.cu` (RDNA3_5 default, RDNA3_0
+  opt-in, RDNA4 default), the dispatch (`GGML_OP_FLASH_ATTN_QSA` / `INDEXER_TOPK` / `INDEXER_SCORE` /
+  `INDEXER_FILL`), the CPU references, the scheduler op allowlists and the Meta split states.
+* **HC ops** `GGML_OP_HC_MIX` / `HC_COMBINE`: the ops and CPU references, the Meta split states, the
+  `hc_combine_mix` / `hc_mix` / `hc_combine_norm` / `hc_gate_mix` fusion arms, the HC16 planar layout, and
+  the graph-optimizer passes they need (the `LLAMA_HC_BLK16` / `LLAMA_HC_RES16` BF16-stream marks and
+  their alloc deps — default OFF; the MMB side that consumes the marks is block 10).
+* **The managed lazy reader** (`src/llama-lazy-reader.{cpp,h}`) and the loader's `managed_budget`
+  (`LLAMA_LAZY_BUF_MB`, `TENSOR_SKIP_MANAGED`, `lazy_read::add_range`): a fixed-size host arena over the
+  PLE n-gram table, clock-LRU, read on demand.  **Off by default** (it measured slower than both the mmap
+  and the resident path on gfx1151); `LAZY_MODE_AUTO` without the env behaves as upstream auto.
+* **Model/context plumbing**: the qwen4exp MTP draft context gets a hybrid-idx memory instead of a plain KV
+  cache (`LLAMA_MTP_SPARSE=0` restores the dense draft), the recurrent memory stops warning about the
+  speculative verify positions for a context whose recurrent filter matches nothing, the qwen4exp
+  tensor-split arch gate in `llama-arch.cpp` (HIP-only; `ggml-hip/CMakeLists.txt` publishes `GGML_USE_HIP`
+  to the main libraries so the dynamic-backend build reads it), and the prefetch exclusion of a
+  managed-reader tensor.
+* **Tests**: `test-backend-ops -o FLASH_ATTN_QSA` (the QSA CPU oracle) and the `test_hc_mix` cases,
+  `tests/test-lazy-reader.cpp`, and the lazy-reader handover in `test-llama-archs`.
+
+**Knobs.**  `LLAMA_QSA_*`, `GGML_QSA_*`, `LLAMA_HC_*` / `GGML_HC_*` (incl. `LLAMA_HC_BLK16` /
+`LLAMA_HC_RES16` / `LLAMA_HC_GATEMIX`), `LLAMA_MTP_SPARSE`, `LLAMA_LAZY_BUF_MB` /
+`LLAMA_LAZY_READER_STATS`, `GGML_CUDA_LIGHTNING_INDEXER4_GFX1100` / `_GFX1201`.
 
 **Purity.**  qwen4exp's decode/verify band is `HC_FUSED_MAX_TOKENS = 8` and the QSA decode arm band is
 `max(8, n_rs_batch)`; the arm must be chosen from the band and `n_kv`, never `n_tokens == 1`
@@ -688,12 +734,9 @@ acceptance must come with the same-shape refusal for the straddling case (`GREED
 `W = 1..8` matrix cannot see a width-uniform bug (§21).  Also run `scripts/gate-qwen4exp-quant-coherence.sh`
 before changing the device gather or the head zero.
 
-**Gate.**  Debugging the slab or the arena: `GGML_CUDA_SLAB_STATS=1` (arm/drop/destructor accounting,
-`hole=0` and `outside_failed=0` are the acceptance signals).
-
 ---
 
-## Block 11 — campaign remainder
+## Block 12 — campaign remainder
 
 **What it is.**  The tail of the campaigns: CPU wins, the backend-iface fills that every non-CUDA backend
 needs for the new hooks, DFlash, the FA instance build grouping, and the small allocator/model fixes that
@@ -780,12 +823,12 @@ a hook is CUDA-only (the non-CUDA entries stay NULL and the feature is simply in
 * **A block owns its code.**  A fix goes into the block whose surface it changes (even an early block); the
   per-block build gate (`scripts/gate-per-block-build.sh`) exists because appending fixes to the last block
   once broke blocks 06-14 silently.  **Two recent exceptions are deliberate and documented**: r106's
-  `GGML_OP_ALL_GATHER` collective and the slab narrow-2 fix both landed in **block 11** rather than blocks
+  `GGML_OP_ALL_GATHER` collective and the slab narrow-2 fix both landed in **block 12** rather than blocks
   09/10, because `ggml-cuda-slab.cu` does not exist before block 10 and re-cutting blocks 09/10's history for
   an additive, last-block-applied change would have rebuilt the whole chain for no delivery difference.
-  Blocks 00-10 are byte-identical to r105; only block 11 changed.
+  Blocks 00-10 are byte-identical to r105; only what is now block 12 changed (it was block 11 at r106).
 * **The Meta backend's only cross-device primitive was a sum-reduce (`PARTIAL`)** until r106 added
-  `GGML_OP_ALL_GATHER` (block 11): the result is `MIRRORED`, it is its own subgraph boundary, it is dropped
+  `GGML_OP_ALL_GATHER` (block 12): the result is `MIRRORED`, it is its own subgraph boundary, it is dropped
   from every per-device child graph, and the collective copies each device's slice into every device's copy
   **one row (of every dim above the split axis) at a time** — the slice is contiguous in its own copy but
   strided in the full tensor, and the destination offsets are the canonical cumulative extents from
@@ -798,7 +841,7 @@ a hook is CUDA-only (the non-CUDA entries stay NULL and the feature is simply in
   and validated there first; RDNA3.0/3.5 get back-ports (their own kernel files, tuned head caps, their own
   `mmvq` parameter table) and RDNA2 is best-effort.
 * **The arch gate is runtime** everywhere in the set, so one multi-arch binary picks the right path.
-* **`ggml-cuda.cu` is shared by blocks 00/07/08/09/10** and is the usual re-base conflict site; the
+* **`ggml-cuda.cu` is shared by blocks 00/07/08/09/10/11** and is the usual re-base conflict site; the
   `template-instances/*.cu` files are block 05's and are generated (`generate_cu_files.py`).  A new FA
   kernel variant also goes into its own generated instance file, never implicitly into the dispatch TU:
   `nm -C` shows the kernel `W` in the instance TU and `U` in the `...-case-...` TU that selects it (the
@@ -809,7 +852,7 @@ a hook is CUDA-only (the non-CUDA entries stay NULL and the feature is simply in
   its default, and `git grep` on the applied branch for its call sites.  A block's "knobs" list here is the
   set its own hunks read/write, not a claim of exclusive ownership.
 
-## Block 12 — MTP draft vocabulary subset (`--spec-draft-mtp-vocab N`, opt-in)
+## Block 13 — MTP draft vocabulary subset (`--spec-draft-mtp-vocab N`, opt-in)
 
 **What.**  The MTP draft head can score a **row subset of the LM head**: with `--spec-draft-mtp-vocab N` the
 draft context copies the LM-head rows for token ids `< N` plus every control/user-defined id into its own

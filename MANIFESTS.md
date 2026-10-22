@@ -10,8 +10,8 @@ current delivery.
 
 ## Current delivery
 
-13 blocks (`block 00` + `blocks 01-12`) against `release.json.base`, canonical chain `release.json.tip` /
-`.tree`.  `scripts/validate-set.sh` is green (checksums, then a strict 13/13 apply on a fresh tarball,
+14 blocks (`block 00` + `blocks 01-13`) against `release.json.base`, canonical chain `release.json.tip` /
+`.tree`.  `scripts/validate-set.sh` is green (checksums, then a strict 14/14 apply on a fresh tarball,
 tree equality).  Each block is **one** `git am` commit and the series is **linear**: apply in order, never
 reorder, never insert.
 
@@ -29,9 +29,10 @@ reorder, never insert.
 | 07 | `0007-…-block-07-k-quant-boosts-…` | k-quant boosts (`mmvq` VDR, Q6_K MMQ, Q1_0, grid pad) | **the decode-numerics block** — see `GREEDY-PURITY.md` §2/§9 |
 | 08 | `0008-…-block-08-fused-kernels-…` | fused kernels | fusions + fused MoE gate+up+GLU + per-shape `mmvq` `nwarps` |
 | 09 | `0009-…-block-09-host-resident-MoE-…` | host-resident MoE | slab, expert cache, prefill cache staging |
-| 10 | `0010-…-block-10-qwen4exp-…` | qwen4exp | model, hyper-connections, QSA/indexer, async graph-input ring |
-| 11 | `0011-…-block-11-campaign-remainder-…` | campaign remainder | CPU wins, backend iface fills, DFlash, FA build grouping, mmap reclaim |
-| 12 | `0012-…-block-12-MTP-draft-vocabulary-subset-…` | MTP draft vocabulary subset | **opt-in** (`--spec-draft-mtp-vocab N`), default off; draft-only |
+| 10 | `0010-…-block-10-slab-fusion-dispatcher-async-in` | infrastructure: slab, fusion dispatcher, async input ring | the TUs split out of `ggml-cuda.cu`; GDN/rope/MMB fusions |
+| 11 | `0011-…-block-11-qwen4exp-…` | qwen4exp | model, hyper-connections, QSA/indexer, lazy reader, indexer cache (r109 split of the old block 10) |
+| 12 | `0012-…-block-12-campaign-remainder-…` | campaign remainder | CPU wins, backend iface fills, DFlash, FA build grouping, mmap reclaim |
+| 13 | `0013-…-block-13-MTP-draft-vocabulary-subset-…` | MTP draft vocabulary subset | **opt-in** (`--spec-draft-mtp-vocab N`), default off; draft-only |
 
 `rdna-boosts-all.patch` (repo root) is the entire net as ONE patch.  It is a convenience for a one-off
 build at the fork point; it is **not** the reviewable increment and not a substitute for the per-block
@@ -42,7 +43,7 @@ flow.
 ```bash
 git clone https://github.com/ggml-org/llama.cpp && cd llama.cpp
 git checkout "$(jq -r .base /path/to/rdna-boosts/release.json)"
-bash /path/to/rdna-boosts/scripts/apply-all.sh .     # strict 12/12 git am, tree checked vs release.json
+bash /path/to/rdna-boosts/scripts/apply-all.sh .     # strict 14/14 git am, tree checked vs release.json
 ```
 
 `scripts/apply-all.sh` is the only supported flow.  **Do not `git apply` the concatenated series** — it
@@ -145,8 +146,10 @@ fails to apply:
 - **Block-number collisions in old records:** documents written before 2026-10-13 use the
   pre-V2.0 16-block numbering ("block 12" = hybrid all-reduce there, but "block 10" = the k-quant
   umbrella).  `WORKLOG.md`, `archive/` and the dated notes in `archive/docs/patch-notes-history.md` are
-  historical and keep their numbering; `patches/README.md` and this file use the V2.0 numbers, and the
-  block subjects are the table above.
+  historical and keep their numbering; `patches/README.md` and this file use the current (V2.1) numbers,
+  and the block subjects are the table above.  **r109 split the old block 10 in two:** the infrastructure
+  stayed block 10 and the qwen4exp architecture became block 11, so an older note that says "block 10" is
+  block 10 for slab/dispatcher/async-input and block 11 for qwen4exp/QSA/HC/lazy-reader.
 
 ## History
 

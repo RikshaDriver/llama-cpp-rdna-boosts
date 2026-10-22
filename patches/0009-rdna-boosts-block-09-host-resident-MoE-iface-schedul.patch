@@ -1,7 +1,7 @@
-From b4fd1eb8eb323a18cfb83b78e1bb2e8770ebf3dc Mon Sep 17 00:00:00 2001
+From 42f7f77b9a38b8a5d05e56c025108fca9b4a3b27 Mon Sep 17 00:00:00 2001
 From: Stew Forster <ci@rdna-boosts.invalid>
 Date: Wed, 21 Oct 2026 10:40:32 -0500
-Subject: [PATCH 09/12] rdna-boosts: block 09: host-resident MoE (iface,
+Subject: [PATCH 09/13] rdna-boosts: block 09: host-resident MoE (iface,
  scheduler, Meta, slab and cache engine)
 
 old-06 (generic MoE expert-cache iface, scheduler routed-expert rebalance, Meta

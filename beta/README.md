@@ -15,7 +15,7 @@ that carried `beta/mmb-general` and `beta/tensor-fit-fix` (both promoted; see `a
 ## Conventions
 
 * One sub-directory per candidate: `beta/<name>/`.  A numeric prefix orders it relative to the block
-  set (`0012-...` applies after block 11).
+  set (`0014-...` applies after block 13).
 * `README.md` — what the candidate is, why, the patch, and the status (dated entries, newest first).
 * `BETA-TESTING.md` — the apply + build + gate checklist handed to the tester.
 * `<name>.patch` — the patch itself, cut against the current `release.json` tree.  It must `git apply`

@@ -1,10 +1,10 @@
-From 6adf7cf99c9a11b16e1bbe3fc1b63a2fae707633 Mon Sep 17 00:00:00 2001
+From 3e415bc1b793b43d1955fc1ab041810e69734360 Mon Sep 17 00:00:00 2001
 From: Stew Forster <ci@rdna-boosts.invalid>
 Date: Wed, 21 Oct 2026 10:40:32 -0500
-Subject: [PATCH 11/12] rdna-boosts: block 11: campaign remainder (CPU wins,
+Subject: [PATCH 12/13] rdna-boosts: block 12: campaign remainder (CPU wins,
  backend iface fills, DFlash, FA build grouping)
 
-The delivery content not owned by blocks 00-10: the CPU top-k block prefilter
+The delivery content not owned by blocks 00-11: the CPU top-k block prefilter
 (common/sampling.cpp), the x86 quants / repack / arch-fallback campaign wins,
 the ggml-alloc compute-buffer drop/realloc plumbing, the per-backend
 stage_gather / moe_cache_* / slab_* NULL iface fills, the DFlash F1 model
