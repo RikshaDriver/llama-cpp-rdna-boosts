@@ -73,6 +73,31 @@ Two side results from the same run, both worth remembering:
   one pass and one table per pass can be lost to the staged path with a null-buffer `src0`
   (`OFFLINE-audit` note in the resolution).  The tool defaults to the decode band.
 
+### How to read the replayer's metrics (rank order matters)
+
+Misses are PCIe traffic -- on this fleet each R9700 sits behind a **PCIe 5.0 x4** host uplink
+(~16 GB/s raw, half an x8, a quarter of an x16: `AGENTS.md`), so in the partially-resident decode band a
+cut in host bytes is *usually* a cut in token latency.  That makes the replayer's numbers a good proxy for
+t/s -- but not `h`:
+
+1. **`MiB/token`** (fills + cold reads) is the PCIe cost, and the best single predictor.
+2. **covered mass / `covered%`** predicts *future* misses -- what the resident set will still hold.
+3. **`h` last**, because it scores a rejected-and-served-cold miss and an evict-and-refill miss the same,
+   while they cost differently: a fill also *discards a resident* (a future hit) and updates the remap.
+
+The repo has three measured cases where hits and traffic disagree, so do not optimise `h` alone:
+pass-start pre-admission (`window`) **cut traffic 25 % while losing 6.6 pts of `h`** (0.8505 -> 0.7846);
+`MOE_EXPERT_CACHE_ADMIT=touch` deliberately *rejects* fills (more misses, less traffic) and measured best
+at every arena size; and a very small arena can beat the CPU expert path on `h` yet lose on t/s
+(`MOE_EXPERT_CACHE_MIN_RES_PCT`'s ~18 % floor exists for that).  Conversely P2's quota (+0.25 pt `h`,
+-1.6 % traffic) is real but far too small to verify in t/s.
+
+And a policy that wins a few percent of traffic still needs the real bench before it ships: decode is only
+*partly* miss-bound (at high residency the arithmetic, the all-reduce and the verify width dominate -- the
+3-GPU width-dependent deficit is an example), and hipBLASLt's per-start solution lottery (issue #67,
+`GREEDY-PURITY.md` §44) plus run-to-run spread swamp small deltas unless `ROCBLAS_USE_HIPBLASLT=0` is set
+for the A/B.
+
 ## 2. What to measure, in order (offline first)
 
 ### Step 0 — make the replayer model the persisted-prior seed (P0, the whole campaign hinges on it)
