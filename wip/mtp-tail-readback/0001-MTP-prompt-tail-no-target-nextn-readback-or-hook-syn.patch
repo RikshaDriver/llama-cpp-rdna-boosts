@@ -1,0 +1,203 @@
+From 939f375a800443ea3438890fb512cea3f1dabbf3 Mon Sep 17 00:00:00 2001
+From: bsp2020 <bsp2020@gmail.com>
+Date: Thu, 22 Oct 2026 13:25:56 +0000
+Subject: [PATCH] MTP prompt tail: no target nextn readback or hook sync for
+ prompt rows before the ingested tail
+
+LLAMA_MTP_INGEST_TAIL feeds the draft only the last N prompt positions, yet every prompt ubatch still read back all
+of its unmasked nextn rows (~21 MB per 2048-row ubatch) and the MTP hook then called llama_get_embeddings_nextn,
+whose synchronize() drained both GPUs, so the host prepared the next ubatch only after the GPUs had gone idle
+(~20 ms per ubatch boundary).  New staging API llama_set_embeddings_nextn_from(ctx, seq, pos): a ubatch whose every
+row is below its sequence threshold skips that readback and its wait.  The MTP impl sets it to ingest_from - 1 and
+returns from process() before any getter for a prompt batch entirely below it.  An ingested row p reads h(p - 1),
+which is either in its own batch or the previous batch last row (pending_h); both have pos >= ingest_from - 1, so
+nothing the draft reads is skipped.  Graph and target compute unchanged.
+
+Embedding (vision) rows are always read back: under M-RoPE the text after an image resumes at a jumped position, so
+the last image row can be the h(p - 1) of an ingested row although its own position is below the threshold.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ common/speculative.cpp | 26 ++++++++++++++++++++++++++
+ src/llama-context.cpp  | 34 ++++++++++++++++++++++++++++++++--
+ src/llama-context.h    |  2 ++
+ src/llama-ext.h        |  5 +++++
+ 4 files changed, 65 insertions(+), 2 deletions(-)
+
+diff --git a/common/speculative.cpp b/common/speculative.cpp
+index 3b3f4cffd..2da9c115b 100644
+--- a/common/speculative.cpp
++++ b/common/speculative.cpp
+@@ -1705,6 +1705,26 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
+         }
+         ingest_from[seq_id]       = tail > 0 ? std::max<llama_pos>(0, n_prompt - tail) : 0;
+         ingest_prompt_end[seq_id] = n_prompt;
++        // the target's nextn rows below ingest_from - 1 are never read: neither ingested, nor (as a batch's last row,
++        // pending_h) the h(p - 1) of an ingested row p.  Kept equal to max(0, ingest_from - 1) at every reset below.
++        llama_set_embeddings_nextn_from(this->params.ctx_tgt, seq_id, ingest_from[seq_id] - 1);
++    }
++
++    // a prompt batch whose every row is below ingest_from - 1 (prompt phase): nothing to ingest, and its last row
++    // cannot be the h(p - 1) of an ingested row, so return before the getters synchronize the target.  Vision rows
++    // never qualify (M-RoPE: the text after an image resumes at a jumped position; same rule as the target side).
++    bool prompt_batch_unneeded(const common_batch & batch_in) const {
++        if (ingest_prompt_end.empty()) {
++            return false;
++        }
++        for (int k = 0; k < batch_in.size(); ++k) {
++            const auto & t = batch_in.tokens[k];
++            if (t.id == LLAMA_TOKEN_NULL || (size_t) t.seq_id >= ingest_prompt_end.size() ||
++                ingest_prompt_end[t.seq_id] < 0 || t.pos[0] >= ingest_from[t.seq_id] - 1) {
++                return false;
++            }
++        }
++        return true;
+     }
+ 
+     bool process(const common_batch & batch_in) override {
+@@ -1716,6 +1736,10 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
+             return true;
+         }
+ 
++        if (prompt_batch_unneeded(batch_in)) {
++            return true;
++        }
++
+         const int32_t n_tokens = batch_in.size();
+ 
+         // remember the first and last batch index for each sequence
+@@ -1760,6 +1784,7 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
+                         // generation reached: the prompt phase is over, so later position shifts never skip rows
+                         ingest_from[seq_id]       = 0;
+                         ingest_prompt_end[seq_id] = -1;
++                        llama_set_embeddings_nextn_from(ctx_tgt, seq_id, 0);
+                     } else if (t.pos[0] < ingest_from[seq_id]) {
+                         continue;   // LLAMA_MTP_INGEST_TAIL: a prompt row before the ingested tail
+                     }
+@@ -1825,6 +1850,7 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
+             if (have_end && pos_end >= ingest_prompt_end[seq_id]) {
+                 ingest_from[seq_id]       = 0;   // generation reached
+                 ingest_prompt_end[seq_id] = -1;
++                llama_set_embeddings_nextn_from(ctx_tgt, seq_id, 0);
+             } else if (n_rows > 1 && have_end) {
+                 i_row0 += n_rows - 1;
+                 n_rows  = 1;
+diff --git a/src/llama-context.cpp b/src/llama-context.cpp
+index 2f29e698b..9a71edbb4 100644
+--- a/src/llama-context.cpp
++++ b/src/llama-context.cpp
+@@ -1798,6 +1798,12 @@ void llama_context::set_embeddings_nextn(bool value, bool masked) {
+     cparams.embeddings_nextn_masked = masked;
+ }
+ 
++void llama_context::set_embeddings_nextn_from(llama_seq_id seq_id, llama_pos pos) {
++    if (seq_id >= 0 && seq_id < LLAMA_MAX_SEQ) {
++        embd_nextn_from[seq_id] = std::max<llama_pos>(0, pos);
++    }
++}
++
+ void llama_context::set_embeddings_layer_inp(uint32_t lid, bool enable) {
+     LLAMA_LOG_DEBUG("%s: lid = %d, enable = %d\n", __func__, lid, enable);
+ 
+@@ -2885,6 +2891,8 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
+ 
+         // [TAG_EXTRACT_TARGET_EMBEDDINGS]
+         bool extract_all_idxs = extract_layer_inputs(res, n_tokens_prev_l, ubatch.n_tokens);
++        const bool layer_inp_read = extract_all_idxs;
++        bool nextn_read = false;
+ 
+         // extract nextn embeddings before
+         // only meaningful in LLAMA_POOLING_TYPE_NONE (per-token); other pooling modes are ignored.
+@@ -2893,7 +2901,24 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
+             const int64_t n_rows = masked ? n_outputs       : (int64_t) ubatch.n_tokens;
+             const int64_t offset = masked ? n_outputs_prev  : n_tokens_prev_l;
+ 
+-            if (embd_nextn.data && t_h_nextn && n_rows > 0 && cparams.pooling_type == LLAMA_POOLING_TYPE_NONE) {
++            // set_embeddings_nextn_from: an unmasked ubatch whose every row is below its sequence's threshold is not
++            // read back (its host rows stay stale); the row bookkeeping below is kept.  Embedding (vision) rows are
++            // always read: under M-RoPE the text after an image resumes at a jumped section-0 position, so the last
++            // image row can be the h(p - 1) of an ingested row although its own position is below the threshold.
++            bool nextn_unneeded = !masked;
++            for (uint32_t i = 0; i < ubatch.n_tokens && nextn_unneeded; ++i) {
++                if (ubatch.type ? ubatch.type[i] != 0 : ubatch.token == nullptr) {
++                    nextn_unneeded = false;
++                    break;
++                }
++                for (int32_t j = 0; j < ubatch.n_seq_id[i] && nextn_unneeded; ++j) {
++                    const llama_seq_id s = ubatch.seq_id[i][j];
++                    nextn_unneeded = s >= 0 && s < LLAMA_MAX_SEQ && ubatch.pos[i] < embd_nextn_from[s];
++                }
++            }
++            if (embd_nextn.data && t_h_nextn && n_rows > 0 && cparams.pooling_type == LLAMA_POOLING_TYPE_NONE && nextn_unneeded) {
++                extract_all_idxs = true;
++            } else if (embd_nextn.data && t_h_nextn && n_rows > 0 && cparams.pooling_type == LLAMA_POOLING_TYPE_NONE) {
+                 ggml_backend_t backend_h = ggml_backend_sched_get_tensor_backend(sched.get(), t_h_nextn);
+                 GGML_ASSERT(backend_h != nullptr);
+ 
+@@ -2902,6 +2927,7 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
+ 
+                 GGML_ASSERT((offset + n_rows)*n_embd <= (int64_t) embd_nextn.size);
+                 ggml_backend_tensor_get_async(backend_h, t_h_nextn, embd_nextn_out, 0, n_rows*n_embd*sizeof(float));
++                nextn_read = true;
+                 extract_all_idxs = extract_all_idxs || !masked;
+             }
+         }
+@@ -2943,7 +2969,7 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
+         // upload waits only for this graph's compute, not for the copies queued after it, and was observed (Windows, ROCm)
+         // to overwrite a layer input before its copy had read it.
+         static const bool readback_sync = getenv("GGML_READBACK_SYNC") == nullptr || atoi(getenv("GGML_READBACK_SYNC")) != 0;
+-        if (readback_sync && (n_outputs > 0 || extract_all_idxs)) {
++        if (readback_sync && (n_outputs > 0 || layer_inp_read || nextn_read)) {
+             sync_readback(t_logits);
+             sync_readback(t_embd);
+             sync_readback(t_h_nextn);
+@@ -5469,6 +5495,10 @@ float * llama_get_embeddings_seq(llama_context * ctx, llama_seq_id seq_id) {
+     return ctx->get_embeddings_seq(seq_id);
+ }
+ 
++void llama_set_embeddings_nextn_from(llama_context * ctx, llama_seq_id seq_id, llama_pos pos) {
++    ctx->set_embeddings_nextn_from(seq_id, pos);
++}
++
+ void llama_set_embeddings_nextn(llama_context * ctx, bool value, bool masked) {
+     ctx->set_embeddings_nextn(value, masked);
+ }
+diff --git a/src/llama-context.h b/src/llama-context.h
+index 96dcaf264..117617554 100644
+--- a/src/llama-context.h
++++ b/src/llama-context.h
+@@ -124,6 +124,7 @@ struct llama_context {
+ 
+     void set_embeddings (bool value);
+     void set_embeddings_nextn(bool value, bool masked);
++    void set_embeddings_nextn_from(llama_seq_id seq_id, llama_pos pos);
+     void set_embeddings_layer_inp(uint32_t lid, bool enable);
+     void set_nextn_layer_offset(int32_t offset);
+     void set_causal_attn(bool value);
+@@ -367,6 +368,7 @@ private:
+     // populated only when cparams.embeddings_nextn is enabled and the model graph
+     // sets llm_graph_result::t_h_nextn
+     buffer_view<float> embd_nextn = {nullptr, 0};
++    llama_pos          embd_nextn_from[LLAMA_MAX_SEQ] = {};   // set_embeddings_nextn_from: rows below are not read back
+ 
+     // host buffers for output layer input embeddings, per layer
+     // populated when cparams.output_layer_inp[il] is true
+diff --git a/src/llama-ext.h b/src/llama-ext.h
+index 170efb75a..168983941 100644
+--- a/src/llama-ext.h
++++ b/src/llama-ext.h
+@@ -106,6 +106,11 @@ LLAMA_API llama_memory_breakdown llama_get_memory_breakdown(const struct llama_c
+ // If masked == false, output the embeddings for all tokens in the batch regardless of batch.logits
+ LLAMA_API void llama_set_embeddings_nextn(struct llama_context * ctx, bool value, bool masked);
+ 
++// Unmasked nextn rows of `seq_id` at positions < `pos` are not needed by the caller: a ubatch whose every row is
++// such a row skips the device->host copy of the nextn embeddings (and the readback wait).  Those host rows then hold
++// stale data.  0 (the default) = every row is needed.  Used by the MTP prompt-tail ingest (LLAMA_MTP_INGEST_TAIL).
++LLAMA_API void llama_set_embeddings_nextn_from(struct llama_context * ctx, llama_seq_id seq_id, llama_pos pos);
++
+ // Select which appended NextN block the DECODER_MTP graph runs (offset past
+ // the trunk: il = n_layer() + offset). Used by the speculative NextN driver to
+ // chain multiple trained NextN heads. Default 0 (first head).
+-- 
+2.53.0
+
