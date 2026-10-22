@@ -1,13 +1,13 @@
 {
-  "release": "v12-097cf33d9-r106",
+  "release": "v13-097cf33d9-r107",
   "base": "097cf33d9",
   "base_tree": "30c400ccea2e2fb47b663036a6cee08a4dc542d8",
-  "n_blocks": 12,
-  "tip": "2e258d3b1",
-  "tree": "d3c1e6c53ab60b027a51474eaca3a12fbff2ea7b",
+  "n_blocks": 13,
+  "tip": "25bec484e31ba20a0464a2d2df65e0accbd17d9e",
+  "tree": "91bcefc49ef42220ba97a937821fb5e1d4fda6a8",
   "all_patch": {
     "name": "rdna-boosts-all.patch",
-    "sha256": "58cbc3fd964ade590565aee09847728f33a635d3af40a314c5bac204d64263ce"
+    "sha256": "1359ee936cefd30e1b126f66d07e63814a15f0a4bbd7d0ac9f0074b38ec5c195"
   },
   "patches": {
     "0000-rdna-boosts-block-00-foundation-band-uniformity-Meta.patch": "73e791419770af8ed42d6aa882e86aca4fa8f6e1712383aa932e6d6d29f03401",
@@ -21,6 +21,7 @@
     "0008-rdna-boosts-block-08-fused-kernels-old-08-fusions-ol.patch": "dbcf7f3b2d3f8dcd5010ac17e76007c46dac65004e322f17083a4e7201254bb9",
     "0009-rdna-boosts-block-09-host-resident-MoE-iface-schedul.patch": "af017039455b13952ed355666f128d10051cca47dbde553652e69aceeb424a65",
     "0010-rdna-boosts-block-10-qwen4exp-model-hyper-connection.patch": "e8fc8fc2460c1e11203e1e84f2ae9c83e7530dc2ec83936172b532dd8f251e0f",
-    "0011-rdna-boosts-block-11-campaign-remainder-CPU-wins-bac.patch": "b4eddb2f348734b9141c8f7d1ebf99255ba6af11204782da4619538e7ec11e28"
+    "0011-rdna-boosts-block-11-campaign-remainder-CPU-wins-bac.patch": "b4eddb2f348734b9141c8f7d1ebf99255ba6af11204782da4619538e7ec11e28",
+    "0012-rdna-boosts-block-12-MTP-draft-vocabulary-subset-spe.patch": "51ee205c9de23933905448039f52fa5bb57f154ec10e164158ae939d4eb46daa"
   }
 }

@@ -11,7 +11,7 @@ which false trails were ruled out) are in
 numbers.  The delivery-side record of each amendment is in `patches/README.md` and `WORKLOG.md`.  Section
 numbers are **stable** — dozens of docs cite them — so they are never renumbered; new findings append.
 
-> **Numbering.**  This document uses the **V2.0 12-block** numbering for new text.  Entries written
+> **Numbering.**  This document uses the **V2.0 block** numbering for new text (13 blocks, `00`-`12`).  Entries written
 > before 2026-10-13 use the **pre-V2.0 16-block** numbering ("block 10" = the k-quant/VDR umbrella, now
 > **block 07**; "block 13" = fused MoE/`mmvq`, now **block 08**; "block 14" = qwen4exp, now **block 10**;
 > "block 15" = the campaign remainder, now **block 11**).  §39/§40 appear twice in the original numbering;
@@ -107,6 +107,7 @@ numbers are **stable** — dozens of docs cite them — so they are never renumb
 | **§45** | a split the op cannot serve locally must be rejected, never approximated — and "locally" means no device straddles the reduction | fix (r101) |
 | **§46** | a tile→WMMA family switch is judged at a calibrated point (base PPL in the gate's domain) against a same-kernel ubatch control; the r102 head-512 rows pass there | doctrine (r102, TODO #81 closed 2026-10-21) |
 | **§47** | an exact F32 GEMM in a different summation order is a family switch too; own the path in-code and judge it against the same-kernel control (12/12 fresh starts determinism, +4.2 % prefill) | fix (r104, TODO #82 closed; default extended to RDNA3_5 in r105) |
+| **§48** | a draft-side vocabulary restriction cannot change an accepted token, but the verify *schedule* can change the text: gate it inside `n_max <= 7` | doctrine (r107, block 12) |
 
 ---
 
@@ -1106,3 +1107,35 @@ NMSE **6.11e-14** vs rocBLAS 6.83e-13 (a case the kernel does not take is bit-id
 starts one logits class, **+1.0 % pp512 / +1.6 % pp2048** with decode flat, and this same family-switch
 protocol at the shipped point: base PPL 1.4345, candidate **0.013016 / 98.673 %** vs same-kernel control
 **0.019125 / 97.975 %** (no worse on both, PASS with `--allow-control-pass`).
+
+## 48. A draft-side vocabulary restriction cannot change an accepted token — the schedule can change the text
+
+**Claim.**  `--spec-draft-mtp-vocab N` (block 12) makes the MTP draft score only the LM-head rows for token ids
+`< N` (+ control/user ids) and scatters them into a full-vocab row of `-inf`.  A speculative token is accepted
+only if the *target* agrees, and the target still scores the full vocabulary, so the trim can only **lose
+proposals** — it can never change an accepted token.  The `-inf` also guarantees the draft sampler cannot pick
+a row outside the subset.
+
+**Rule (the part that is easy to get wrong).**  Do **not** gate this feature on "trim == no-trim greedy bytes"
+across arbitrary configurations.  The trim changes acceptance, acceptance changes the adaptive controller's
+draft depth, and depth changes the verify batch width — and verify-width numerics can flip a near-tie.  That is
+pre-existing behaviour of the delivery, measured with **no campaign code applied**: the r106 build gives three
+different greedy texts on `prompts/code-reasoning-mixed.txt` (512 tok, `-sm tensor`) for `draft-mtp` n-max 3
+(`92010829c9f6`), n-max 9 (`ec1a197011c4`) and `draft-mtp-adaptive` n-max 9 (`5612aa128fc3`); under `-sm layer`
+n3 (`348b4bb78c8a`) and n9 (`921afe655051`) differ too.
+
+**Why that is not a defect.**  §11 fixes the purity promise at `n_max <= 7` (an 8-token verify batch: the FA
+tile->WMMA switch is at `Q->ne[1] > 8` and `mmvq`->MMQ at `ncols == 8`, and beyond it the reduction order
+changes).  Inside the band, all widths take the same kernels, so the schedule does not matter.
+
+**Evidence (gfx1201, 2x R9700, 2026-10-22, `-n 3000`).**
+
+| run | arms | greedy text |
+|---|---|---|
+| prose, `draft-mtp` n-max 7 | `--spec-type none`, trim 0, trim 64000, trim 98304 | **all `fa4867aa074e`** |
+| code, `draft-mtp` n-max 7 | `--spec-type none`, trim 98304 | **both `f7256a7b1380`** |
+| prose, `draft-mtp-adaptive,ngram-mod` n-max 9 (outside the band) | trim 0 vs trim 64000 | agree for 1952 chars, then a near-tie flips on a code/reasoning phase switch |
+
+So: gate the trim at `n_max <= 7` (text identity against plain decode is then a valid, strong check), or above
+it on acceptance + MTP-vs-plain — exactly what `benchmarks/mtp-adaptive-methodology.md` rule 4 already says for
+any speculator.  Recommended configuration for the block: `--spec-draft-n-max 7 --spec-draft-mtp-vocab 98304`.

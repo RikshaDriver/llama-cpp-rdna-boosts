@@ -10,8 +10,8 @@ current delivery.
 
 ## Current delivery
 
-12 blocks (`block 00` + `blocks 01-11`) against `release.json.base`, canonical chain `release.json.tip` /
-`.tree`.  `scripts/validate-set.sh` is green (checksums, then a strict 12/12 apply on a fresh tarball,
+13 blocks (`block 00` + `blocks 01-12`) against `release.json.base`, canonical chain `release.json.tip` /
+`.tree`.  `scripts/validate-set.sh` is green (checksums, then a strict 13/13 apply on a fresh tarball,
 tree equality).  Each block is **one** `git am` commit and the series is **linear**: apply in order, never
 reorder, never insert.
 
@@ -31,6 +31,7 @@ reorder, never insert.
 | 09 | `0009-…-block-09-host-resident-MoE-…` | host-resident MoE | slab, expert cache, prefill cache staging |
 | 10 | `0010-…-block-10-qwen4exp-…` | qwen4exp | model, hyper-connections, QSA/indexer, async graph-input ring |
 | 11 | `0011-…-block-11-campaign-remainder-…` | campaign remainder | CPU wins, backend iface fills, DFlash, FA build grouping, mmap reclaim |
+| 12 | `0012-…-block-12-MTP-draft-vocabulary-subset-…` | MTP draft vocabulary subset | **opt-in** (`--spec-draft-mtp-vocab N`), default off; draft-only |
 
 `rdna-boosts-all.patch` (repo root) is the entire net as ONE patch.  It is a convenience for a one-off
 build at the fork point; it is **not** the reviewable increment and not a substitute for the per-block
@@ -113,6 +114,7 @@ on the tip.
 | 10 | **(r103)** bf16 K/V prefill runs and is bit-identical to the unfused chain: `llama-bench -ctk bf16 -ctv bf16` (must not abort) + a prefill-logit compare against a base recorded with `GGML_CUDA_DISABLE_ROPE_SET_ROWS=1`; `test-backend-ops -o ROPE -o SET_ROWS` | 5136.70 t/s pp512; KLD −0.000000 / 100.000 %; ROPE+SET_ROWS green |
 | 11 | dense coherence + the block's own arm (DFlash/CPU/mmap): `-ncmoe` peak-RSS check with and without the reclaim | identical text; RSS as recorded in `patches/README.md` |
 | 11 | **(r106) DFlash2 + `-sm tensor`**: a 2- and 3-GPU `--spec-type draft-dflash` run on a selector drafter (coherence, deterministic text, draft acceptance equal to the same config under `-sm layer`), `--parallel 2`, and `-sm tensor` + draft + `-ncmoe` (the slab narrow-2 arm) | all coherent with no override env; acceptance identical to `-sm layer`; `test-backend-ops` 3/3 and `gate-prefill-logits.sh` at KLD <= 0.005 (r106: 2 GPU 84.5 vs 63.4 t/s, 3 GPU 61.1, KLD 0.000000 / 100.000 %) |
+| 12 | **(r107) MTP draft vocabulary subset**: `-sm tensor` 2-GPU run with `--spec-draft-mtp-vocab N` on (the model prints `mtp_draft_vocab = N: MTP draft head uses R of V rows` under `-v`); greedy text at `--spec-draft-n-max 7` against `--spec-type none` (prose **and** code, `-n 3000`); the four-axis adaptive gate (R/C/K/P, `-n 3000`) with the flag off vs on; `test-backend-ops`; `test-logits-width-probe SPLIT=tensor`; `scripts/gate-prefill-logits.sh`; a row-range read check for the `ggml-backend-meta` half | text identical inside the purity band; all four axes not slower (r107: R +1.3 %, P +1.7 %, C +2.4 %, K +0.8 %); `test-backend-ops` 21179/21179; probe W=1..8 maxdiff 0; KLD 0.000000 / 100.000 %; `-sm tensor` works without the trim aborting — `GREEDY-PURITY.md` §48 |
 
 ## Failure handling (agent instruction)
 

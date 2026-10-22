@@ -1,5 +1,69 @@
 # WORKLOG - dated delivery records
 
+## 261022.001 (r107) -- block 12: the MTP draft vocabulary subset (`--spec-draft-mtp-vocab N`, opt-in)
+
+**Release `v13-097cf33d9-r107`**, 13 blocks, fork point `097cf33d9`, tip `25bec484e`, tree
+`91bcefc49ef42220ba97a937821fb5e1d4fda6a8`.  One new block: **12**.  Campaign record:
+`archive/work/spec-draft-mtp-vocab/` (`README.md` = the gate record, `RESOLUTION.md` = the promotion); the
+contributor's PR is archived verbatim in `archive/work/pr205-spec-draft-mtp-vocab/` (merged for authorship).
+`TODO.md` #83 tracks the remaining validation arms.
+
+**What ships.**  `--spec-draft-mtp-vocab N` makes the MTP draft head score only the LM-head rows for token ids
+`< N` plus every control/user-defined id, and scatter the result into a full-vocabulary row of `-inf`.  The
+speculator still sees a full-vocab logit row and **the target's verification is untouched**, so the trim can
+only lose proposals, never change an accepted token.  Opt-in and default off: `0` builds no subset and adds no
+graph node (measured byte-identical to r106 on plain decode and on `draft-mtp` at n-max 1 / 9 / adaptive-9).
+Scope: `qwen35`, `qwen35moe`, `qwen4exp`, `gemma4-assistant` (the last one wired up, not beneficial -- below).
+
+**The bug the campaign had to fix first.**  The subset is copied out of the LM head, and under `-sm tensor`
+that head is **vocabulary-split**; `ggml_backend_meta_get_tensor_impl` could only serve a *whole-tensor* read of
+a 2-D axis-1-split tensor (its splice chunk is `nb[axis + 1]`, which for a 2-D tensor is the whole tensor), so
+`-sm tensor` + the flag aborted with `GGML_ASSERT(size % chunk_size_full == 0)`.  The block adds a
+row-granular splice (segment -> repeat -> device, per-device byte offsets advanced exactly as the setter does).
+Verified 18/18 on a standalone Meta-device check (uneven and even splits, a range straddling the split, a
+repeated `nr = 2` split and a range crossing a repeat, whole tensor, last row) and by the product path itself.
+
+**Gate (gfx1201, 2x R9700, ROCm 10.1.0).**  Qwen3.8-27B Q8_0, 2 GPU `-sm tensor`,
+`--spec-type draft-mtp-adaptive,ngram-mod --spec-ngram-mod-n-match 45`, `-n 3000` per axis, delivery prompt
+files, flag off vs on:
+
+| configuration | R | P | C | K | aggregate |
+|---|---|---|---|---|---|
+| `--spec-draft-n-max 9`, `--spec-draft-mtp-vocab 64000` | 69.7 | **89.4** | 113.4 | 413.7 | 109.0 (-0.4 %) |
+| `--spec-draft-n-max 9`, `--spec-draft-mtp-vocab 98304` | 67.9 | 95.2 | 118.3 | 408.2 | 110.7 (+1.5 %) |
+| baseline (flag 0), n-max 7 | 68.1 | 93.8 | 120.6 | 368.2 | 110.1 |
+| **`--spec-draft-n-max 7`, `--spec-draft-mtp-vocab 98304` (shipped recommendation)** | **69.0** | **95.4** | **123.5** | **371.2** | **111.8 (+1.6 %)** |
+
+The 64000 row is why the cut is payload-specific: it is the reporter's gfx1151 value and it *loses* acceptance on
+our 27B (prose -3.6 %).  At 98304 acceptance is unchanged (0.61925 -> 0.61941, mean accepted length 4.77 ->
+4.86).  n-max 7 is the recommendation because per-position acceptance is already 0.011/0.007 at positions 8-9, so
+the higher ceiling buys nothing and sits outside the purity promise.
+
+**Purity.**  `GREEDY-PURITY.md` §48 (new doctrine).  With the trim on, `--spec-type none` == `draft-mtp`
+n-max 7 at trim 0 / 64000 / 98304 on prose (`-n 3000`, all `fa4867aa074e`) and on code (trim 98304,
+`f7256a7b1380`).  The campaign's first apparent divergence was **outside** the documented band (adaptive n-max
+9): with **no campaign code applied** the r106 build already produces three different greedy texts on
+`prompts/code-reasoning-mixed.txt` for `draft-mtp` n3 / n9 / adaptive-n9, because verify-width numerics flip a
+near-tie.  The item filed for that was withdrawn (it was against a known non-promise, methodology rule 4 /
+§11) and the rule is now written down instead.
+
+**Regression pass.**  `test-backend-ops` **21179/21179** (2/2 backends); `test-logits-width-probe SPLIT=tensor`
+**PASS** (`W=1..8`, `maxdiff_vs_W8=0`); `scripts/gate-prefill-logits.sh` **PASS** (mean KLD 0.000000, same-top-p
+100.000 %) against a base recorded from the r106 build; plain 27B `-sm tensor` decode text- and t/s-identical
+to r106.  `scripts/validate-set.sh` green (13/13, strict `git am`, applied tree = `release.json.tree`).
+
+**gemma4 (supported, not beneficial).**  `gemma4-assistant` + `gemma-4-26B-A4B-it-Q4_0-MTP` (layer split only:
+the assistant arch rejects `-sm tensor` at load): full vocab 150.3 t/s, 64000 -> 104.5 (acceptance 0.669 ->
+0.339), 196608 -> 106.9, 245760 -> 150.5 (a no-op).  Its draft top-1 ids split across ids < 64000 and the
+229376+ "space piece" band, so any lossless cut saves nothing.  A two-band subset (98368 rows, 0.610
+acceptance) measured 0.4 % *slower* and was not shipped (`TODO.md` #83 item 4).
+
+**Cost.**  A second copy of `N/n_vocab` of the LM head, per device under `-sm tensor`: 510 MiB at 98304 on the
+27B (332 MiB at 64000), allocated when the MTP context is created -- i.e. **not** in the `--fit` estimate.
+
+**Not run (open, `TODO.md` #83):** 3 GPU `-sm tensor`, depth-16384 decode, and MoE with `-ncmoe` / expert cache
+active.  The MoE arm that *was* run (35B-A3B Q8_0, 2 GPU tensor) is neutral: 233.5 -> 233.4 t/s.
+
 ## 261021.016 (r106) -- DFlash2 under `-sm tensor`: the Meta `ALL_GATHER` collective (TODO #78 closed)
 
 **Release `v12-097cf33d9-r106`**, 12 blocks, fork point `097cf33d9`, tip `2e258d3b1`, tree

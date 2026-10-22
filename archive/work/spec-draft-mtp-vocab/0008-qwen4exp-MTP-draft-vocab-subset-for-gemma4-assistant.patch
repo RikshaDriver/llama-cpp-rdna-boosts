@@ -1,4 +1,4 @@
-From 74fb56d6c2fc391970c6af5d9a42184730c38df8 Mon Sep 17 00:00:00 2001
+From ceda45ee460cb93006607d61adf577d8d291d9d1 Mon Sep 17 00:00:00 2001
 From: Stew Forster <ci@rdna-boosts.invalid>
 Date: Wed, 21 Oct 2026 23:03:34 -0500
 Subject: [PATCH 8/9] qwen4exp : MTP draft vocab subset for gemma4-assistant

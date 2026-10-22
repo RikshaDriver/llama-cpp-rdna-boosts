@@ -1,6 +1,6 @@
 # The delivery patches — what each block is and what it does
 
-**12 blocks** (block 00 + blocks 01-11) against `release.json.base`, one `git am` commit each.  This file
+**13 blocks** (block 00 + blocks 01-12) against `release.json.base`, one `git am` commit each.  This file
 is the per-block reference: what a block contains, what it changes, the knobs its code reads and the
 purity notes that constrain it.  It is **not** a changelog — the release-by-release record is
 [`../WORKLOG.md`](../WORKLOG.md), the apply order and verification contract is
@@ -45,6 +45,7 @@ only as a rough shape.
 | 09 | `0009-…-block-09-host-resident-MoE-iface-schedul` | host-resident MoE: iface, scheduler, cache, slab hooks | +14175 / −535 | 65 |
 | 10 | `0010-…-block-10-qwen4exp-model-hyper-connection` | qwen4exp, the slab TU, the fusion dispatcher, async input | +22660 / −5135 | 110 |
 | 11 | `0011-…-block-11-campaign-remainder-CPU-wins-bac` | campaign remainder (+ r106: Meta `ALL_GATHER`, DFlash2 `-sm tensor`, slab narrow-2) | +1329 / −157 | 23 |
+| 12 | `0012-…-block-12-MTP-draft-vocabulary-subset-spe` | MTP draft vocabulary subset (`--spec-draft-mtp-vocab N`, opt-in) | +569 / −6 | 19 |
 
 Block 05's file count is `template-instances/*.cu` (the FA kernel instantiations); block 10's size is
 dominated by `qwen4exp` + the slab/fusion translation units that were split out of `ggml-cuda.cu`.
@@ -798,6 +799,52 @@ a hook is CUDA-only (the non-CUDA entries stay NULL and the feature is simply in
   linear and `ggml-cuda.cu` accumulates): `ENVIRONMENT.md` is authoritative for what a variable does and
   its default, and `git grep` on the applied branch for its call sites.  A block's "knobs" list here is the
   set its own hunks read/write, not a claim of exclusive ownership.
+
+## Block 12 — MTP draft vocabulary subset (`--spec-draft-mtp-vocab N`, opt-in)
+
+**What.**  The MTP draft head can score a **row subset of the LM head**: with `--spec-draft-mtp-vocab N` the
+draft context copies the LM-head rows for token ids `< N` plus every control/user-defined id into its own
+head (a **verbatim copy in the LM head's own quant type**), scores the draft matmul over that subset, and
+scatters the result into a **full-vocabulary row of `-inf`**.  The speculator still receives a full-vocab
+logit row; the target's verification is untouched, so the trim can only lose proposals, never change an
+accepted token.  Default `0` = off: no subset is built and no graph node is added (measured byte-identical to
+r106 on plain decode and on `draft-mtp` at n-max 1 / 9 / adaptive-9).
+
+**Where.**  `common/arg.cpp` (+ `LLAMA_ARG_SPEC_DRAFT_MTP_VOCAB`) -> `llama_context_params::mtp_draft_vocab`
+for the MTP draft context only (`common/common.cpp` for an `-md` sidecar, `common/speculative.cpp` for the
+in-tree speculator) -> `llama_model::mtp_draft_vocab_get()` (`src/llama-model.cpp`) -> the graph hook in
+`qwen35.cpp`, `qwen35moe.cpp`, `qwen4exp.cpp` and `gemma4-assistant.cpp`.  Ownership is per context
+(`shared_ptr`, model-side weak-ref cache keyed by `(N, buffer type)`, compared on graph reuse).
+
+**Guards.**  Arch must be one the hook knows; the block must score with the model LM head (a shared-NextN
+sidecar borrows the target's, resolved through `cparams.ctx_other`); probe/`--fit` contexts (unallocated
+weights) return `nullptr`; and the tokenizer must be BPE with ids in **near-merge order** (the check compares
+each merge-produced id with the previous one and tolerates <= 1 % inverted pairs: qwen35 0, gemma4 30/236339).
+A rejected combination logs `mtp_draft_vocab = N ignored: <why>` and drafts over the full vocabulary — the
+activation line (`mtp_draft_vocab = N: MTP draft head uses R of V rows`) is `LLAMA_LOG_INFO`, so pass `-v`.
+
+**The `ggml` half.**  Under `-sm tensor` the LM head is vocabulary-split, and a 2-D axis-1-split tensor used
+to be readable only **whole** (`nb[axis + 1]` is the whole tensor for a 2-D tensor), so the subset build
+aborted with `GGML_ASSERT(size % chunk_size_full == 0)`.  `ggml_backend_meta_get_tensor_impl` now splices an
+arbitrary **row range** block by block (segment -> repeat -> device, with the per-device byte offsets advanced
+exactly as the setter does).  Whole-tensor reads and every other split axis keep their old paths.
+
+**Knobs.**  `--spec-draft-mtp-vocab N` / `LLAMA_ARG_SPEC_DRAFT_MTP_VOCAB` (`ENVIRONMENT.md` §3).  **N is
+payload-specific**: 98304 on Qwen3.8-27B Q8_0 (acceptance unchanged, all four gate axes improve), 64000 is
+the reporter's gfx1151 value and is a **loss** on our 27B (prose -3.6 % at adaptive n-max 9), gemma4's only
+lossless cut is 245760 of 262144 (a no-op).  Cost: a second copy of `N/n_vocab` of the LM head in VRAM
+(510 MiB at 98304 on the 27B), per device under `-sm tensor`, not seen by `--fit`.
+
+**Purity.**  `GREEDY-PURITY.md` §48: a draft-side restriction cannot change an accepted token, and inside the
+`n_max <= 7` band the trim is *text*-identical to plain decode (verified on prose and code at `-n 3000`).
+Above the band the trim shifts acceptance, the adaptive controller shifts depth, and verify-width numerics can
+flip a near-tie — the same property the untrimmed build already shows between any two depths.  Gate it at
+`n_max <= 7`, or on acceptance + MTP-vs-plain above it.
+
+**Known interactions.**  adaptive controller (acceptance/depth, §48), `ngram-mod` (unaffected; shrinks the
+trim's share), `-sm tensor` (subset head is Meta-mirrored, so the draft matmul is duplicated per device and no
+all-gather is needed), `--fit` (subset not estimated), the purity band (above).  Detail and numbers:
+`../archive/work/spec-draft-mtp-vocab/README.md` §5.
 
 ## Dated history
 

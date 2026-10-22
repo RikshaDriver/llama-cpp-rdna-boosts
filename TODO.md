@@ -11,8 +11,8 @@ Details never live here: they live in `AGENTS.md`, `patches/README.md`, `MANIFES
 **Numbers are never reused.**  `#NN` is a permanent handle: an old `WORKLOG.md` entry that cites `TODO #74`
 still means the same subject after that item is closed and removed from this file.  New items append.
 
-**Current state:** the **12-block V2.0 set** (block 00 + blocks 01-11) at fork point **`097cf33d9`**,
-release **`v12-097cf33d9-r106`**.  `release.json` is the source of truth for the tip/tree and hashes; the
+**Current state:** the **13-block V2.0 set** (block 00 + blocks 01-12) at fork point **`097cf33d9`**,
+release **`v13-097cf33d9-r107`**.  `release.json` is the source of truth for the tip/tree and hashes; the
 top of `WORKLOG.md` is the newest record.
 
 | # | subject | kind | status |
@@ -26,8 +26,7 @@ top of `WORKLOG.md` is the newest record.
 | **65** | IQ4_NL field (MTP) + `--host-experts pool` decode collapses | memory | parked (maintainer 2026-10-15; the "after r67" condition is long past — never picked up, still parked) |
 | **70** | harden the expert-cache re-arm / wide-aux growth against a starved arena | robustness | open |
 | **79** | RDNA3_0 verify-band fusions: no multi-device measurement, and gfx1101/gfx1102 untested | platform validation | open (shipped default-on in r95; needs a 2+ card gfx1100 box).  `ssh fingon` is single-RDNA3 (`ROCm0`; its second rocm-smi entry is an iGPU and is not a HIP device), so it does **not** cover the multi-device arm — it validates single-GPU gfx1100 only.  gfx1101/gfx1102 still have no hardware |
-| **81** | `--spec-draft-mtp-vocab N`: the MTP draft scores a trimmed LM-head row subset | performance (decode) | open, gated on gfx1201 (`wip/spec-draft-mtp-vocab/`).  27B Q8_0 2 GPU `-sm tensor` works and gives +3.4 % (adaptive n-max 9) to +5.5 %; trim 0 == today.  gemma4 supported but not beneficial (useful cutoff 245760/262144 = a no-op).  Remaining: full adaptive gate, depth 16384, 3 GPU, `ggml` regression for the new meta read path |
-| **82** | greedy text depends on `--spec-draft-n-max` alone (pre-existing) | purity | open, measured 2026-10-21 while gating #81: the **r106 delivery** build produces three different greedy texts on `prompts/code-reasoning-mixed.txt` for `draft-mtp` n-max 3 / n-max 9 / adaptive-9 (`-sm tensor`; and n3 vs n9 also differ under `-sm layer`).  Verify-width-dependent numerics flip a near-tie, so "greedy bytes identical" is only meaningful at a fixed trajectory.  Needs a `GREEDY-PURITY.md` §entry and a decision on which n-max the purity grid pins |
+| **83** | `--spec-draft-mtp-vocab N`: the MTP draft scores a trimmed LM-head row subset | performance (decode) | **shipped in r107 as block 12** (opt-in, default off).  Remaining arms below.  27B Q8_0 2 GPU `-sm tensor` works and gives +3.4 % (adaptive n-max 9) to +5.5 %; trim 0 == today.  gemma4 supported but not beneficial (useful cutoff 245760/262144 = a no-op).  Remaining: full adaptive gate, depth 16384, 3 GPU, `ggml` regression for the new meta read path |
 
 Accepted limitations that are deliberately **not** fixed are listed at the end — do not re-report them.
 
@@ -176,43 +175,30 @@ Two gaps, both needing hardware the fleet does not have:
 
 ---
 
-## 81. `--spec-draft-mtp-vocab N`: the MTP draft scores a trimmed LM-head row subset — PERFORMANCE (decode)
+## 83. `--spec-draft-mtp-vocab N`: the MTP draft scores a trimmed LM-head row subset — PERFORMANCE (decode)
 
-Imported 2026-10-21 from discussion #202 (martino2k6) as [`wip/spec-draft-mtp-vocab/`](wip/spec-draft-mtp-vocab/README.md)
-— six format-patches cut on r101 that apply to the r106 tree with `git am -3` and no conflict, plus three
-campaign patches.  The MTP draft context copies the LM-head rows for token ids `< N` plus every
-control/user-defined token into its own head, scores the draft matmul over that subset, and scatters the
-result into a full-vocab row of `-inf`, so the speculator still sees a full-vocabulary logit row.  **The
-target's verification is untouched, so the draft can only lose proposals** — never change an accepted token.
-Opt-in, `0` = off, and the untrimmed path reproduces the r106 build's text exactly.
+**Shipped in `v13-097cf33d9-r107` as block 12** (opt-in, default off: `--spec-draft-mtp-vocab 0` builds no
+subset and adds no graph node).  Record: `WORKLOG.md` 261022.001; campaign + numbers:
+[`archive/work/spec-draft-mtp-vocab/`](archive/work/spec-draft-mtp-vocab/README.md); PR #205 archived verbatim
+in [`archive/work/pr205-spec-draft-mtp-vocab/`](archive/work/pr205-spec-draft-mtp-vocab/IMPORT.md).
 
-Measured on gfx1201 (2x R9700, 2 GPU `-sm tensor`, `Qwen3.8-27B-Q8_0`, delivery prompt
-`prompts/code-reasoning-mixed.txt`, 512 tokens, shallow depth): **adaptive n-max 9 69.7 -> 72.1 t/s
-(+3.4 %)**, fixed n-max 9 **+4.3 %**, a short synthetic prompt **+5.5 %**, 4B single GPU up to +13.7 %.
-The blocking bug is fixed: the subset build could not read a row range out of a **vocabulary-split** LM head
-(`ggml-backend-meta.cpp:2319`, whole-tensor-only splice for a 2-D axis-1 split), which is why `-sm tensor`
-aborted; campaign patch 0007 adds the row-granular path.  **gemma4 is supported but not beneficial** — its
-useful cutoff is 245760 of 262144 rows (a no-op), and below that acceptance halves and decode drops from 150
-to 105 t/s (its draft top-1 ids split across ids < 64000 and the 229376+ "space piece" band).  Remaining
-gates: full adaptive-MTP gate (`-n 3000`, R/C/K + mixed prompt), depth 16384, 3 GPU, and a `ggml` regression
-suite for the new meta read path.  Findings and numbers: campaign README §3/§5.
+Gated on gfx1201 (2x R9700, ROCm 10.1.0), Qwen3.8-27B Q8_0 2 GPU `-sm tensor`,
+`draft-mtp-adaptive,ngram-mod --spec-draft-n-max 7 --spec-draft-mtp-vocab 98304`, `-n 3000` four-axis:
+R +1.3 %, P +1.7 %, C +2.4 %, K +0.8 % (+1.6 % aggregate), with the `n_max <= 7` greedy-purity promise verified
+**with the trim on**.  `test-backend-ops` 21179/21179, `test-logits-width-probe SPLIT=tensor` PASS (W=1..8
+maxdiff 0), prefill-logit KLD 0.000000 / 100.000 %.  MoE 35B-A3B neutral; gemma4 supported but not beneficial
+(its useful cut is 245760 of 262144 rows = a no-op).
 
-## 82. Greedy text depends on `--spec-draft-n-max` alone (pre-existing purity observation) — PURITY
+**Remaining arms (none blocks the ship; all are validation, not correctness):**
 
-Measured 2026-10-21 while gating #81, with **no campaign code applied**: the r106 delivery build produces
-**three different greedy texts** on `prompts/code-reasoning-mixed.txt` (512 tokens, `-sm tensor`) depending
-only on the speculator depth — `draft-mtp` n-max 3 `92010829c9f6`, n-max 9 `ec1a197011c4`,
-`draft-mtp-adaptive` n-max 9 `5612aa128fc3` — and n-max 3 vs 9 also differ under `-sm layer`
-(`348b4bb78c8a` vs `921afe655051`).  The cause is the verify batch's width feeding width-dependent kernels
-(the delivery's band/GEMM layout): a near-tie flips mid-generation, so "same-seed greedy text is identical"
-is only meaningful at a **fixed acceptance trajectory**.
-
-Why it matters: it is the criterion several gates use (`plain == draft-mtp` greedy text, `GREEDY-PURITY.md`
-§36), and any draft-side change that shifts acceptance (a trimmed draft vocabulary, a different `n_max`, a new
-controller) will shift the trajectory and can legitimately change the bytes.  Wanted: a `GREEDY-PURITY.md`
-§entry stating the rule, and a decision on whether the grid pins one `n_max` per row (its current form
-effectively does) or adds a trajectory-insensitive check (logits-level probe).  Evidence:
-[`wip/spec-draft-mtp-vocab/README.md`](wip/spec-draft-mtp-vocab/README.md) §3.1 / F9.
+1. **3 GPU `-sm tensor`** — only the 2-GPU arm was run.  The Meta path is width-agnostic and the 2-GPU arm is
+   green, but the servers run 3-GPU.
+2. **Deep-context decode** — every number is shallow (32k context, 5k-token prompts); the delivery validates
+   decode at depth 16384.
+3. **MoE with `-ncmoe` / expert cache active** — only the fully-device-resident MoE arm was measured.
+4. **A hidden second vocabulary band** (gemma4's space-prefixed pieces at 229376..255999): a two-band subset
+   measured 0.610 acceptance at 37 % of the rows but was still 0.4 % slower on that payload, so it was not
+   shipped.  Worth revisiting only for a payload where the draft matmul is a large share of the token.
 
 ## Documented, deliberately NOT fixed (accepted limitations — do not re-report)
 

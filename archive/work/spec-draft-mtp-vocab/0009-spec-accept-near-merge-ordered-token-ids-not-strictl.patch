@@ -1,4 +1,4 @@
-From 215cd21e997a4e26d8208b225d365b2939ed5ec7 Mon Sep 17 00:00:00 2001
+From 4016a2b55dac90b07dd86e2754472ee09d5aeb9d Mon Sep 17 00:00:00 2001
 From: Stew Forster <ci@rdna-boosts.invalid>
 Date: Wed, 21 Oct 2026 23:03:40 -0500
 Subject: [PATCH 9/9] spec : accept near-merge-ordered token ids, not strictly
