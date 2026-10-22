@@ -164,7 +164,7 @@ stub alive to serve them, and treat a `wip/` path in an old record as a historic
   Without it, the interactive chat loop blocks forever. Wrap potentially blocking commands in `timeout`.
 - **Apply method:** all 14 blocks with **`git am`**; `scripts/apply-all.sh` is the tested path. Plain
   `git apply` of the concatenated series **silently drops hunks**. Every block is a normal commit.
-- **Naming (V2.1):** the current set is **14 blocks, 00-13** (`v14-097cf33d9-r110`).  Every `block NN`
+- **Naming (V2.1):** the current set is **14 blocks, 00-13** (`v14-097cf33d9-r111`).  Every `block NN`
   reference elsewhere in this file that is not one of the V2.1 numbers below is the **pre-V2.1 16-block
   numbering** and is kept as a historical handle.  The V2.1 map: **01** all-reduce, **02** adaptive MTP,
   **03** chunked GDN, **04** BF16 KV, **05** FA band/native/derived, **06** MMB, **07** k-quant,
@@ -235,21 +235,36 @@ stub alive to serve them, and treat a `wip/` path in an old record as a historic
   can only be *under-measured* here, not refuted: report it as "not measurable on our link", not as
   "does not reproduce".  Decode claims do carry over (the per-token AR traffic is tiny): #175's decode
   gain reproduced at 2-GPU tensor while its prefill claim did not.
-- **`-ncmoe`/`-cmoe` host experts are always pinned (`ROCm_Host`); `--load-mode mmap` alone does NOT
-  change that.** The loader rewrites the `-ncmoe` CPU override for a host `MUL_MAT_ID` weight to the
-  layer device's **pinned** host buffer, and the "avoid a host buffer when using mmap" downgrade is
+- **`-ncmoe`/`-cmoe` host experts are pinned (`ROCm_Host`) in the DEFAULT mode; `--load-mode mmap` alone
+  does NOT change that.** The loader rewrites the `-ncmoe` CPU override for a host `MUL_MAT_ID` weight to
+  the layer device's **pinned** host buffer, and the "avoid a host buffer when using mmap" downgrade is
   skipped for it. The pageable `--host-experts mmap` mode and the legacy `LLAMA_MMAP_HOST_EXPERTS` env
   were **removed in r33** (issue #116: a no-XNACK GPU -- gfx1201 reports `XNACK enabled: NO` -- cannot
   read a pageable host master in a kernel, and the pageable fill faults `hipMemcpy2DAsync` on ROCm 7.14).
-  `--host-experts` (`llama_model_params.host_experts_mode`) now selects **`pinned`** (default) or
-  **`pool`** (r35, opt-in: a bounded pinned host pool over the page cache, `MOE_HOST_POOL_MIB`, default
-  25 % of the MoE host expert bytes via `MOE_HOST_POOL_FRAC`); `mmap` logs "unsupported" and falls back
-  to pinned. Pinned is deliberate -- the per-ubatch op-offload H2D upload and the expert-cache fill both
-  read this master in place, and under `-sm tensor` a pageable master would land in the non-`is_host`
-  `CPU_REPACK` (no device access, cache inert). Cost: the host expert set is non-swappable RAM (Q4_K_M
-  35B-A3B `-ncmoe 40`, cache off: `ROCm_Host` 18662 MiB; peak RSS ~41.7 GB) unless the bounded `pool` is
-  used. `--lazy-mode` governs the mmap *reader*, not this. `ENVIRONMENT.md` §§1.2.1/4;
-  `patches/README.md` (V2.0 blocks 09-10).
+  `--host-experts` (`llama_model_params.host_experts_mode`) selects **`pinned`** (default),
+  **`pool`** (r35/r111) or `mmap` (logs "unsupported" and falls back to pinned).  Pinned is deliberate --
+  the per-ubatch op-offload H2D upload and the expert-cache fill both read this master in place, and under
+  `-sm tensor` a pageable master would land in the non-`is_host` `CPU_REPACK` (no device access, cache
+  inert).  Cost of the default: the host expert set is non-swappable RAM (Q4_K_M 35B-A3B `-ncmoe 40`,
+  cache off: `ROCm_Host` 18662 MiB; peak RSS ~41.7 GB).  `--lazy-mode` governs the mmap *reader*, not
+  this. `ENVIRONMENT.md` §§1.2.1/4; `patches/README.md` (blocks 09/12).
+- **`--host-experts pool` (r111) has NO pinned master: the master IS the read-only model mapping, and
+  every GPU read of a pooled host expert goes through pinned memory.**  The tensors live in the model
+  mapping (host buft `ROCm_HostMap`, device-carrying, r111, **block 12**) and are never read by a device
+  copy or a kernel; the L2 tier is the bounded pool (`MOE_HOST_POOL_MIB`/`FRAC`, default 25 % of the host
+  expert bytes, *per tensor*, process-wide) and the L3 tier is the page cache / GGUF.  The invariants:
+  (1) a pooled table must never be served by a **pageable** `cudaMemcpyAsync` -- ROCm stages a pageable
+  upload through a shared internal bounce and back-to-back copies tear (this is what made the first cut
+  nondeterministic; `moe_cache_upload_pageable`, the staging bounce and the `stage_gather` host-gather
+  shape all exist for it); (2) the cold-UVA serve and the device gather require a *pinned* master and
+  stand down (`host_dev == nullptr`) -- a miss becomes a pool fill; (3) any new reader of a host expert
+  master must go through `expert_host_src` (pool slot / per-table pinned bounce) or be added to
+  `moe_cache_upload_pageable`; (4) the mode needs a **mapped** load (`--load-mode none/dio` keeps the
+  pinned master and warns).  Measured: `RssShmem` 18.6 GiB -> 6.8 GiB on 35B-A3B `-ncmoe 40`, and a
+  12 GiB or 8 GiB cgroup that OOM-kills the `pinned` arm runs this one at ~93 t/s.  Cost: one extra host
+  memcpy per staged byte on the host-expert prefill path (decode parity; prefill -1..-6 %, single-ubatch
+  `pp512` on 2-GPU tensor -34 %), and `MOE_HOST_POOL_DIO=1` (nothing cached) is ~6x slower.  Record:
+  `archive/work/host-expert-master-drop/`.
 - **MTP gates must be long and reasoning-pinned.** Use `-n 3000` (`-n 2000` floor), `--reasoning on`
   for R and `--reasoning off` for P/C/K. Short runs are a correctness smoke test only. Rule 0 in
   `benchmarks/mtp-adaptive-methodology.md`.

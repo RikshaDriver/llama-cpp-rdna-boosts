@@ -6,7 +6,8 @@
 > tensor's mapping range right after its device upload (`LLAMA_LOAD_RELEASE_MMAP`, default on, `=0`
 > kill-switch).  Measured on 2x R9700, Qwen3.8-Flash-Next-IQ4_NL (100 GB) `-ncmoe 40`: peak VmRSS
 > 122.5 → 55.4 GiB, equal to `--load-mode none`.  The `--host-experts pool` full pinned master is a
-> separate campaign (`wip/host-expert-master-drop/`).  Record: `WORKLOG.md` 261011.017 (r49).
+> separate campaign (`wip/host-expert-master-drop/`, promoted in r111 -- now
+> `archive/work/host-expert-master-drop/`).  Record: `WORKLOG.md` 261011.017 (r49).
 
 **Status: OPEN (seeded 2026-10-11, re-scoped from `archive/work/host-memory-footprint/`).**  This is a
 `wip/` tree; nothing here is part of the delivery (`patches/`).  It applies only to `~/llama-fingon`

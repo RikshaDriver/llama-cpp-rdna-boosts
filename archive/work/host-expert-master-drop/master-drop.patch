@@ -1,0 +1,1436 @@
+diff --git a/common/arg.cpp b/common/arg.cpp
+index e3e242f17..831fdb47f 100644
+--- a/common/arg.cpp
++++ b/common/arg.cpp
+@@ -2711,7 +2711,10 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
+         {"--host-experts"}, "MODE",
+         "how to back host-resident MoE expert weights (--n-cpu-moe/--cpu-moe) (default: pinned)\n"
+         "- pinned / auto: the device's pinned host buffer (ROCm_Host) - the only host master a no-XNACK GPU can read in place\n"
+-        "- pool: the pinned master plus a bounded pinned host pool (MOE_HOST_POOL_MIB, default 25% of the MoE host expert bytes)\n"
++        "- pool: NO full pinned master - the weights stay in the read-only model mapping and every GPU read goes\n"
++        "        through a bounded pinned host pool (MOE_HOST_POOL_MIB/FRAC, default 25% of the host expert bytes).\n"
++        "        Bounds the non-swappable footprint to the pool (the rest is reclaimable page cache) so a host\n"
++        "        expert set larger than RAM can stream from disk; costs some prefill bandwidth.\n"
+         "- mmap: removed on RDNA (a pageable host master faults; issue #116)",
+         [](common_params & params, const std::string & value) {
+             /**/ if (value == "auto")                            { params.host_experts_mode = LLAMA_HOST_EXPERTS_MODE_AUTO;   }
+diff --git a/ggml/include/ggml-backend.h b/ggml/include/ggml-backend.h
+index 0ff98e861..436e1a905 100644
+--- a/ggml/include/ggml-backend.h
++++ b/ggml/include/ggml-backend.h
+@@ -272,6 +272,20 @@ extern "C" {
+     GGML_API ggml_backend_buffer_type_t    ggml_backend_dev_host_buffer_type(ggml_backend_dev_t device);
+     GGML_API ggml_backend_buffer_t         ggml_backend_dev_buffer_from_host_ptr(ggml_backend_dev_t device, void * ptr, size_t size, size_t max_tensor_size);
+ 
++    // wip/host-expert-master-drop (TODO #55): the host buffer type a POOL-BACKED host expert MASTER should
++    // use, or NULL when the backend has no such mode (then host expert weights stay in the pinned host
++    // buffer).  The returned type is a host buffer type that carries its device (so the scheduler still
++    // places the expert op on that GPU) but whose allocation is NOT pinned: with `--host-experts pool` the
++    // loader backs the tensor with the read-only model mapping (page cache) and every GPU read of it is
++    // served through the bounded pinned host pool.
++    GGML_API ggml_backend_buffer_type_t    ggml_backend_dev_moe_host_master_buft(ggml_backend_dev_t device);
++
++    // Wrap an existing host pointer (for example a range of the read-only model mapping) in a buffer of
++    // `buft` without taking ownership of it, so tensors can be placed directly in it.  Returns NULL when
++    // `buft` is not a host type, does not carry a device (that is what keeps such tensors on the GPU
++    // backend's schedule), or cannot hold a `max_tensor_size` tensor.
++    GGML_API ggml_backend_buffer_t         ggml_backend_host_buffer_from_ptr(ggml_backend_buffer_type_t buft, void * ptr, size_t size, size_t max_tensor_size);
++
+     GGML_API bool                          ggml_backend_dev_supports_op(ggml_backend_dev_t device, const struct ggml_tensor * op);
+     GGML_API bool                          ggml_backend_dev_supports_buft(ggml_backend_dev_t device, ggml_backend_buffer_type_t buft);
+     GGML_API bool                          ggml_backend_dev_offload_op(ggml_backend_dev_t device, const struct ggml_tensor * op);
+diff --git a/ggml/src/ggml-backend-impl.h b/ggml/src/ggml-backend-impl.h
+index 476d3a1a1..f8415dd8c 100644
+--- a/ggml/src/ggml-backend-impl.h
++++ b/ggml/src/ggml-backend-impl.h
+@@ -444,6 +444,15 @@ extern "C" {
+         // when the backend has no ring.  `llama_context` needs it to size the ring region so one staged
+         // table fits per slot.  Appended like the fields above.
+         size_t (*slab_ring_slots)(ggml_backend_dev_t dev);
++
++        // (optional) wip/host-expert-master-drop (TODO #55): the host buffer type a POOL-BACKED host
++        // expert master should use (device-carrying but NOT pinned), or NULL when the backend keeps its
++        // pinned host master.  With `--host-experts pool` the loader then backs host expert tensors with
++        // the read-only model mapping and every GPU read is served through the bounded pinned pool.  It is
++        // APPENDED at the very end (not next to the other moe_cache fields) because several backends
++        // already initialize the fields above positionally -- inserting in the middle would alias their
++        // entries.  Zero-initialized for backends that do not set it.
++        ggml_backend_buffer_type_t (*moe_host_master_buft)(ggml_backend_dev_t dev);
+     };
+ 
+     struct ggml_backend_device {
+diff --git a/ggml/src/ggml-backend.cpp b/ggml/src/ggml-backend.cpp
+index 0fc93141f..928f09651 100644
+--- a/ggml/src/ggml-backend.cpp
++++ b/ggml/src/ggml-backend.cpp
+@@ -319,6 +319,40 @@ void ggml_backend_dev_moe_cache_set_host_source(ggml_backend_dev_t dev, const vo
+     dev->iface.moe_cache_set_host_source(dev, tensor_data, path, offs, n_experts, host_bytes, total_bytes);
+ }
+ 
++// wip/host-expert-master-drop (TODO #55): the buffer type a pool-backed (mapping-backed, NOT pinned) host
++// expert master should use.  NULL when the backend keeps its pinned master (the default), so no caller
++// changes behaviour unless the backend opts in.
++ggml_backend_buffer_type_t ggml_backend_dev_moe_host_master_buft(ggml_backend_dev_t dev) {
++    if (dev == nullptr || dev->iface.moe_host_master_buft == nullptr) {
++        return nullptr;
++    }
++    return dev->iface.moe_host_master_buft(dev);
++}
++
++// Wrap an existing host pointer in a buffer of `buft` without owning it.  The buffer is built over the
++// public CPU_Mapped machinery (whose free is a no-op and whose set/get operate on `tensor->data`, which is
++// in host memory) and then re-typed, so the tensors placed in it look like any other buffer of `buft` to
++// the scheduler while the bytes stay where the caller put them.  Requires a device-carrying host buft: a
++// CPU buffer type has no device, and an op whose weight sits in it would be scheduled on the CPU backend
++// instead of the GPU that owns the expert table.
++ggml_backend_buffer_t ggml_backend_host_buffer_from_ptr(ggml_backend_buffer_type_t buft, void * ptr, size_t size, size_t max_tensor_size) {
++    if (buft == nullptr || ptr == nullptr || size == 0) {
++        return nullptr;
++    }
++    if (!ggml_backend_buft_is_host(buft) || ggml_backend_buft_get_device(buft) == nullptr) {
++        return nullptr;
++    }
++    if (ggml_backend_buft_get_max_size(buft) < max_tensor_size) {
++        return nullptr;
++    }
++    if ((uintptr_t) ptr % ggml_backend_buft_get_alignment(buft) != 0) {
++        return nullptr;
++    }
++    ggml_backend_buffer_t buffer = ggml_backend_cpu_buffer_from_ptr(ptr, size);
++    buffer->buft = buft;
++    return buffer;
++}
++
+ void ggml_backend_dev_slab_ring_set(ggml_backend_dev_t dev, bool arm) {
+     // wip/slab-ring-region: arm/disarm the reserved H2D staging-ring hole.  No-op when the backend has no
+     // slab or no ring hole (the hook is optional and zero-initialized).
+diff --git a/ggml/src/ggml-cuda/ggml-cuda-moe-cache-hooks.cu b/ggml/src/ggml-cuda/ggml-cuda-moe-cache-hooks.cu
+index 12db6fa10..e849ccbf8 100644
+--- a/ggml/src/ggml-cuda/ggml-cuda-moe-cache-hooks.cu
++++ b/ggml/src/ggml-cuda/ggml-cuda-moe-cache-hooks.cu
+@@ -52,10 +52,29 @@ void ggml_backend_cuda_stage_upload(ggml_backend_t backend, void * dst, const vo
+     // other caller (the scheduler's ring in its default mode, the meta backend's mirrored upload) copies the slot
+     // into the input with stage_d2d, where the deferral is resolved.
+     static const bool redirect = getenv("GGML_SCHED_STAGE_MODE") != nullptr && atoi(getenv("GGML_SCHED_STAGE_MODE")) != 0;
++    // wip/host-expert-master-drop (TODO #55): `stage_from_cache` also serves a POOL-BACKED (pageable) master,
++    // filling the slot from the arena + the pinned host pool -- so a pooled table is staged without a
++    // pageable transfer.  The plain fallback below (a 1-D pageable H2D) stays for a table the cache does
++    // not manage; it is legal, only slower.
+     if (ggml_backend_cuda_stage_from_cache(cuda_ctx, data, 0, size, size, 1, dst, ev, /*defer =*/ !redirect)) {
+         return;
+     }
+     cudaStream_t s = cuda_ctx->copy_stream();
++    // wip/host-expert-master-drop (TODO #55): a POOL-BACKED host expert master is PAGEABLE, and a pageable
++    // `cudaMemcpyAsync` is staged through a shared internal bounce (back-to-back copies tear -- measured as
++    // nondeterministic greedy text).  Stage it through the pool / the per-table pinned bounce instead.
++    if (moe_cache_upload_pageable(dst, data, size, s, cuda_ctx->device)) {
++        CUDA_CHECK(cudaEventRecord((cudaEvent_t) ev->context, s));
++        return;
++    }
++    if (moe_cache_source_pageable(data)) {
++        static bool warned = false;
++        if (!warned) {
++            warned = true;
++            GGML_LOG_WARN("%s: a pool-backed host expert master is being uploaded with a PAGEABLE copy "
++                          "(%zu bytes); this is slow and may tear -- please report\n", __func__, size);
++        }
++    }
+     CUDA_CHECK(cudaMemcpyAsync(dst, data, size, cudaMemcpyHostToDevice, s));
+     CUDA_CHECK(cudaEventRecord((cudaEvent_t) ev->context, s));
+ }
+@@ -72,6 +91,13 @@ void ggml_backend_cuda_stage_upload(ggml_backend_t backend, void * dst, const vo
+ bool ggml_backend_cuda_stage_gather(ggml_backend_t backend, int slot, const void * src, size_t offset, size_t width, size_t stride_src, size_t n_copies, ggml_backend_event_t ev, bool src_pinned) {
+     ggml_backend_cuda_context * cuda_ctx = (ggml_backend_cuda_context *) backend->context;
+     ggml_cuda_set_device(cuda_ctx->device);
++    // wip/host-expert-master-drop (TODO #55): the caller derives `src_pinned` from the buffer type of the
++    // tensor, and a pool-backed host expert master carries its device -- yet its bytes are in the PAGEABLE
++    // model mapping.  The 2-D pageable H2D is the pathological ROCm case, so refuse the pinned shape for
++    // any pointer that belongs to a pool-backed master (the host-gather shape below is used instead).
++    if (src_pinned && moe_cache_source_pageable(src)) {
++        src_pinned = false;
++    }
+     const size_t total = width * n_copies;                 // the device's compacted slice
+     void * dst = cuda_ctx->h2d_stage_buffer(slot, total);
+     if (dst == nullptr) {
+@@ -94,7 +120,10 @@ bool ggml_backend_cuda_stage_gather(ggml_backend_t backend, int slot, const void
+     // A host gather when the per-block compaction is cheap (few copies), else stage the whole
+     // contiguous range and pick this device's `width`-byte block out of every `stride_src` on the copy
+     // stream (the F2D compaction hides with the H2D).
+-    const bool host_gather = n_copies <= 4096;
++    // wip/host-expert-master-drop (TODO #55): a POOL-BACKED (pageable) source must use the host gather
++    // even when the block count is large: the alternative below is a pageable H2D of the whole range, which
++    // ROCm stages through a shared internal bounce (it tears).
++    const bool host_gather = n_copies <= 4096 || moe_cache_source_pageable(src);
+     if (host_gather) {
+         void * pin = cuda_ctx->h2d_pin_buffer(slot, total);
+         if (pin == nullptr) {
+diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
+index 111aaa36f..9876a5e1c 100644
+--- a/ggml/src/ggml-cuda/ggml-cuda.cu
++++ b/ggml/src/ggml-cuda/ggml-cuda.cu
+@@ -3056,6 +3056,77 @@ ggml_backend_buffer_type_t ggml_backend_cuda_host_buffer_type() {
+     return ggml_backend_cuda_host_buffer_type_dev(0);
+ }
+ 
++// wip/host-expert-master-drop (TODO #55): the POOL-BACKED host expert master buffer type.
++//
++// It is a host buffer type that carries its device (`ROCm_HostMap`), so a `MUL_MAT_ID` weight placed in it
++// is still scheduled on the owning GPU -- exactly like `ROCm_Host`.  The difference is what backs the
++// bytes: with `--host-experts pool` the loader does NOT allocate (or fill) a pinned master; it places the
++// tensors directly in the read-only model mapping (`ggml_backend_host_buffer_from_ptr`), so the source of
++// truth is the page cache / the GGUF on disk, and every GPU read of it is served through the bounded
++// pinned host pool (moe-expert-cache.cu).  This is what makes a model whose host-expert set does not fit
++// in RAM runnable: the page cache is reclaimable, the pinned pool is the only non-swappable part.
++//
++// It must NOT report `ROCm_Host`'s name: the pinned buft's allocation path (cudaMallocHost) is precisely
++// what this mode removes, and `ggml_backend_cuda_host_buffer_type_alloc_buffer` would be used for a
++// non-mmap load.  The generic alloc below is a pageable aligned allocation, which is only reached when
++// the loader cannot map the file (`--load-mode none`); the usual mapping path bypasses it entirely.
++static const char * ggml_backend_cuda_host_map_buffer_type_name(ggml_backend_buffer_type_t buft) {
++    return GGML_CUDA_NAME "_HostMap";
++
++    GGML_UNUSED(buft);
++}
++
++static void ggml_backend_cuda_host_map_buffer_free_buffer(ggml_backend_buffer_t buffer) {
++    ggml_aligned_free(buffer->context, buffer->size);
++}
++
++static ggml_backend_buffer_t ggml_backend_cuda_host_map_buffer_type_alloc_buffer(ggml_backend_buffer_type_t buft, size_t size) {
++    // Only a `--load-mode none` load gets here (no file mapping to place the tensors in).  The bytes are
++    // then a pageable full copy of the host expert set: swappable and reclaimable (so still not the
++    // non-swappable pinned master), but not a memory win either.  Warn once so the state is visible.
++    static bool warned = false;
++    if (!warned) {
++        warned = true;
++        GGML_LOG_WARN("%s: host expert master is not file-mapped (load mode without mmap); the set is "
++                      "held as a pageable copy instead of being read from disk on demand\n", __func__);
++    }
++    void * ptr = ggml_aligned_malloc(size);
++    if (ptr == nullptr) {
++        return nullptr;
++    }
++    ggml_backend_buffer_t buffer = ggml_backend_cpu_buffer_from_ptr(ptr, size);
++    buffer->buft = buft;
++    buffer->iface.free_buffer = ggml_backend_cuda_host_map_buffer_free_buffer;
++    return buffer;
++}
++
++static ggml_backend_buffer_type_t ggml_backend_cuda_host_map_buffer_type_dev(int device) {
++    GGML_ASSERT(device >= 0 && device < GGML_CUDA_MAX_DEVICES);
++
++    static struct ggml_backend_buffer_type bufts[GGML_CUDA_MAX_DEVICES];
++    static bool init[GGML_CUDA_MAX_DEVICES] = {};
++
++    if (!init[device]) {
++        bufts[device] = {
++            /* .iface    = */ {
++                /* .get_name            = */ ggml_backend_cuda_host_map_buffer_type_name,
++                /* .alloc_buffer        = */ ggml_backend_cuda_host_map_buffer_type_alloc_buffer,
++                /* .alloc_buffer_n      = */ NULL,
++                /* .get_alignment       = */ ggml_backend_cpu_buffer_type()->iface.get_alignment,
++                /* .get_max_size        = */ NULL, // defaults to SIZE_MAX
++                /* .get_alloc_size      = */ ggml_backend_cpu_buffer_type()->iface.get_alloc_size,
++                /* .get_alloc_size_n    = */ NULL,
++                /* .is_host             = */ ggml_backend_cpu_buffer_type()->iface.is_host,
++            },
++            /* .device   = */ ggml_backend_reg_dev_get(ggml_backend_cuda_reg(), device),
++            /* .context  = */ nullptr,
++        };
++        init[device] = true;
++    }
++
++    return &bufts[device];
++}
++
+ //static bool ggml_backend_buffer_is_cuda_host(ggml_backend_buffer_t buffer) {
+ //    return buffer->buft->iface.get_name == ggml_backend_cuda_host_buffer_type_name;
+ //}
+@@ -4475,6 +4546,24 @@ static void ggml_backend_cuda_set_tensor_async(ggml_backend_t backend, ggml_tens
+     }
+     ggml_cuda_async_input_drain(cuda_ctx->device);
+ 
++    // wip/host-expert-master-drop (TODO #55): a host expert master may be backed by the read-only model
++    // mapping (`--host-experts pool`), which is PAGEABLE.  A pageable `cudaMemcpyAsync` is staged through
++    // a shared internal bounce and tears under back-to-back use (measured: nondeterministic greedy text),
++    // so the bytes are staged through the expert pool / the per-table pinned bounce instead.  The helper
++    // is a no-op for any other source (a pooled table is the only thing it matches).
++    if (data != nullptr && size > 0 &&
++        moe_cache_upload_pageable((char *) tensor->data + offset, data, size, cuda_ctx->stream(), cuda_ctx->device)) {
++        return;
++    }
++    if (moe_cache_source_pageable(data)) {
++        static bool warned = false;
++        if (!warned) {
++            warned = true;
++            GGML_LOG_WARN("%s: a pool-backed host expert master is being uploaded with a PAGEABLE copy "
++                          "(%zu bytes); this is slow and may tear -- please report\n", __func__, size);
++        }
++    }
++
+     CUDA_CHECK(cudaMemcpyAsync((char *) tensor->data + offset, data, size, cudaMemcpyHostToDevice, cuda_ctx->stream()));
+ }
+ 
+@@ -7088,6 +7177,19 @@ static void ggml_backend_cuda_device_moe_cache_set_host_source(ggml_backend_dev_
+     moe_cache_set_host_source(tensor_data, path, offs, n_experts, host_bytes, total_bytes);
+ }
+ 
++// wip/host-expert-master-drop (TODO #55): the pool-backed host expert master buffer type, or NULL when
++// this device must keep the pinned master.  A discrete GPU reads a pageable mapping only through the
++// pinned pool, so the mode is offered there.  An INTEGRATED (APU) device shares host memory with the
++// GPU, so there is no pinned duplicated copy to drop and its host buffers are directly usable -- it
++// keeps the historical pinned master.
++static ggml_backend_buffer_type_t ggml_backend_cuda_device_moe_host_master_buft(ggml_backend_dev_t dev) {
++    const ggml_backend_cuda_device_context * dev_ctx = (ggml_backend_cuda_device_context *) dev->context;
++    if (dev_ctx == nullptr || ggml_cuda_info().devices[dev_ctx->device].integrated) {
++        return nullptr;
++    }
++    return ggml_backend_cuda_host_map_buffer_type_dev(dev_ctx->device);
++}
++
+ static size_t ggml_backend_cuda_device_slab_work_size(ggml_backend_dev_t dev) {
+     // OPEN 2 (TODO #42): the movable-boundary slab WORK region's current size (the boundary), or 0 when this
+     // device has no slab.  `llama_context` compares it against the narrow size it last settled on to decide
+@@ -7222,6 +7324,7 @@ static const ggml_backend_device_i ggml_backend_cuda_device_interface = {
+     /* .slab_set_ring_cap         = */ ggml_backend_cuda_device_slab_set_ring_cap,
+     /* .slab_enabled              = */ ggml_backend_cuda_device_slab_enabled,
+     /* .slab_ring_slots           = */ ggml_backend_cuda_device_slab_ring_slots,
++    /* .moe_host_master_buft      = */ ggml_backend_cuda_device_moe_host_master_buft,
+ };
+ 
+ // backend reg
+diff --git a/ggml/src/ggml-cuda/moe-expert-cache.cu b/ggml/src/ggml-cuda/moe-expert-cache.cu
+index 9f7b02c05..7fc7601f2 100644
+--- a/ggml/src/ggml-cuda/moe-expert-cache.cu
++++ b/ggml/src/ggml-cuda/moe-expert-cache.cu
+@@ -49,6 +49,15 @@ static void heat_pull_locked();
+ 
+ namespace {
+ 
++// wip/host-expert-master-drop (TODO #55): one pinned, one-host-expert staging entry for a PAGEABLE master
++// (see `expert_host_src`).  `busy` means a device copy is reading it, so it must not be rewritten until
++// `ev` signals.
++struct bounce_t {
++    char *      host = nullptr;
++    cudaEvent_t ev   = nullptr;
++    bool        busy = false;
++};
++
+ struct table_t {
+     int         layer       = -1;
+     std::string role;
+@@ -69,10 +78,18 @@ struct table_t {
+     std::string src_path;
+     size_t      src_offs    = 0;
+     bool        src_known   = false;
++    // wip/host-expert-master-drop (TODO #55): the file the pool-backed master came from, opened lazily for
++    // the bounce path in `MOE_HOST_POOL_DIO` mode (the only mode where the bounce reads the disk instead of
++    // the mapped page cache).
++    int         src_fd      = -1;
++    size_t      src_align   = 4096;
+     const void * host       = nullptr;
+     void *      host_dev    = nullptr;  // device-accessible alias of `host` (UVA), Phase 1b cold reads
+     bool        host_dev_bound = false; // the alias was resolved (or ruled out) once
+     bool        host_pinned = false;    // `host` is pinned (cudaHostGetDevicePointer succeeded): the in-place reads need it
++    // wip/host-expert-master-drop (TODO #55): pinned per-table bounce ring for a PAGEABLE master, grown on
++    // demand (see `expert_host_src`).  Empty for a pinned master.
++    std::vector<bounce_t> bounce;
+     int         device      = -1;       // CUDA ordinal that owns (allocates and reads) this table's arena
+ 
+     int         slots       = 0;        // 0 => disabled (no budget / alloc failed)
+@@ -190,6 +207,12 @@ struct host_pool_t {
+     std::string path;                    // GGUF path
+     size_t      file_offs   = 0;         // tensor data offset in the file
+     int         fd          = -1;
++    // wip/host-expert-master-drop (TODO #55): the host tensor this pool belongs to when it is backed by
++    // the read-only model mapping.  A miss is then a plain memcpy out of the page cache (no syscall, no
++    // second copy) instead of a pread; `MOE_HOST_POOL_DIO=1` still reads the file with O_DIRECT, which is
++    // the only mode that bypasses the page cache.  It is the TENSOR BASE (expert `e` at `+ e*host_bytes`),
++    // unlike `file_offs`, which is the tensor's offset in the GGUF.
++    const void * src_host   = nullptr;
+     size_t      align       = 4096;
+     std::vector<int32_t>                 slot_expert;   // slot -> expert, -1 empty
+     std::unordered_map<int32_t, int32_t> expert_slot;
+@@ -214,7 +237,13 @@ struct host_pool_t {
+ // Keyed by the host tensor only: the pool is PROCESS-WIDE (one copy of each whole expert for every
+ // device), and `MOE_HOST_POOL_MIB` is the total non-swappable budget, split equally over the registered
+ // host tensors.  Per-(slot, device) events make a shared slot safe to copy to several devices.
+-std::map<const void *, host_pool_t> g_host_pools;   // node-based: pointers stay valid
++// Deliberately LEAKED (a heap object with no destructor) for the same reason as the background worker's
++// mutex/cv/queue below: the pool is touched by that DETACHED worker, which can still be inside a (slow, in
++// `MOE_HOST_POOL_DIO` mode multi-hundred-ms disk) read when the process starts tearing down.  A static map
++// would be destroyed under it, so the worker's publish step erased a mapping in freed memory -- measured as
++// `double free or corruption` in `pool_reap_locked` at exit, only reachable once the pool became the ONLY
++// host source (wip/host-expert-master-drop) and therefore did real background I/O.
++std::map<const void *, host_pool_t> & g_host_pools = *new std::map<const void *, host_pool_t>();   // node-based: pointers stay valid
+ bool    g_pool_enabled     = false;
+ bool    g_pool_requested   = false;  // --host-experts pool (set by the loader before tables are registered)
+ bool    g_pool_auto        = false;  // MOE_HOST_POOL_MIB unset/auto: size from the MoE host expert bytes
+@@ -511,7 +540,9 @@ struct device_guard {
+ // cold region requires it and stands down, while the
+ // fill copies (which source `t.host` through cudaMemcpyAsync, pageable-safe) keep the cache correct.
+ void bind_host_dev_locked(table_t & t) {
+-    if (!(g_cold_uva && t.host != nullptr && !t.host_dev_bound)) {
++    // Resolve ONCE, whatever the cold path is configured to do: `host_pinned` also decides whether a
++    // device read of the master is legal at all, which the pool-backed master (TODO #55) depends on.
++    if (t.host == nullptr || t.host_dev_bound) {
+         return;
+     }
+     t.host_dev_bound = true;
+@@ -523,11 +554,14 @@ void bind_host_dev_locked(table_t & t) {
+         return;
+     }
+     (void) cudaGetLastError();
++    // A pageable master (`--host-experts pool` places the tensors in the read-only model mapping): the
++    // in-place cold read stands down and every GPU read is staged through the pool instead, so the miss
++    // cost is a pool fill rather than a fault (issue #116).
+     static bool warned = false;
+-    if (!warned) {
++    if (!warned && g_cold_uva) {
+         warned = true;
+-        GGML_LOG_WARN("%s: the host expert master has no device mapping (pageable model mapping?); "
+-                      "the in-place cold read is disabled and misses fall back to the copy path\n", __func__);
++        GGML_LOG_INFO("%s: the host expert master is pageable (pool-backed `--host-experts pool`); the "
++                      "in-place cold read is disabled and misses are served from the pinned host pool\n", __func__);
+     }
+ }
+ 
+@@ -538,6 +572,12 @@ static inline bool table_cold_ok(const table_t & t) {
+     return g_cold_uva && t.cold_safe && t.host_dev != nullptr;
+ }
+ 
++// wip/host-expert-master-drop (TODO #55): the master is not pinned, so it lives in the read-only model
++// mapping and every device-side byte must come through the pinned pool (or the per-table bounce).
++static inline bool table_master_pageable(const table_t & t) {
++    return t.host != nullptr && !t.host_pinned;
++}
++
+ // Human-readable cache budget for the log lines: "auto" when MOE_EXPERT_CACHE_MIB was unset (each
+ // device is sized from its free VRAM at `alloc_all_locked`), otherwise the requested MiB/device.
+ static const char * budget_desc() {
+@@ -853,8 +893,13 @@ static bool pool_dio_read(int fd, void * dst, size_t len, size_t off, size_t ali
+     const size_t aoff = off & ~(align - 1);
+     const size_t skip = off - aoff;
+     const size_t blen = (skip + len + align - 1) & ~(align - 1);
+-    static void * bounce      = nullptr;
+-    static size_t bounce_size = 0;
++    // THREAD-LOCAL: the critical-path fill runs under `g_mutex`, but the background prefetch worker reads
++    // the file WITHOUT it (by design, so a slow page-cache miss never stalls an urgent load), so a shared
++    // static bounce was raced and corrupted the tail of an expert (measured as a POOLREAD MISMATCH from
++    // ~520 KiB into a 576 KiB expert, variably).  `MOE_HOST_POOL_DIO` is the disk-tier mode, so this path
++    // must be correct on its own.
++    static thread_local void * bounce      = nullptr;
++    static thread_local size_t bounce_size = 0;
+     if (bounce == nullptr || bounce_size < blen) {
+         free(bounce);
+         bounce = nullptr;
+@@ -939,24 +984,46 @@ static host_pool_t * table_pool_locked(table_t & t) {
+     // Budget: explicit MOE_HOST_POOL_MIB, else AUTO = MOE_HOST_POOL_FRAC % of the MoE host expert bytes.
+     // The preflight accumulation is the full set; fall back to the registered tables if the preflight did
+     // not run (a non-CLI consumer).  `g_pool_total_bytes` is set only for the explicit mode.
+-    int64_t total_bytes = g_pool_total_bytes;
+-    if (total_bytes <= 0) {
+-        int64_t host_total = g_preflight_host_bytes;
+-        if (host_total <= 0) {
+-            std::set<const void *> hs;
+-            for (const table_t & tt : g_tables) {
+-                if (tt.src_known && tt.host != nullptr && hs.insert(tt.host).second) {
+-                    host_total += (int64_t) tt.host_bytes * tt.n_experts;
+-                }
++    //
++    // CRITICAL: the budget must not depend on the REGISTRATION ORDER.  A pool is created lazily, on the
++    // first fill of its host tensor, and that happens while the cache is still sizing (only a few tables
++    // registered), so dividing the budget by the currently-known host tensor count over-sized every early
++    // pool: measured `--host-experts pool` pinning ~75 % of the host expert set instead of 25 % (and then
++    // the AUTO budget was a running sum on top).  Each tensor therefore gets the SAME SHARE OF ITS OWN
++    // EXPERTS -- `frac %` of the host set in AUTO mode, or `MOE_HOST_POOL_MIB` scaled by this tensor's
++    // share of the total -- which is exactly order-independent.
++    int64_t host_total = g_preflight_host_bytes;
++    if (host_total <= 0) {
++        std::set<const void *> hs;
++        for (const table_t & tt : g_tables) {
++            if (tt.src_known && tt.host != nullptr && hs.insert(tt.host).second) {
++                host_total += (int64_t) tt.host_bytes * tt.n_experts;
+             }
+         }
+-        total_bytes = host_total * g_pool_frac / 100;
+     }
+-    const size_t per_host = total_bytes > 0 ? (size_t) total_bytes / n_hosts : 0;
+-    int slots = (int) (per_host / t.host_bytes);
++    int slots = 0;
++    if (g_pool_total_bytes > 0) {
++        // explicit process-wide budget, split proportionally to each tensor's share of the host set
++        if (host_total > 0) {
++            slots = (int) ((int64_t) t.n_experts * g_pool_total_bytes / host_total);
++        } else {
++            slots = (int) (((int64_t) g_pool_total_bytes / (int64_t) n_hosts) / (int64_t) t.host_bytes);
++        }
++    } else {
++        slots = (int) ((int64_t) t.n_experts * g_pool_frac / 100);
++    }
++    if (slots < 1) {
++        slots = 1;   // a pool that cannot hold one expert cannot replace the master
++    }
+     if (slots > t.n_experts) {
+         slots = t.n_experts;
+     }
++    GGML_LOG_INFO("%s: host pool (%s): %zu host tensors, %lld MiB host expert bytes; layer=%d role=%s -> "
++                  "%d/%d slots of %zu B (%.1f MiB)\n",
++                  __func__,
++                  g_pool_total_bytes > 0 ? "MOE_HOST_POOL_MIB" : "MOE_HOST_POOL_FRAC of the host expert bytes",
++                  n_hosts, (long long) (host_total >> 20), t.layer, t.role.c_str(), slots, t.n_experts,
++                  t.host_bytes, (double) ((int64_t) slots * (int64_t) t.host_bytes) / (1024.0 * 1024.0));
+     device_guard pdg(t.device);
+     host_pool_t p;
+     if (slots >= 1) {
+@@ -978,6 +1045,7 @@ static host_pool_t * table_pool_locked(table_t & t) {
+             p.n_experts   = t.n_experts;
+             p.path        = t.src_path;
+             p.file_offs   = t.src_offs;
++            p.src_host    = t.host;
+             p.slot_expert.assign((size_t) slots, -1);
+             p.slot_state.assign((size_t) slots, 0);
+             p.last.assign((size_t) t.n_experts, 0);
+@@ -1033,9 +1101,50 @@ static void pool_reap_locked(host_pool_t & p) {
+     }
+ }
+ 
++// wip/host-expert-master-drop (TODO #55): fill one pool slot with expert `expert`'s whole host blob.
++// When the host tensor is backed by the read-only model mapping (the pool-backed master) that is a plain
++// memcpy out of the page cache: no syscall, no second copy, and the pages stay reclaimable (the kernel drops
++// them under pressure and re-faults from the GGUF -- the disk tier).  `MOE_HOST_POOL_DIO=1` keeps the file
++// read with O_DIRECT, which is the only mode that bypasses the page cache.  Caller holds `g_mutex`.
++static bool pool_fill_slot_locked(host_pool_t & p, int expert, char * dst) {
++    const size_t rel = (size_t) expert * p.host_bytes;
++    if (!g_pool_dio && p.src_host != nullptr) {
++        memcpy(dst, (const char *) p.src_host + rel, p.host_bytes);
++        return true;
++    }
++    if (p.fd < 0) {
++        p.fd = pool_open_file(p.path.c_str(), g_pool_dio);
++        if (p.fd < 0) {
++            return false;
++        }
++        pool_fd_align(p.fd, &p.align);
++    }
++    const size_t off = p.file_offs + rel;
++    const bool ok = g_pool_dio ? pool_dio_read(p.fd, dst, p.host_bytes, off, p.align)
++                               : (pool_pread(p.fd, dst, p.host_bytes, off) == (pool_ssize_t) p.host_bytes);
++    // Diagnostic (`MOE_HOST_POOL_VERIFY=1`): the slot must hold exactly the expert's bytes as they appear in
++    // the file mapping.  A mismatch means the pool read landed on the wrong offset/length -- the classic
++    // O_DIRECT alignment bug -- and would otherwise surface as corrupt generated text much later.
++    static const bool verify_pool = getenv("MOE_HOST_POOL_VERIFY") != nullptr;
++    if (ok && verify_pool && p.src_host != nullptr) {
++        static int64_t n_bad = 0;
++        const char * ref = (const char *) p.src_host + rel;
++        if (memcmp(dst, ref, p.host_bytes) != 0 && n_bad++ < 8) {
++            size_t first = 0;
++            while (first < p.host_bytes && dst[first] == ref[first]) {
++                first++;
++            }
++            GGML_LOG_ERROR("POOLREAD MISMATCH expert=%d off=%zu len=%zu align=%zu dio=%d first=%zu got=%02x ref=%02x file_offs=%zu\n",
++                           expert, off, p.host_bytes, p.align, (int) g_pool_dio, first,
++                           (unsigned char) dst[first], (unsigned char) ref[first], p.file_offs);
++        }
++    }
++    return ok;
++}
++
+ // Ensure `expert` is in the pool and return its slot base (and the slot index), or null when the pool is
+-// unusable (the caller then reads the full master / disk directly).  A miss reads the GGUF (buffered
+-// through the page cache by default).  Retiring slots (state 2, their arena copy is still in flight) are
++// unusable (the caller then reads the full master / disk directly).  A miss is a memcpy out of the model
++// mapping (or a buffered GGUF read).  Retiring slots (state 2, their arena copy is still in flight) are
+ // never reused or evicted.  Caller holds `g_mutex`.
+ static char * pool_slot_locked(host_pool_t & p, int expert, int * out_slot, bool sync_on_evict) {
+     if (expert < 0 || expert >= p.n_experts) {
+@@ -1096,18 +1205,8 @@ static char * pool_slot_locked(host_pool_t & p, int expert, int * out_slot, bool
+     if (slot < 0) {
+         return nullptr;
+     }
+-    if (p.fd < 0) {
+-        p.fd = pool_open_file(p.path.c_str(), g_pool_dio);
+-        if (p.fd < 0) {
+-            p.failed = true;
+-            return nullptr;
+-        }
+-        pool_fd_align(p.fd, &p.align);
+-    }
+-    const size_t off = p.file_offs + (size_t) expert * p.host_bytes;
+     char *       dst = p.base + (size_t) slot * p.host_bytes;
+-    const bool ok = g_pool_dio ? pool_dio_read(p.fd, dst, p.host_bytes, off, p.align)
+-                               : (pool_pread(p.fd, dst, p.host_bytes, off) == (pool_ssize_t) p.host_bytes);
++    const bool ok = pool_fill_slot_locked(p, expert, dst);
+     if (!ok) {
+         p.failed = true;
+         return nullptr;
+@@ -1183,6 +1282,7 @@ static void pool_bg_worker() {
+         int    slot = -1, fd = -1;
+         size_t off = 0, hb = 0, align = 4096;
+         char * dst = nullptr;
++        const char * mapped = nullptr;
+         {
+             std::lock_guard<std::mutex> lk(g_mutex);
+             if (p->failed) {
+@@ -1219,7 +1319,8 @@ static void pool_bg_worker() {
+             if (slot < 0) {
+                 continue;   // every slot is reserved or retiring: drop the prefetch
+             }
+-            if (p->fd < 0) {
++            const bool use_map = !g_pool_dio && p->src_host != nullptr;
++            if (!use_map && p->fd < 0) {
+                 p->fd = pool_open_file(p->path.c_str(), g_pool_dio);
+                 if (p->fd < 0) {
+                     p->failed = true;
+@@ -1236,9 +1337,11 @@ static void pool_bg_worker() {
+             hb    = p->host_bytes;
+             align = p->align;
+             dst   = p->base + (size_t) slot * p->host_bytes;
++            mapped = use_map ? (const char *) p->src_host + (size_t) ex * p->host_bytes : nullptr;
+         }
+-        const bool ok = g_pool_dio ? pool_dio_read(fd, dst, hb, off, align)
+-                                   : (pool_pread(fd, dst, hb, off) == (pool_ssize_t) hb);
++        const bool ok = mapped != nullptr ? (memcpy(dst, mapped, hb), true)
++                       : g_pool_dio     ? pool_dio_read(fd, dst, hb, off, align)
++                                        : (pool_pread(fd, dst, hb, off) == (pool_ssize_t) hb);
+         {
+             std::lock_guard<std::mutex> lk(g_mutex);
+             if (p->slot_state[(size_t) slot] == 3) {
+@@ -1435,38 +1538,197 @@ static void pool_rank_from_prefill_locked() {
+ // an eviction victim.  Without this, an expert admitted earlier in the same token can be evicted by a later
+ // one (its freshly-seeded count is the smallest), which is what made the hook's `all` flag flip from token
+ // to token - and that variability is what broke CUDA graph replay.
+-// wip/fix-gemma-4 (TODO #77/C): copy ONE expert's device slot from the host master.  One place for the
++// wip/host-expert-master-drop (TODO #55): resolve a PINNED, device-readable source for ONE whole host
++// expert of `t`, so that no device copy and no kernel ever reads the pageable model mapping.
++//
++// * pinned master (the `pinned` default): the master itself, an H2D source.
++// * pool-backed master (`--host-experts pool`): a pinned pool slot, a D2D source (the slot is filled from
++//   the GGUF / page cache on a miss).
++// * neither available (the pool is off or its slot is held by the background worker, or the split geometry
++//   cannot be expressed in one slot): a pinned per-table BOUNCE copy of the expert.  A pageable
++//   `cudaMemcpyAsync` is NOT a safe fallback here -- ROCm stages a pageable upload through a shared
++//   internal bounce, so back-to-back pageable copies can tear (measured: nondeterministic output from a
++//   pageable master while every copy path verified byte-exact).  The delivery snapshots pageable uploads
++//   for exactly this reason elsewhere (`set_tensor_2d_async`, the async-input ring).
++//
++// A source is "acquired" here and "released" by `expert_src_done` once the copy has been issued, which
++// records the drain marker: the pool slot is retired (state 2) after its per-(slot,device) event, and a
++// bounce entry stays busy until its event signals, at which point it may be reused.
++struct expert_src_t {
++    const char *   base      = nullptr;   // start of the WHOLE host expert; add `t.src_off` at the copy
++    cudaMemcpyKind kind      = cudaMemcpyHostToDevice;
++    int            pool_slot = -1;
++    int            bounce    = -1;
++};
++
++// Caller holds `g_mutex`.
++static bool expert_host_src(table_t & t, int32_t expert, host_pool_t * pool, bool sync_on_evict,
++                            expert_src_t * out) {
++    *out = expert_src_t{};
++    if (t.host == nullptr || t.host_bytes == 0 || expert < 0 || expert >= t.n_experts) {
++        return false;
++    }
++    if (!table_master_pageable(t)) {
++        out->base = (const char *) t.host + (size_t) expert * t.host_bytes;
++        out->kind = cudaMemcpyHostToDevice;
++        return true;
++    }
++    if (pool != nullptr && t.src_off + t.expert_bytes <= t.host_bytes) {
++        int    s = -1;
++        char * p = pool_slot_locked(*pool, expert, &s, sync_on_evict);
++        if (p != nullptr && s >= 0) {
++            out->base      = (const char *) pool->base_dev + (size_t) s * pool->host_bytes;
++            out->kind      = cudaMemcpyDeviceToDevice;
++            out->pool_slot = s;
++            return true;
++        }
++    }
++    // Bounce: reuse an entry whose copy has drained, else grow the ring.  Copying the page-cache-backed
++    // mapping into pinned memory is a plain host memcpy, so the transfer below is a pinned H2D.
++    int idx = -1;
++    for (int i = 0; i < (int) t.bounce.size(); i++) {
++        if (t.bounce[(size_t) i].busy) {
++#if defined(GGML_USE_HIP)
++            const bool ready = hipEventQuery((hipEvent_t) t.bounce[(size_t) i].ev) != hipErrorNotReady;
++#else
++            const bool ready = cudaEventQuery(t.bounce[(size_t) i].ev) != cudaErrorNotReady;
++#endif
++            (void) cudaGetLastError();
++            if (!ready) {
++                continue;
++            }
++            t.bounce[(size_t) i].busy = false;
++        }
++        idx = i;
++        break;
++    }
++    if (idx < 0) {
++        device_guard dg(t.device);
++        void *    mem = nullptr;
++        cudaEvent_t ev = nullptr;
++        if (cudaHostAlloc(&mem, t.host_bytes, cudaHostAllocPortable | cudaHostAllocMapped) != cudaSuccess ||
++            cudaEventCreateWithFlags(&ev, cudaEventDisableTiming) != cudaSuccess) {
++            (void) cudaGetLastError();
++            if (mem != nullptr) {
++                (void) cudaFreeHost(mem);
++            }
++            if (ev != nullptr) {
++                (void) cudaEventDestroy(ev);
++            }
++            return false;
++        }
++        bounce_t b;
++        b.host = (char *) mem;
++        b.ev   = ev;
++        b.busy = false;
++        t.bounce.push_back(b);
++        idx = (int) t.bounce.size() - 1;
++    }
++    char * buf = t.bounce[(size_t) idx].host;
++    if (!g_pool_dio && t.host != nullptr) {
++        // the mapped master: a plain memcpy out of the page cache
++        memcpy(buf, (const char *) t.host + (size_t) expert * t.host_bytes, t.host_bytes);
++    } else {
++        // DISK TIER (`MOE_HOST_POOL_DIO=1`): read the expert with O_DIRECT so the page cache is not
++        // populated -- the whole point of the mode, and it must hold for STAGING too (a whole-table prefill
++        // staging copy would otherwise fault the entire expert set into the page cache).
++        if (!t.src_known || t.src_path.empty()) {
++            return false;
++        }
++        device_guard dg(t.device);
++        if (t.src_fd < 0) {
++            t.src_fd = pool_open_file(t.src_path.c_str(), g_pool_dio);
++            if (t.src_fd < 0) {
++                return false;
++            }
++            pool_fd_align(t.src_fd, &t.src_align);
++        }
++        const size_t off = t.src_offs + (size_t) expert * t.host_bytes;
++        const bool ok = g_pool_dio ? pool_dio_read(t.src_fd, buf, t.host_bytes, off, t.src_align)
++                                   : (pool_pread(t.src_fd, buf, t.host_bytes, off) == (pool_ssize_t) t.host_bytes);
++        if (!ok) {
++            return false;
++        }
++    }
++    out->base    = buf;
++    out->kind    = cudaMemcpyHostToDevice;
++    out->bounce  = idx;
++    return true;
++}
++
++// Record the drain marker for a source acquired above, AFTER its copy has been issued.  Caller holds
++// `g_mutex`.
++static void expert_src_done(table_t & t, host_pool_t * pool, const expert_src_t & src, void * stream) {
++    const cudaStream_t st = (cudaStream_t) stream;
++    const int dev = t.device >= 0 ? t.device : 0;
++    if (src.pool_slot >= 0 && pool != nullptr) {
++        // Mark when this slot's copy to THIS device has drained, so a later eviction can safely overwrite
++        // it (per-device: a process-wide slot may serve several devices).  The arena/ring now owns the
++        // bytes, so the pool entry is retired as soon as the copy drains.
++        cudaEvent_t ev = pool_slot_event(*pool, src.pool_slot, dev);
++        if (ev != nullptr) {
++            (void) cudaEventRecord(ev, st);
++        }
++        if (src.pool_slot < (int) pool->slot_state.size()) {
++            pool->slot_state[(size_t) src.pool_slot] = 2;
++        }
++    } else if (src.bounce >= 0 && src.bounce < (int) t.bounce.size()) {
++        (void) cudaEventRecord(t.bounce[(size_t) src.bounce].ev, st);
++        t.bounce[(size_t) src.bounce].busy = true;
++    }
++}
++
++// wip/fix-gemma-4 (TODO #77/C): copy ONE expert's device slot from the host side.  One place for the
+ // three geometries a table can have, so the eager fill, the identity fill and any future fill cannot
+ // disagree: a FUSED table (multi-slice, concatenated in order), a strided axis-0 slice (2-D copy) and a
+ // contiguous slice (1-D copy).
+-static cudaError_t fill_slot_from_host(const table_t & t, void * dst, size_t expert, cudaStream_t stream) {
++// wip/host-expert-master-drop (TODO #55): the bytes come from `expert_host_src` (pinned master / pinned
++// pool slot / pinned bounce), never from the pageable mapping.
++static cudaError_t fill_slot_from_host(table_t & t, void * dst, size_t expert, cudaStream_t stream) {
+     if (t.host == nullptr || t.host_bytes == 0 || t.expert_bytes == 0) {
+         return cudaErrorInvalidDeviceFunction;
+     }
++    host_pool_t * pool = table_pool_locked(t);
++    expert_src_t  src;
++    // `sync_on_evict = true`: this helper is used by the SIZING-time bulk paths (the identity fill and the
++    // prefill/heat seeds), which cycle the pool many times in one pass, so the slot a fill is about to
++    // reuse may still be read by an earlier queued copy.  The eager decode path keeps its own tuned
++    // (`n_protect`-based) decision.
++    if (!expert_host_src(t, (int32_t) expert, pool, true, &src)) {
++        static bool warned = false;
++        if (!warned) {
++            warned = true;
++            GGML_LOG_WARN("%s: no pinned host source for layer=%d role=%s expert=%d (pool and bounce both "
++                          "unavailable)\n", __func__, t.layer, t.role.c_str(), (int) expert);
++        }
++        return cudaErrorInvalidDeviceFunction;
++    }
++    cudaError_t err = cudaSuccess;
+     if (t.n_slices > 0) {
+-        const char * base = (const char *) t.host + expert * t.host_bytes;
+         size_t dst_o = 0;
+         for (int k = 0; k < t.n_slices; k++) {
+-            const cudaError_t err = cudaMemcpyAsync((char *) dst + dst_o, base + t.slice[k].src_off,
+-                                                    t.slice[k].len, cudaMemcpyHostToDevice, stream);
++            err = cudaMemcpyAsync((char *) dst + dst_o, src.base + t.slice[k].src_off,
++                                  t.slice[k].len, src.kind, stream);
+             if (err != cudaSuccess) {
+                 return err;
+             }
+             dst_o += t.slice[k].len;
+         }
+-        return cudaSuccess;
+-    }
+-    const char * src = (const char *) t.host + expert * t.host_bytes + t.src_off;
+-    if (t.split_axis == 0 && t.host_pitch > 0) {
+-        const int64_t rows = (int64_t) (t.host_bytes / t.host_pitch);
+-        const size_t  row  = rows > 0 ? (t.expert_bytes / (size_t) rows) : 0;
+-        if (row == 0) {
+-            return cudaErrorInvalidDeviceFunction;
++    } else {
++        const char * s = src.base + t.src_off;
++        if (t.split_axis == 0 && t.host_pitch > 0) {
++            const int64_t rows = (int64_t) (t.host_bytes / t.host_pitch);
++            const size_t  row  = rows > 0 ? (t.expert_bytes / (size_t) rows) : 0;
++            if (row == 0) {
++                return cudaErrorInvalidDeviceFunction;
++            }
++            err = cudaMemcpy2DAsync(dst, row, s, t.host_pitch, row, (size_t) rows, src.kind, stream);
++        } else {
++            err = cudaMemcpyAsync(dst, s, t.expert_bytes, src.kind, stream);
+         }
+-        return cudaMemcpy2DAsync(dst, row, src, t.host_pitch, row, (size_t) rows,
+-                                 cudaMemcpyHostToDevice, stream);
+     }
+-    return cudaMemcpyAsync(dst, src, t.expert_bytes, cudaMemcpyHostToDevice, stream);
++    expert_src_done(t, pool, src, stream);
++    return err;
+ }
+ 
+ moe_cache_alias access_locked(table_t & t, int32_t expert, void * stream,
+@@ -1595,14 +1857,7 @@ moe_cache_alias access_locked(table_t & t, int32_t expert, void * stream,
+         g_acc_fills++;
+         g_fill_bytes += (int64_t) t.expert_bytes;
+         void * dst = (char *) t.arena + (size_t) slot * t.expert_bytes;
+-        // Phase 2 (invisible L2): source the fill from the bounded pinned host pool when one exists; a
+-        // pool miss is filled from the GGUF with O_DIRECT first (host-side, synchronous).  A pool slot
+-        // is host-written and a later fill in this same pass can evict it, so a pool-sourced copy is
+-        // SYNCHRONOUS (the async form could let the next fill overwrite the slot before the copy runs).
+-        // With the pool off this is the original `t.host` async copy.
+-        char *        pool_expert = nullptr;
+-        int           pool_slot   = -1;
+-        host_pool_t * pool        = table_pool_locked(t);
++        host_pool_t * pool = table_pool_locked(t);
+         // ADDITIVE: put the expert the arena just evicted into the pool, so it is ready when the arena
+         // needs it again (usually within a few tokens).  Target 2: unless the kill-switch is set, hand it
+         // to the low-priority background worker instead of reading it here, so the token never blocks on
+@@ -1614,21 +1869,10 @@ moe_cache_alias access_locked(table_t & t, int32_t expert, void * stream,
+                 (void) pool_slot_locked(*pool, victim, nullptr, false);
+             }
+         }
+-        // Only source from the pool when this table's slice fits inside a whole-expert slot.  The meta
+-        // splitter can hand a device a DEGENERATE simple tensor (`ne[split]=0`, `nb[2]=0`), which
+-        // `moe_cache_table` registers with `expert_bytes = host_bytes` and a nonzero `slice_off`; a pool
+-        // fill would then read past the slot (and past the allocation on the last slot).  Fall back to
+-        // the master (which spans the whole expert tensor) for that geometry.
+-        if (pool != nullptr && t.src_off + t.expert_bytes <= t.host_bytes) {
+-            // A pass that cannot fill more experts than the pool holds cannot evict a slot it just filled,
+-            // so no per-slot copy drain is needed (the previous token's copies are already done).
+-            const bool pool_sync = (n_protect > pool->slots);
+-            pool_expert = pool_slot_locked(*pool, expert, &pool_slot, pool_sync);
+-        }
+         // wip/fix-gemma-4 (TODO #77/C): a fused table's slot is assembled from several host ranges
+-        // (`[gate_slice | up_slice]`), concatenated in order.  It is filled from the master only: the
+-        // host pool holds whole host experts and would need the same slicing, and the pool is the
+-        // `--host-experts pool` path, which does not run fused tables today.
++        // (`[gate_slice | up_slice]`), concatenated in order; `fill_slot_from_host` is the single place
++        // that knows every geometry (fused / strided axis-0 / contiguous), including the wip/host-expert-
++        // master-drop source for a pageable master.
+         if (t.n_slices > 0) {
+             g_acc_fills++;
+             g_fill_bytes += (int64_t) t.expert_bytes;
+@@ -1641,43 +1885,36 @@ moe_cache_alias access_locked(table_t & t, int32_t expert, void * stream,
+             }
+             return { (char *) t.arena + (size_t) slot * t.expert_bytes, true };
+         }
+-        const bool from_pool = pool_expert != nullptr;
+-        const cudaMemcpyKind kind = from_pool ? cudaMemcpyDeviceToDevice : cudaMemcpyHostToDevice;
+-        const char * src = from_pool
+-                               ? (const char *) pool->base_dev + (size_t) pool_slot * pool->host_bytes + t.src_off
+-                               : (const char *) t.host + (size_t) expert * t.host_bytes + t.src_off;
+-        // Phase 3 slice fill.  An unsplit table (split_axis < 0) and a contiguous axis-1 slice both
+-        // copy `expert_bytes` in one 1-D transfer; an axis-0 slice is `rows` small rows strided by the
+-        // host expert pitch, so it needs a 2-D copy (the prefill campaign's §26.3 geometry).
+-        cudaError_t err = cudaSuccess;
+-        if (t.split_axis != 0 || t.host_pitch == 0) {
+-            err = cudaMemcpyAsync(dst, src, t.expert_bytes, kind, (cudaStream_t) stream);
++        // Phase 2 (invisible L2): source the fill from the bounded pinned host pool when one exists; a
++        // pool miss is filled from the GGUF (page cache, or O_DIRECT) first, host-side.
++        // wip/host-expert-master-drop (TODO #55): with a pool-backed master the pool (or, when it declines,
++        // the per-table pinned bounce) is the ONLY device-readable source -- the master is a pageable model
++        // mapping and a pageable H2D is not a safe fallback (ROCm stages it through a shared bounce).
++        // A pass that cannot fill more experts than the pool holds cannot evict a slot it just filled, so
++        // no per-slot copy drain is needed (the previous token's copies are already done).
++        const bool    pool_sync = pool != nullptr && n_protect > pool->slots;
++        expert_src_t  hsrc;
++        cudaError_t   err = cudaSuccess;
++        if (!expert_host_src(t, expert, pool, pool_sync, &hsrc)) {
++            err = cudaErrorInvalidDeviceFunction;
++        } else if (t.split_axis != 0 || t.host_pitch == 0) {
++            // Phase 3 slice fill.  An unsplit table (split_axis < 0) and a contiguous axis-1 slice both
++            // copy `expert_bytes` in one 1-D transfer; an axis-0 slice is `rows` small rows strided by the
++            // host expert pitch, so it needs a 2-D copy (the prefill campaign's §26.3 geometry).
++            err = cudaMemcpyAsync(dst, hsrc.base + t.src_off, t.expert_bytes, hsrc.kind, (cudaStream_t) stream);
+         } else {
+             const int64_t rows = t.host_bytes > 0 ? (int64_t) (t.host_bytes / t.host_pitch) : 0;
+             const size_t  row  = rows > 0 ? (t.expert_bytes / (size_t) rows) : 0;
+             if (row > 0) {
+-                err = cudaMemcpy2DAsync(dst, row, src, t.host_pitch, row, (size_t) rows,
+-                                        kind, (cudaStream_t) stream);
++                err = cudaMemcpy2DAsync(dst, row, hsrc.base + t.src_off, t.host_pitch, row, (size_t) rows,
++                                        hsrc.kind, (cudaStream_t) stream);
+             }
+         }
+-        if (from_pool && pool != nullptr && pool_slot >= 0) {
+-            // Mark when this slot's copy to THIS device has drained, so a later eviction can safely
+-            // overwrite it (per-device: a process-wide slot may serve several devices).
+-            if (stream != nullptr) {
+-                cudaEvent_t ev = pool_slot_event(*pool, pool_slot, t.device >= 0 ? t.device : 0);
+-                if (ev != nullptr) {
+-                    (void) cudaEventRecord(ev, (cudaStream_t) stream);
+-                }
+-            }
+-            // ADDITIVE: the arena now owns this block; free the pool entry as soon as the copy drains
+-            // (`pool_reap_locked`), so the pool stays the complement of the arena.
+-            if (pool_slot < (int) pool->slot_state.size()) {
+-                pool->slot_state[(size_t) pool_slot] = 2;
+-            }
++        if (err == cudaSuccess) {
++            expert_src_done(t, pool, hsrc, stream);
+         } else if (pool != nullptr) {
+-            // The master served this fill (a background reservation held state 3, or the pool was full):
+-            // cancel any in-flight background copy of this expert so the pool does not keep a duplicate
+-            // the arena now owns.
++            // No pinned source served this fill: cancel any in-flight background copy of this expert so
++            // the pool does not keep a duplicate the arena now owns.
+             pool_cancel_bg_locked(*pool, expert);
+         }
+         if (err != cudaSuccess) {
+@@ -1688,6 +1925,8 @@ moe_cache_alias access_locked(table_t & t, int32_t expert, void * stream,
+     return { (char *) t.arena + (size_t) slot * t.expert_bytes, true };
+ }
+ 
++
++
+ // wip/moe-expert-cache prefill seed (MOE_EXPERT_CACHE_PREFILL_SEED=1): one-shot bulk admission of the
+ // experts the prefill routing touched most, applied at arena sizing (after the arena/policy state exist).
+ // wip/first-prefill-latency: the arena is sized against the full slab region, but a wide prefill reclaims
+@@ -1750,25 +1989,14 @@ void apply_prefill_seed_locked(table_t & t) {
+     if (k > t.slots) {
+         k = t.slots;
+     }
+-    const int64_t rows = (t.split_axis == 0 && t.host_pitch > 0 && t.host_bytes > 0)
+-                             ? (int64_t) (t.host_bytes / t.host_pitch) : 0;
+-    const size_t  row  = rows > 0 ? (t.expert_bytes / (size_t) rows) : 0;
+     int seeded = 0;
+     bool ok = true;
+     for (int i = 0; i < k; i++) {
+         const int32_t e  = rank[(size_t) i];
+         void *        dst = (char *) t.arena + (size_t) i * t.expert_bytes;
+-        const char *  src = (const char *) t.host + (size_t) e * t.host_bytes + t.src_off;
+-        cudaError_t err = cudaSuccess;
+-        if (t.split_axis != 0 || t.host_pitch == 0) {
+-            err = cudaMemcpyAsync(dst, src, t.expert_bytes, cudaMemcpyHostToDevice, (cudaStream_t) 0);
+-        } else if (row > 0) {
+-            err = cudaMemcpy2DAsync(dst, row, src, t.host_pitch, row, (size_t) rows,
+-                                    cudaMemcpyHostToDevice, (cudaStream_t) 0);
+-        } else {
+-            ok = false;   // the host geometry is not representable by a single fill: stop seeding
+-            break;
+-        }
++        // wip/host-expert-master-drop (TODO #55): one geometry-aware source (pinned master / pinned pool /
++        // pageable fallback), so a seeded table is byte-identical to a lazily filled one.
++        const cudaError_t err = fill_slot_from_host(t, dst, (size_t) e, (cudaStream_t) 0);
+         if (err != cudaSuccess) {
+             (void) cudaGetLastError();
+             ok = false;
+@@ -1837,25 +2065,13 @@ void apply_heat_seed_locked(table_t & t) {
+     if (k > t.slots) {
+         k = t.slots;
+     }
+-    const int64_t rows = (t.split_axis == 0 && t.host_pitch > 0 && t.host_bytes > 0)
+-                             ? (int64_t) (t.host_bytes / t.host_pitch) : 0;
+-    const size_t  row  = rows > 0 ? (t.expert_bytes / (size_t) rows) : 0;
+     int  seeded = 0;
+     bool ok = true;
+     for (int i = 0; i < k; i++) {
+         const int32_t e   = rank[(size_t) i];
+         void *        dst = (char *) t.arena + (size_t) i * t.expert_bytes;
+-        const char *  src = (const char *) t.host + (size_t) e * t.host_bytes + t.src_off;
+-        cudaError_t err = cudaSuccess;
+-        if (t.split_axis != 0 || t.host_pitch == 0) {
+-            err = cudaMemcpyAsync(dst, src, t.expert_bytes, cudaMemcpyHostToDevice, (cudaStream_t) 0);
+-        } else if (row > 0) {
+-            err = cudaMemcpy2DAsync(dst, row, src, t.host_pitch, row, (size_t) rows,
+-                                    cudaMemcpyHostToDevice, (cudaStream_t) 0);
+-        } else {
+-            ok = false;
+-            break;
+-        }
++        // wip/host-expert-master-drop (TODO #55): the same geometry-aware source the eager fill uses.
++        const cudaError_t err = fill_slot_from_host(t, dst, (size_t) e, (cudaStream_t) 0);
+         if (err != cudaSuccess) {
+             (void) cudaGetLastError();
+             ok = false;
+@@ -3267,10 +3483,18 @@ bool moe_cache_preflight(int device, size_t host_expert_bytes, size_t aux_reserv
+         g_preflight_device_seen [device] = true;
+     }
+     // The pool's AUTO budget is a fraction of the MoE host expert bytes.  This runs once per host-expert
+-    // device, before the context, and is the only place that sees them all; accumulate here regardless of
+-    // the cache's own auto/explicit mode.
++    // device, before the context -- but it is RE-RUN for the same devices (the `--fit` probe, and a
++    // second model's preflight for a separate draft/MTP head), so a running sum sized the pool at N x the
++    // configured fraction (measured 3 calls -> `--host-experts pool` pinned 75 % of the host set instead
++    // of 25 %).  Derive it from the per-device MAX instead, exactly like the completeness gate above.
+     if (g_pool_enabled) {
+-        g_preflight_host_bytes += (int64_t) host_expert_bytes;
++        int64_t host_total = 0;
++        for (int d = 0; d < GGML_CUDA_MAX_DEVICES; d++) {
++            if (g_preflight_device_seen[d]) {
++                host_total += g_preflight_device_bytes[d];
++            }
++        }
++        g_preflight_host_bytes = host_total;
+     }
+     if (!g_auto) {
+         return true;   // an explicit MOE_EXPERT_CACHE_MIB is used verbatim; no early floor
+@@ -4112,7 +4336,8 @@ moe_cache_alias moe_cache_alias_get(int table, int expert) {
+     if (it != t.expert_slot.end()) {
+         return { (char *) t.arena + (size_t) it->second * t.expert_bytes, true };
+     }
+-    if (t.host != nullptr && expert >= 0 && expert < t.n_experts && t.host_pitch == 0 && t.n_slices == 0) {
++    if (t.host != nullptr && expert >= 0 && expert < t.n_experts && t.host_pitch == 0 && t.n_slices == 0 &&
++        !table_master_pageable(t)) {
+         return { (void *) ((const char *) t.host + (size_t) expert * t.host_bytes + t.src_off), false };
+     }
+     return { nullptr, false };
+@@ -4400,6 +4625,120 @@ static bool moe_cache_slices_addr_ok(size_t host_bytes, size_t expert_bytes,
+     return total == expert_bytes;
+ }
+ 
++// wip/host-expert-master-drop (TODO #55): serve a copy FROM a pageable host expert master (the model
++// mapping) WITHOUT a pageable H2D.
++//
++// The scheduler's used-expert copy (`copy_experts`) and its whole-table fallback read the host master at
++// a byte offset and hand the pointer to `ggml_backend_tensor_set_async`.  A pageable `cudaMemcpyAsync` is
++// not safe for that (ROCm stages it through a shared internal bounce, and back-to-back pageable copies
++// tear -- measured as nondeterministic greedy text while every copy verified byte-exact), so the bytes are
++// copied into the per-table pinned bounce first and the transfer is a pinned H2D.  Returns false when
++// `src_host` does not belong to a registered pool-backed master (the caller keeps its normal path).
++//
++// Only the 1:1 geometry is served (an unsplit table: the same byte offset in the master and in `dst`).  A
++// split/meta table's copies are issued by the meta backend per device, where `set_tensor_2d_async` already
++// snapshots a pageable source through its pinned ring.
++bool moe_cache_upload_pageable(void * dst, const void * src_host, size_t size, void * stream, int device) {
++    if (dst == nullptr || src_host == nullptr || size == 0 || !g_enabled) {
++        return false;
++    }
++    std::lock_guard<std::mutex> lock(g_mutex);
++    const char * s = (const char *) src_host;
++    for (table_t & t : g_tables) {
++        if (t.device != device || t.host == nullptr || t.host_pinned || t.n_experts <= 0 || t.host_bytes == 0) {
++            continue;
++        }
++        const char * base = (const char *) t.host;
++        const size_t span = (size_t) t.n_experts * t.host_bytes;
++        if (s < base || s >= base + span) {
++            continue;
++        }
++        const size_t off = (size_t) (s - base);
++        // A byte range of the master, chunked through the per-table pinned bounce.  Deliberately NOT
++        // indexed by expert: this must serve EVERY geometry a table can have (a fused `-sm tensor` slot, a
++        // strided axis-0 slice, and the uneven-split "degenerate" slice the meta splitter can hand a device,
++        // whose `src_off + expert_bytes` exceeds one host expert) -- the caller's range is just bytes.
++        // Reading past the tensor (the caller's 512-byte MMQ tail pad on the LAST expert) is clamped: the
++        // pinned master has no bytes there either, so the stale destination is the same either way, and a
++        // pageable copy of that range would read past the mapping.
++        const size_t n_total = std::min(size, span - off);
++        size_t done = 0;
++        while (done < n_total) {
++            const size_t n = std::min(n_total - done, t.host_bytes);
++            // Acquire a pinned bounce entry, fill it from the mapping, and issue a pinned H2D.
++            int idx = -1;
++            for (int i = 0; i < (int) t.bounce.size(); i++) {
++                if (t.bounce[(size_t) i].busy) {
++#if defined(GGML_USE_HIP)
++                    const bool ready = hipEventQuery((hipEvent_t) t.bounce[(size_t) i].ev) != hipErrorNotReady;
++#else
++                    const bool ready = cudaEventQuery(t.bounce[(size_t) i].ev) != cudaErrorNotReady;
++#endif
++                    (void) cudaGetLastError();
++                    if (!ready) {
++                        continue;
++                    }
++                    t.bounce[(size_t) i].busy = false;
++                }
++                idx = i;
++                break;
++            }
++            if (idx < 0) {
++                device_guard dg(t.device);
++                void *      mem = nullptr;
++                cudaEvent_t ev  = nullptr;
++                if (cudaHostAlloc(&mem, t.host_bytes, cudaHostAllocPortable | cudaHostAllocMapped) != cudaSuccess ||
++                    cudaEventCreateWithFlags(&ev, cudaEventDisableTiming) != cudaSuccess) {
++                    (void) cudaGetLastError();
++                    if (mem != nullptr) { (void) cudaFreeHost(mem); }
++                    if (ev  != nullptr) { (void) cudaEventDestroy(ev); }
++                    return false;
++                }
++                bounce_t b;
++                b.host = (char *) mem;
++                b.ev   = ev;
++                b.busy = false;
++                t.bounce.push_back(b);
++                idx = (int) t.bounce.size() - 1;
++            }
++            char * buf = t.bounce[(size_t) idx].host;
++            memcpy(buf, s + done, n);
++            const cudaError_t err = cudaMemcpyAsync((char *) dst + done, buf, n, cudaMemcpyHostToDevice,
++                                                   (cudaStream_t) stream);
++            if (err != cudaSuccess) {
++                (void) cudaGetLastError();
++                return false;
++            }
++            (void) cudaEventRecord(t.bounce[(size_t) idx].ev, (cudaStream_t) stream);
++            t.bounce[(size_t) idx].busy = true;
++            done += n;
++        }
++        return true;
++    }
++    return false;
++}
++
++// wip/host-expert-master-drop (TODO #55): is `p` inside a POOL-BACKED (pageable, file-mapping-backed)
++// host expert master?  Used by the staging hooks to refuse a "pinned source" fast path for a pointer the
++// runtime was never told to pin -- a 2-D pageable H2D is the pathological ROCm case.
++bool moe_cache_source_pageable(const void * p) {
++    if (p == nullptr || !g_enabled) {
++        return false;
++    }
++    std::lock_guard<std::mutex> lock(g_mutex);
++    const char * c = (const char *) p;
++    for (const table_t & t : g_tables) {
++        if (t.host == nullptr || t.host_pinned || t.host_bytes == 0 || t.n_experts <= 0) {
++            continue;
++        }
++        const char * b = (const char *) t.host;
++        if (c >= b && c < b + (size_t) t.n_experts * t.host_bytes) {
++            return true;
++        }
++    }
++    return false;
++}
++
+ bool moe_cache_gather_host(const ggml_tensor * weight, const ggml_tensor * weight_cpy,
+                            const ggml_tensor * ids, void * stream, int device,
+                            size_t slice_off, int split_axis) {
+@@ -4536,19 +4875,25 @@ bool moe_cache_stage_table(int device, const void * host_src, size_t offset, siz
+     }
+     static uint64_t ordered_seq[GGML_CUDA_MAX_DEVICES] = {};
+     std::lock_guard<std::mutex> lock(g_mutex);
+-    if (!g_sized) {
+-        return false;
+-    }
+     for (table_t & t : g_tables) {
+         if (t.device != device || t.host != host_src || t.src_off != offset) {
+             continue;
+         }
+-        // A usable arena and a device-readable pinned host alias for the non-resident half.
+-        if (t.arena == nullptr || t.slots <= 0 || t.host_dev == nullptr || !t.cold_safe ||
+-            t.n_experts <= 0 || !t.host_pinned) {
++        if (t.n_experts <= 0 || t.host == nullptr) {
++            g_stage_decline_usable++;
++            return false;
++        }
++        // The pinned-master path needs a built arena (the staging kernel reads it) and a device-readable
++        // master.  A POOL-BACKED master needs neither: it is filled expert by expert from the pinned pool
++        // (or the per-table bounce), so it also serves the pre-sizing prefill (the whole point -- a
++        // pageable master must never reach the ring through the pageable upload).
++        if (t.host_pinned && (t.arena == nullptr || t.slots <= 0 || t.host_dev == nullptr || !t.cold_safe)) {
+             g_stage_decline_usable++;
+             return false;
+         }
++        if (t.host_pinned && !g_sized) {
++            return false;
++        }
+         const bool do2d = t.split_axis == 0 && t.host_pitch != 0;
+         int64_t rows = 0;
+         int64_t row_bytes = 0;
+@@ -4572,6 +4917,57 @@ bool moe_cache_stage_table(int device, const void * host_src, size_t offset, siz
+ 
+         device_guard dg(device);
+ 
++        // wip/host-expert-master-drop (TODO #55): a POOL-BACKED (pageable) master cannot be read by the
++        // staging kernel, so the same destination is filled expert by expert: resident experts are a D2D
++        // copy out of the arena, the rest come from the per-table pinned bounce (the pool is deliberately
++        // bypassed -- see the comment in the loop).  Only the source of the bytes changes; the destination
++        // layout is exactly the one the kernel produces, so every consumer is unchanged.
++        if (!t.host_pinned) {
++            host_pool_t * pool = nullptr;
++            cudaError_t   err  = cudaSuccess;
++            {
++                const int64_t resident = (int64_t) t.expert_slot.size();
++                g_stage_ok++;
++                g_stage_arena_bytes += resident * (int64_t) t.expert_bytes;
++                g_stage_host_bytes  += ((int64_t) t.n_experts - resident) * (int64_t) t.expert_bytes;
++            }
++            for (int e = 0; e < t.n_experts && err == cudaSuccess; e++) {
++                char * d = (char *) dst + (size_t) e * t.expert_bytes;
++                const auto hit = t.expert_slot.find(e);
++                if (hit != t.expert_slot.end() && hit->second >= 0 && hit->second < t.slots) {
++                    err = cudaMemcpyAsync(d, (const char *) t.arena + (size_t) hit->second * t.expert_bytes,
++                                          t.expert_bytes, cudaMemcpyDeviceToDevice, (cudaStream_t) copy_stream);
++                    continue;
++                }
++                // The pool is deliberately NOT used here: a whole-table staging reads EVERY expert anyway,
++                // so a pool hit only saves the copy into pinned memory while the misses evict the decode
++                // band's hot set (measured: prefill churn dropped the pool's decode hit rate and the
++                // prefill did not get faster).  The per-table pinned bounce is the staging source, and it
++                // never displaces a resident expert.
++                expert_src_t hsrc;
++                if (!expert_host_src(t, e, nullptr, false, &hsrc)) {
++                    err = cudaErrorInvalidDeviceFunction;
++                    break;
++                }
++                if (do2d) {
++                    err = cudaMemcpy2DAsync(d, (size_t) row_bytes, hsrc.base + t.src_off, t.host_pitch,
++                                            (size_t) row_bytes, (size_t) rows, hsrc.kind,
++                                            (cudaStream_t) copy_stream);
++                } else {
++                    err = cudaMemcpyAsync(d, hsrc.base + t.src_off, t.expert_bytes, hsrc.kind,
++                                          (cudaStream_t) copy_stream);
++                }
++                if (err == cudaSuccess) {
++                    expert_src_done(t, pool, hsrc, copy_stream);
++                }
++            }
++            if (err != cudaSuccess) {
++                (void) cudaGetLastError();
++                return false;
++            }
++            return true;
++        }
++
+         // Refresh the immutable snapshot when the cache wrote since we built it, or the arena moved.
+         const uint64_t seq = g_write_seq.load();
+         if (t.prs_dev == nullptr || t.prs_n != t.n_experts) {
+@@ -4773,11 +5169,13 @@ bool moe_cache_update_host(const ggml_tensor * weight, const ggml_tensor * weigh
+     }
+ 
+     // A pageable axis-0 slice (a `-sm tensor` `down_exps` split) has no device mapping and its only
+-    // cache fill is a strided 2-D H2D -- the pageable `cudaMemcpy2DAsync` that faults on ROCm 7.14
+-    // (issue #116's copy-side twin).  Decline the partial-residency case so the scheduler's
+-    // pageable-safe host path serves the op.  An identity (whole-resident) table needs no fill and is
+-    // left alone.
+-    if (t.n_slices == 0 && t.host_dev == nullptr && t.split_axis == 0 && t.host_pitch > 0 && !t.identity) {
++    // cache fill would be a strided 2-D H2D -- the pageable `cudaMemcpy2DAsync` that faults on ROCm 7.14
++    // (issue #116's copy-side twin).  wip/host-expert-master-drop (TODO #55): a POOL-BACKED master is no
++    // longer a reason to decline -- its fill is a 2-D copy from a pinned pool slot (or the pageable 1-D
++    // per-row fallback), never a pageable 2-D transfer -- so the decline only covers a master the runtime
++    // failed to pin for any other reason.
++    if (t.n_slices == 0 && t.host != nullptr && !table_master_pageable(t) && t.host_dev == nullptr &&
++        t.split_axis == 0 && t.host_pitch > 0 && !t.identity) {
+         g_decline_all++;
+         return false;
+     }
+diff --git a/ggml/src/ggml-cuda/moe-expert-cache.h b/ggml/src/ggml-cuda/moe-expert-cache.h
+index b357a77ac..22deb6928 100644
+--- a/ggml/src/ggml-cuda/moe-expert-cache.h
++++ b/ggml/src/ggml-cuda/moe-expert-cache.h
+@@ -268,6 +268,18 @@ bool moe_cache_gather_host(const struct ggml_tensor * weight, const struct ggml_
+                            const struct ggml_tensor * ids, void * stream, int device,
+                            size_t slice_off, int split_axis);
+ 
++// wip/host-expert-master-drop (TODO #55): true when `p` lies inside a host expert master that is NOT
++// pinned (the pool-backed, file-mapping-backed master).  A device copy must not treat such a pointer as a
++// pinned source, and a kernel must not read it in place.
++bool moe_cache_source_pageable(const void * p);
++
++// wip/host-expert-master-drop (TODO #55): copy `size` bytes of a POOL-BACKED host expert master (the
++// pageable model mapping) at `src_host` into the device pointer `dst`, staging through the pinned pool or
++// the per-table pinned bounce -- never a pageable H2D.  Returns false when `src_host` is not inside a
++// registered pool-backed master of `device` (the caller keeps its normal copy path), so this is safe to
++// call for every host-to-device upload.
++bool moe_cache_upload_pageable(void * dst, const void * src_host, size_t size, void * stream, int device);
++
+ // Fill a whole-table staging copy from the expert-cache arena (the
+ // immutable prefill residency snapshot) + the pinned host master, instead of re-uploading every expert
+ // over PCIe.  `host_src`/`offset` identify a registered table; `width`/`stride_src`/`n_copies` are the
+diff --git a/include/llama.h b/include/llama.h
+index 96f754906..6f21ae174 100644
+--- a/include/llama.h
++++ b/include/llama.h
+@@ -227,7 +227,12 @@ extern "C" {
+         LLAMA_HOST_EXPERTS_MODE_AUTO   = -1, // pinned (the pageable mmap mode was removed; issue #116)
+         LLAMA_HOST_EXPERTS_MODE_PINNED =  0, // keep them in the device's pinned host buffer (ROCm_Host) - fast path
+         LLAMA_HOST_EXPERTS_MODE_MMAP   =  1, // REMOVED: pageable masters fault on no-XNACK GPUs (issue #116)
+-        LLAMA_HOST_EXPERTS_MODE_POOL   =  2, // pinned master + a bounded pinned host pool (MOE_HOST_POOL_MIB)
++        LLAMA_HOST_EXPERTS_MODE_POOL   =  2, // NO full pinned master: the tensors live in the read-only model
++                                             // mapping and every GPU read is served through the bounded
++                                             // pinned host pool (MOE_HOST_POOL_MIB/FRAC).  Costs some prefill
++                                             // bandwidth, bounds the non-swappable footprint to the pool, and
++                                             // lets a host expert set larger than RAM run by streaming from
++                                             // disk.  Requires a mapped load (the default).
+     };
+ 
+     enum llama_context_type {
+diff --git a/src/llama-model-loader.cpp b/src/llama-model-loader.cpp
+index e445afa36..dfdfcc19b 100644
+--- a/src/llama-model-loader.cpp
++++ b/src/llama-model-loader.cpp
+@@ -44,6 +44,25 @@ static void llama_host_experts_mode_apply(llama_host_experts_mode host_experts_m
+     }
+ }
+ 
++// wip/host-expert-master-drop (TODO #55): POOL mode drops the FULL PINNED host expert master.  The
++// tensors are placed in the read-only model mapping (page cache / GGUF on disk) instead, and every GPU
++// read of them goes through the bounded pinned pool, so the non-swappable part of the host expert set
++// becomes the pool budget rather than the whole set -- which is what lets a model whose expert set does
++// not fit in RAM run at all (the page cache is reclaimable; the pool is the only pinned tier).
++ggml_backend_buffer_type_t llama_model_loader::host_expert_buft(ggml_backend_dev_t dev) const {
++    if (dev == nullptr) {
++        return nullptr;
++    }
++    static const bool pin_master = getenv("LLAMA_HOST_MASTER_PINNED") != nullptr;
++    if (host_experts_mode == LLAMA_HOST_EXPERTS_MODE_POOL && use_mmap && !pin_master) {
++        ggml_backend_buffer_type_t master = ggml_backend_dev_moe_host_master_buft(dev);
++        if (master != nullptr) {
++            return master;
++        }
++    }
++    return ggml_backend_dev_host_buffer_type(dev);
++}
++
+ const char * llama_file_version_name(llama_fver version) {
+     switch (version) {
+         case GGUF_FILE_VERSION_V1: return "GGUF V1 (support until nov 2023)";
+@@ -590,10 +609,19 @@ llama_model_loader::llama_model_loader(
+     this->use_mmap      = load_mode == LLAMA_LOAD_MODE_MMAP || load_mode == LLAMA_LOAD_MODE_MMAP_MLOCK || load_mode == LLAMA_LOAD_MODE_AUTO;
+     this->use_direct_io = load_mode == LLAMA_LOAD_MODE_DIRECT_IO;
+ 
+-    // Host-resident expert weights are always pinned (`ROCm_Host`): the GPU reads the host master in
++    // Host-resident expert weights are pinned by default (`ROCm_Host`): the GPU reads the host master in
+     // place, which a pageable `CPU_Mapped` master cannot do without XNACK (issue #116).  The pageable
+     // `--host-experts mmap` mode and the legacy `LLAMA_MMAP_HOST_EXPERTS=0` were removed for RDNA.
++    this->host_experts_mode = host_experts_mode == LLAMA_HOST_EXPERTS_MODE_MMAP ? LLAMA_HOST_EXPERTS_MODE_PINNED : host_experts_mode;
+     llama_host_experts_mode_apply(host_experts_mode, __func__);
++    if (this->host_experts_mode == LLAMA_HOST_EXPERTS_MODE_POOL && !this->use_mmap) {
++        // The pool-backed master is a MODEL MAPPING: without mmap there is no mapping to place the tensors in,
++        // so the full pinned master has to stay (a pageable full copy would be no better than pinned, and the
++        // pool would still read the GGUF).
++        LLAMA_LOG_WARN("%s: --host-experts pool without mmap (--load-mode none/dio): the full pinned host "
++                       "expert master is kept, because the pool-backed master is the read-only model mapping.  "
++                       "Use the default mmap load mode (or MOE_HOST_POOL_DIO=1 with mmap) to drop it.\n", __func__);
++    }
+ 
+     if (!fname.empty()) {
+         // Load the main GGUF
+@@ -1406,8 +1434,7 @@ struct ggml_tensor * llama_model_loader::create_tensor(
+                         // the device this layer is assigned to.
+                         if (op == GGML_OP_MUL_MAT_ID && buft_list_layer != nullptr && !buft_list_layer->empty()) {
+                             ggml_backend_dev_t layer_dev = buft_list_layer->front().first;
+-                            ggml_backend_buffer_type_t layer_host_buft =
+-                                layer_dev != nullptr ? ggml_backend_dev_host_buffer_type(layer_dev) : nullptr;
++                            ggml_backend_buffer_type_t layer_host_buft = host_expert_buft(layer_dev);
+                             if (layer_host_buft != nullptr &&
+                                     weight_buft_supported(hparams, t_meta, op, layer_host_buft, layer_dev)) {
+                                 buft = layer_host_buft;
+@@ -1427,7 +1454,7 @@ struct ggml_tensor * llama_model_loader::create_tensor(
+                         if (buft == nullptr && tensor_host_buft && op == GGML_OP_MUL_MAT_ID) {
+                             for (size_t i = 0; i < ggml_backend_dev_count(); i++) {
+                                 ggml_backend_dev_t dev = ggml_backend_dev_get(i);
+-                                ggml_backend_buffer_type_t hb = dev ? ggml_backend_dev_host_buffer_type(dev) : nullptr;
++                                ggml_backend_buffer_type_t hb = host_expert_buft(dev);
+                                 if (hb == nullptr || hb == ggml_backend_cpu_buffer_type()) {
+                                     continue;
+                                 }
+diff --git a/src/llama-model-loader.h b/src/llama-model-loader.h
+index 0cf69c201..9616569eb 100644
+--- a/src/llama-model-loader.h
++++ b/src/llama-model-loader.h
+@@ -81,8 +81,16 @@ struct llama_model_loader {
+ 
+     bool use_mmap = false;
+     bool use_direct_io = false;
+-    // Host-resident expert weights (`-ncmoe`/`-cmoe`) are always pinned (`ROCm_Host`).  The pageable
+-    // `--host-experts mmap` mode was removed (issue #116).
++    // Host-resident expert weights (`-ncmoe`/`-cmoe`) are always pinned (`ROCm_Host`) unless the caller
++    // selected `--host-experts pool`: in that mode the backend may offer a pageable, file-mapping-backed
++    // master buffer type and every GPU read is served through the bounded pinned host pool (TODO #55).
++    // The pageable `--host-experts mmap` mode was removed (issue #116).
++    llama_host_experts_mode host_experts_mode = LLAMA_HOST_EXPERTS_MODE_PINNED;
++
++    // The buffer type a host-resident expert weight (`-ncmoe`/`-cmoe`, a `MUL_MAT_ID` table) should use on
++    // `dev`: the pinned host buffer by default, or the backend's pool-backed master buffer in POOL mode
++    // when the load is file-mapped (a non-mmap load has no mapping to place the tensors in).
++    ggml_backend_buffer_type_t host_expert_buft(ggml_backend_dev_t dev) const;
+     bool check_tensors;
+     bool no_alloc;
+     bool load_mtp;
+diff --git a/src/llama-model.cpp b/src/llama-model.cpp
+index 9f6a45390..ad1dee1fc 100644
+--- a/src/llama-model.cpp
++++ b/src/llama-model.cpp
+@@ -1971,7 +1971,48 @@ bool llama_model_base::load_tensors(llama_model_loader & ml_l) {
+         // a lazy context is mapped whatever the load mode, but the memory-fit pass maps nothing
+         const bool is_lazy_mapped = ctx_key.lazy && !ml_l.no_alloc;
+ 
+-        if ((ml_l.use_mmap || is_lazy_mapped) && use_mmap_buffer && buffer_from_host_ptr_supported && is_default_buft) {
++        // wip/host-expert-master-drop (TODO #55): a POOL-BACKED host expert master keeps its tensors in
++        // the read-only model mapping instead of a full pinned allocation (`--host-experts pool`).  The
++        // mapping is the source of truth (page cache / GGUF on disk, reclaimable), the bounded pinned
++        // pool is the only non-swappable tier, and every GPU read is served through it -- so a host
++        // expert set larger than RAM runs by streaming from disk.  The buffer type still carries this
++        // device, so the expert op stays on the GPU and nothing about the schedule changes.
++        const bool host_master_mapped = ml_l.use_mmap && !ml_l.no_alloc && dev != nullptr && buft != nullptr &&
++            buft == ggml_backend_dev_moe_host_master_buft(dev);
++
++        if (host_master_mapped) {
++            for (uint32_t idx = 0; idx < ml_l.files.size(); idx++) {
++                // only the mmap region containing this context's tensors of this file
++                void * addr = nullptr;
++                size_t first, last; // NOLINT
++                ml_l.get_mapping_range(&first, &last, &addr, idx, ctx);
++                if (first >= last) {
++                    continue;
++                }
++                const size_t max_size = ggml_get_max_tensor_size(ctx);
++                ggml_backend_buffer_t buf = ggml_backend_host_buffer_from_ptr(
++                        buft, (char *) addr + first, last - first, max_size);
++                if (buf == nullptr) {
++                    throw std::runtime_error(format("unable to map %s buffer over the model mapping (range %zu..%zu); "
++                                                    "use --host-experts pinned or a smaller tensor layout",
++                                                    ggml_backend_buft_name(buft), first, last));
++                }
++                bufs.emplace_back(buf);
++                buf_map.emplace(idx, buf);
++
++                // the tensors point directly into the mapping: the page must survive the load
++                for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != nullptr; t = ggml_get_next_tensor(ctx, t)) {
++                    const auto * w = ml_l.get_weight(ggml_get_name(t));
++                    if (w != nullptr && (uint32_t) w->idx == idx) {
++                        ml_l.mark_mmap_used(idx, w->offs, ggml_nbytes(t));
++                    }
++                }
++            }
++            if (bufs.empty()) {
++                throw std::runtime_error(format("host expert master: no mapped range covers the %s expert tensors",
++                                                ggml_backend_buft_name(buft)));
++            }
++        } else if ((ml_l.use_mmap || is_lazy_mapped) && use_mmap_buffer && buffer_from_host_ptr_supported && is_default_buft) {
+             GGML_ASSERT(!ml_l.no_alloc);
+             for (uint32_t idx = 0; idx < ml_l.files.size(); idx++) {
+                 // only the mmap region containing the tensors in the model is mapped to the backend buffer

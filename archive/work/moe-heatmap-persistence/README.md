@@ -476,5 +476,5 @@ deliverable.
 * `ENVIRONMENT.md` §1.2.1 — `MOE_EXPERT_CACHE_*`, `MOE_HOST_POOL_*`.
 * `archive/work/moe-expert-cache/` — the feature's own history (session 14 = the seed measurement).
 * Campaigns: [`../../wip/moe-cache-coverage/`](../../wip/moe-cache-coverage/README.md) (table placement, shares the heat
-  accumulator), [`../../wip/host-expert-master-drop/`](../../wip/host-expert-master-drop/README.md) (the pool tier the
+  accumulator), [`../../archive/work/host-expert-master-drop/`](../../archive/work/host-expert-master-drop/README.md) (the pool tier the
   heat map could pre-warm too).

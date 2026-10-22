@@ -2358,7 +2358,7 @@ The on peak equals `--load-mode none` (55.8 GiB / 0.26 GiB) on the 100 GB model.
 (this model), ~1.2 s (warm 35B).  Same-seed and `-sm tensor` coherence byte-identical; `--load-mode
 none` is unaffected (reclaim is mmap-only).  The remaining peak is the full pinned `ROCm_Host` master;
 `--host-experts pool` does **not** reduce it yet (source: *"Phase 2b; full pinned master kept"*) -- that
-is the separate `wip/host-expert-master-drop/` campaign.
+is the separate `host-expert-master-drop/` campaign (now `archive/work/host-expert-master-drop/`).
 
 **Block 15 -- Q1_0 `__byte_perm` -> `v_perm_b32` (TODO #54).**  New `ggml_cuda_byte_perm(x, y, s)`
 (HIP: expand the four selector nibbles to selector bytes and use `__builtin_amdgcn_perm`; otherwise

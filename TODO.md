@@ -12,14 +12,13 @@ Details never live here: they live in `AGENTS.md`, `patches/README.md`, `MANIFES
 still means the same subject after that item is closed and removed from this file.  New items append.
 
 **Current state:** the **14-block V2.1 set** (block 00 + blocks 01-13) at fork point **`097cf33d9`**,
-release **`v14-097cf33d9-r110`**.  `release.json` is the source of truth for the tip/tree and hashes; the
+release **`v14-097cf33d9-r111`**.  `release.json` is the source of truth for the tip/tree and hashes; the
 top of `WORKLOG.md` is the newest record.
 
 | # | subject | kind | status |
 |---|---|---|---|
 | **36** | genuine CPU/GPU overlap for the MoE misses | performance | open, scoping (`wip/moe-cpu-overlap/`) |
 | **51** | 3-GPU decode is slower than 2-GPU | performance | open (`wip/three-gpu-performance/`).  2026-10-22 datapoint (dense 27B Q8_0, `wip/three-gpu-performance/FINDING-2026-10-22-dense-27b-and-mirrored-draft-subset.md`): it is **width**-dependent, not direction-dependent — 3 GPU wins +9.2 % at mean verify len 2.9 and loses **−14.4 %** at mean len 29.2 with *bit-identical* acceptance, and at depth 16384 it loses 8.5 %.  The MoE/field-config arm is still the campaign's target |
-| **55** | drop the full pinned `ROCm_Host` master when `--host-experts pool` is on | memory | open (`wip/host-expert-master-drop/`) |
 | **59** | `ngram-mod` + `draft-mtp-adaptive` halves decode with host-resident experts | performance | open (`wip/ngram-mod-host-experts/`) |
 | **86** | MoE expert-cache *admission quality*: the shipped policy is ~11 pts of hit rate below a static oracle — decompose foreknowledge vs churn, then prefetch/admission candidates offline | performance | open, scoping (`wip/moe-admission-quality/`) |
 | **65** | IQ4_NL field (MTP) + `--host-experts pool` decode collapses | memory | parked (maintainer 2026-10-15; the "after r67" condition is long past — never picked up, still parked) |
@@ -54,18 +53,6 @@ r55 `mtp-3gpu-decode` campaign; that campaign's r55 closure record moved with it
 README as `RESOLUTION-2026-10-13-closed.md`).  Step 0: re-run the r55 harness on the current tree, then the full
 `{2,3}` x `{plain,MTP}` x `{partial,fully-resident}` x `{tensor,layer}` grid, then the all-reduce /
 identity-path / tensor-split-gather profile.
-
-## 55. Remove the full pinned `ROCm_Host` master when `--host-experts pool` is on — MEMORY
-
-Opened 2026-10-11; scoping.  The r49 mmap reclaim (block 06) removed the mmap half of the `-ncmoe` host
-peak, but `--host-experts pool` still keeps the **full pinned master** (r35 shipped the pool as a bounce
-tier; the source logs "Phase 2b; full pinned master kept").  `RssShmem` is identical with and without the
-pool: 18.7 GiB on 35B-A3B `-ncmoe 40`, 54.1 GiB on Flash-Next IQ4_NL `-ncmoe 40`.  Dropping the master is
-the strongest lever for the **memory-pressure** half of issue #139 (the amdgpu driver stops all of a
-process's GPU queues when the kernel migrates a GPU-mapped host page); the AR timeout itself was fixed in
-**r59** (block 01, wall-clock soft/hard spin deadlines), so the remaining value here is fewer stalls, not a
-correctness fix.  Working home [`wip/host-expert-master-drop/`](wip/host-expert-master-drop/README.md)
-(gates and the reader enumeration are in that README).
 
 ## 59. `ngram-mod` + `draft-mtp-adaptive` halves decode with host-resident MoE experts — PERFORMANCE
 

@@ -22,10 +22,26 @@ is the signature of a stub, not of a campaign.
 |---|---|---|
 | [`three-gpu-performance/`](three-gpu-performance/README.md) | **3-GPU decode is slower than 2-GPU** — MTP and plain, partial and **fully resident** (the former `archive/work/mtp-3gpu-decode/`, closed at r55, **revived** 2026-10-16).  Fresh measurement: 2-GPU 84.4 vs 3-GPU 56.9 t/s at 100 % residency, while 3-GPU prefill is fastest.  Step 0 is to re-run the r55 harness on the current release (r104); note the available gfx1100 box (`ssh fingon`) is **single-RDNA3** — its second rocm-smi entry is an iGPU — so it cannot cover this campaign's 3-GPU arm, then the full {2,3} x {plain,MTP} x {partial,fully-resident} x {tensor,layer} grid, then profile the all-reduce / identity path / tensor-split gather.  **2026-10-22 (r109) dense 27B datapoint:** the deficit is *width*-dependent — 3 GPU wins +9.2 % at mean verify len 2.9 and loses −14.4 % at mean len 29.2 with bit-identical acceptance, −8.5 % at depth 16384 ([`FINDING-2026-10-22-dense-27b-and-mirrored-draft-subset.md`](three-gpu-performance/FINDING-2026-10-22-dense-27b-and-mirrored-draft-subset.md)); the same runs found the first 3-GPU regression owned by a delivery feature (block-13 mirrored draft subset, −2.2 %) | **OPEN (revived 2026-10-16)** — dense width/depth data in, MoE field-config grid still to run |
 | [`fp8-support/`](fp8-support/README.md) | native FP8 E4M3 for RDNA4 | PARKED (2026-09-26) — rebased and building, fully RDNA4-gated, but **gate 2 failed** (the fp8 4B is 0.69x Q8_0 where cllm had 1.16x, because the delivery's MMB/GEMM work made Q8_0 +32 % and the fp8 WMMA path did not follow).  Resume actions are in `PLAN.md`.  Not closed — paused behind the delivery work |
-| [`host-expert-master-drop/`](host-expert-master-drop/README.md) | remove the full pinned `ROCm_Host` master when `--host-experts pool` is on (the pool's Phase 3): every cold expert served from the bounded pool over the page cache | **OPEN (seeded 2026-10-11)** — the r49 reclaim removed the mmap half of the `-ncmoe` host peak, but `--host-experts pool` still keeps the full pinned master (measured `RssShmem` identical pinned vs pool: 18.7 GiB on 35B-A3B, 54.1 GiB on Flash-Next IQ4_NL).  Also the strongest lever for issue #139's `evict_process_queues` stops |
 | [`moe-admission-quality/`](moe-admission-quality/README.md) | **why the shipped expert-cache policy is ~11 pts of hit rate below an oracle static placement** at the same slot count (0.8505 vs 0.8765; bound 96.1 % vs 91.4 % covered mass), and how much of it is recoverable — per-layer slot quota is ruled out (+0.0025, closed unshipped in r110), so the candidates are foreknowledge (the persisted heat seed) vs eviction churn vs an admission/prefetch policy | **OPEN (seeded 2026-10-22, r110)** — offline first: step 0 adds a `--seed heat\|trace` model to `scripts/moe-trace-replay.py` and publishes the `{seed} x {churn}` decomposition; only a candidate that wins there goes to C++ |
 | [`moe-cpu-overlap/`](moe-cpu-overlap/README.md) | genuine CPU/GPU overlap for the expert misses (the Strata shape) | OPEN / scoping (TODO #36) — **work in flight**: the note refutes the earlier "cannot be done" verdict for the interleaved shape and sets out the pipeline to try |
 | [`ngram-mod-host-experts/`](ngram-mod-host-experts/README.md) | `ngram-mod` + `draft-mtp-adaptive` roughly halves decode when the MoE experts are host-resident (`-ncmoe`/`-cmoe`, expert cache active); plain `draft-mtp-adaptive` restores the expected rate | **OPEN (seeded 2026-10-14), scoping + measurement** |
+
+**Promoted (r111, 2026-10-22, block 12).**  `host-expert-master-drop/` left `wip/` for
+`archive/work/host-expert-master-drop/` (with a `RESOLUTION.md`) and **TODO #55 is closed**.  `--host-experts
+pool` no longer keeps a full pinned `ROCm_Host` master: the host expert tensors live in the read-only model
+mapping (a new device-carrying `ROCm_HostMap` host buft) and every GPU read of them is staged through the
+bounded pinned pool -- or a per-table pinned bounce ring when the pool declines -- so the non-swappable
+footprint is `MOE_HOST_POOL_FRAC` of the host expert set (18.6 GiB -> **6.8 GiB** at 25 % on 35B-A3B
+`-ncmoe 40`; 40.8 -> 11.2 GiB on the 100 GB Flash-Next), the rest being reclaimable page cache / disk.
+**A 12 GiB or 8 GiB cgroup that OOM-kills the `pinned` arm runs this one at ~93 t/s**, which is the
+larger-than-RAM case the item existed for.  Text identical to `pinned` on 1/2/3-GPU tensor, gemma4 (fused),
+Flash-Next and MTP; prefill-logit KLD -0.000000 / same-top-p 100.000 %; `MUL_MAT_ID` 947/947; decode parity,
+prefill -1..-6 % (one extra host memcpy per staged byte; a single-ubatch `pp512` on 2-GPU tensor -34 %,
+accepted as a known trade of the mode).  Three pre-existing pool bugs were fixed with it: the DIO bounce
+race, the worker-vs-static-map use-after-free at exit, and the 3x/order-dependent AUTO budget.  Folded into
+**block 12** rather than 09 (the fold needs block 11's fused-slice geometry; blocks 00-11 are byte-identical
+to r110).  `patches/` + `release.json` regenerated, `validate-set.sh` and a clean per-block build gate green.
+See `WORKLOG.md` 261022.006.
 
 **Closed (r110, 2026-10-22).**  `moe-cache-coverage/` left `wip/` for
 `archive/work/moe-cache-coverage/` (with a `RESOLUTION.md`).  **TODO #61** shipped P1 (the offline
@@ -304,7 +320,7 @@ queue is stopped), `GGML_CUDA_AR_SPIN_TIMEOUT_MS` (default 2000 ms) is a soft de
 late peer and keeps waiting, and `GGML_CUDA_AR_SPIN_HARD_MS` (default 20000 ms) alone poisons and falls
 back to the butterfly.  A same-call butterfly re-run was measured at -20-25 % decode and rejected.  The
 record moved to `archive/work/issue-139-ar-spin-timeout/` with a `RESOLUTION.md`; the memory-pressure
-half stays in `wip/host-expert-master-drop/`.  See `WORKLOG.md` 261014.004.
+half stayed in `wip/host-expert-master-drop/` (promoted in r111: `archive/work/host-expert-master-drop/`).  See `WORKLOG.md` 261014.004.
 
 **Resolved (r58, 2026-10-14).**  Contributor PR #150 (`@overdoingism`, `dflash-layer-inp-preset`) was
 merged and folded into the blocks that own each concern, then archived with a `RESOLUTION.md` under
@@ -363,7 +379,7 @@ removed 2026-10-11 (see `GREEDY-PURITY.md` §41 and `WORKLOG.md` 261011.015).
 plan: the loader now unmaps each tensor's mapping right after its device upload instead of the moot
 steady-state `madvise` (measured: 122.5 -> 55.4 GiB peak on the 100 GB Flash-Next IQ4_NL).  Its
 remaining `--host-experts pool` half is re-seeded as the new
-[`host-expert-master-drop/`](host-expert-master-drop/README.md).  Record: `WORKLOG.md` 261011.017 (r49).
+[`host-expert-master-drop/`](../archive/work/host-expert-master-drop/README.md) (promoted in r111).  Record: `WORKLOG.md` 261011.017 (r49).
 
 **Closed on seeding (2026-10-11).** Two campaigns seeded earlier the same day were closed at the maintainer's
 call and removed from `wip/`: `sched-cross-backend-events/` (TODO #33 — dropped; the reporter files PRs often and

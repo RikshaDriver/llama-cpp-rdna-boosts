@@ -140,28 +140,49 @@ the slack up front moves the cost to before the arena is sized.
 > allocation instead fails with a message naming `GGML_CUDA_SLAB_RESERVE_MIB`.  There is no variable for the
 > yield behaviour, and it should stay that way.  See `ARENA-UB-TENSION.md` §13/§14.
 
-### 1.2.1 Optional host-expert pool (`--host-experts pool`, block 06)
+### 1.2.1 Host-expert pool (`--host-experts pool`, blocks 09/12) — **no pinned master**
 
 The pool is an **option** for systems that cannot hold the weights resident; the default `--host-experts
-pinned` (and `auto`) keeps the usual behaviour and allocates **no** pool.  When enabled, it is a bounded
-pinned bounce buffer over the page cache, one per host tensor, process-wide budget, and it serves the MoE
-expert-cache fills.  r35.
+pinned` (and `auto`) keeps the usual behaviour (a full pinned `ROCm_Host` master) and allocates **no**
+pool.  r35 shipped the pool as a bounded bounce tier *next to* that master; **r111 completes it**: in POOL
+mode there is no master at all.
 
-**It does not reduce host RSS yet.**  It keeps the full pinned `ROCm_Host` master (the source logs
-*"Phase 2b; full pinned master kept"*), so measured `RssShmem` is identical with and without the pool
-(18.7 GiB on 35B-A3B `-ncmoe 40`; 54.1 GiB on Flash-Next IQ4_NL `-ncmoe 40`).  Dropping the master is a
-separate campaign: `wip/host-expert-master-drop/`.
+| tier | what |
+|---|---|
+| L1 | the VRAM expert-cache arena (the movable-boundary slab) |
+| L2 | the bounded pinned host pool — the **only** non-swappable tier (`MOE_HOST_POOL_MIB`/`FRAC`), one per host tensor, process-wide budget |
+| L3 | the read-only **model mapping** → page cache → the GGUF on disk |
+
+The host expert tensors are placed in the model's read-only mapping (a dedicated per-device host buffer
+type, `ROCm_HostMap`, which still carries its device so the scheduler keeps the `MUL_MAT_ID` on the owning
+GPU).  **No device copy and no kernel reads that mapping**: every host read is served from a pool slot
+(a `memcpy` out of the page cache, or a `pread` with `MOE_HOST_POOL_DIO=1`), and when the pool declines
+through a per-table pinned bounce ring.  The in-place cold read and the device-side gather therefore stand
+down in this mode (they need a device-mapped master, issue #116) — a miss becomes a pool fill instead.
+
+Measured (35B-A3B UD-Q4_K_M, `-ncmoe 40` = 18 662 MiB of host experts, 1x R9700): `RssShmem` **18.6 GiB
+(`pinned`) → 6.8 GiB (FRAC 25)**, the difference sitting in reclaimable page cache; FRAC 50 pins 10.2 GiB
+and FRAC 100 reproduces the old footprint, so **the pinning is the fraction knob**.  Under a 12 GiB or
+8 GiB cgroup (`MemoryMax`, no swap) the `pinned` arm is OOM-killed and the `pool` arm runs at ~93 t/s —
+that is the point of the mode: a host expert set larger than RAM streams from disk instead of failing.
+Cost: one extra host memcpy per staged byte on the host-expert *prefill* staging path (decode parity;
+`llama-cli` prefill −1…−6 %, a single-ubatch `pp512` on the 2-GPU tensor config −34 %), and with the page
+cache out of the picture (`MOE_HOST_POOL_DIO=1`, 4 GiB arena) decode drops 41.8 → 7.5 t/s.  A non-mapped
+load (`--load-mode none/dio`) has no mapping to place the tensors in and keeps the pinned master (warned);
+use the default mmap load mode, or `MOE_HOST_POOL_DIO=1` with it.  r111.
 
 | variable / flag | default | class | notes |
 |---|---|---|---|
-| `--host-experts pool` | `pinned` | option | select the bounded host pool.  `pinned`/`auto` = no pool; `mmap` was removed in r33. |
-| `MOE_HOST_POOL_MIB` | `auto` | tuning | pool size when enabled: unset/`auto` = `MOE_HOST_POOL_FRAC` % of the MoE host expert bytes (`moe_host_expert_bytes`); `N` = explicit MiB; `0` = disable even with `--host-experts pool`. |
-| `MOE_HOST_POOL_FRAC` | `25` | tuning | the auto percentage (1–100). |
-| `MOE_HOST_POOL_POLICY` | — | **removed (r40)** | the pooled-table device-policy selector.  The device-policy fill (and the whole device-remap family) was deleted 2026-10-10; pooled tables always fill from the pinned pool with a master fallback.  The variable is ignored. |
+| `--host-experts pool` | `pinned` | option | select the bounded host pool and **drop the pinned master** (r111).  `pinned`/`auto` = full pinned master, no pool; `mmap` was removed in r33. |
+| `MOE_HOST_POOL_MIB` | `auto` | tuning | process-wide pool budget: unset/`auto` = `MOE_HOST_POOL_FRAC` % of the MoE host expert bytes (`moe_host_expert_bytes`), split over the host tensors in proportion to their size; `N` = explicit MiB; `0` = disable the pool (with `--host-experts pool` the master is then still dropped and every miss takes the pageable-free bounce path). |
+| `MOE_HOST_POOL_FRAC` | `25` | tuning | the auto percentage (1–100).  Now this is the **whole** non-swappable host footprint, not a tier beside it: 25 % of 18.6 GiB pins 4.65 GiB. |
+| `MOE_HOST_POOL_VERIFY` | unset | diagnostic | `1` byte-compares every pool fill against the model mapping and logs the first mismatching expert (`POOLREAD MISMATCH`).  The instrument that found the O_DIRECT bounce race; costs a memcmp per fill, never default-on. |
+| `LLAMA_HOST_MASTER_PINNED` | unset | A/B only | force the pinned master even with `--host-experts pool` — the control arm for a measured comparison. |
+| `MOE_HOST_POOL_POLICY` | — | **removed (r40)** | the pooled-table device-policy selector.  The device-policy fill (and the whole device-remap family) was deleted 2026-10-10; pooled tables always fill from the pinned pool (a master fallback only exists in `pinned` mode).  The variable is ignored. |
 | `MOE_HOST_POOL_PREFETCH` | `0` | opt-in | routing-driven speculative pool prefill; **off** because a long-prompt sweep showed it hurts until the pool nears full residency (`1` enables). |
 | `MOE_HOST_POOL_PREWARM` | `1` | kill-switch | one-shot slot fill when a pool is built (ranked by the prefill tally / arena residents). |
 | `MOE_HOST_POOL_BGFETCH` | `1` | kill-switch | low-priority background eviction prefetch; `0` is the synchronous path. |
-| `MOE_HOST_POOL_DIO` | `0` | diagnostic | `1` = O_DIRECT fill (bypasses the page cache). |
+| `MOE_HOST_POOL_DIO` | `0` | diagnostic / disk tier | `1` = every fill (and the staging bounce) reads the GGUF with O_DIRECT, so nothing is cached: the pure L3/disk mode.  `0` fills are a `memcpy` out of the model mapping (the page cache). |
 
 ### 1.3 The movable-boundary slab (block 06) — `GGML_CUDA_SLAB`, default **on**
 

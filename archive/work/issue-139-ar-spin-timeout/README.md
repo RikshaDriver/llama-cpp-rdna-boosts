@@ -30,7 +30,8 @@ treated as lost.
    a wrong greedy sha).
 
 The queue stops themselves (memory pressure) are a separate concern, tracked in
-`wip/host-expert-master-drop/` (TODO #55) and not part of this fix.
+`wip/host-expert-master-drop/` (TODO #55, promoted in r111 as block 12 -- now
+`archive/work/host-expert-master-drop/`) and not part of this fix.
 
 ## The fix (block 01, r59)
 

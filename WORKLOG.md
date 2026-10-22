@@ -1,5 +1,72 @@
 # WORKLOG - dated delivery records
 
+## 261022.006 (r111) -- `--host-experts pool` drops the full pinned master (TODO #55, phase 3)
+
+**Shipped:** `v14-097cf33d9-r111`, **block 12** amended (blocks 00-11 are byte-identical to r110; block 13
+is re-cut with a new `From` line and an unchanged body).  Canonical tip `0349d6b4af5ff2bbcf88d1c4631599a625df0d53`,
+tree `e51b1023a42b1183c3fca8b93be677ffa4cb194b`.  The fold went into **12** rather than 09 for the reason
+recorded in `patches/README.md` ("A block owns its code"): it depends on block 11's fused / `-sm tensor`
+slice geometry (`table_t::n_slices`), so a block-09 fold would have needed a second, pre-fused pool path
+that block 11 then had to re-amend.  Campaign record, measurements, gates and trade-offs:
+`archive/work/host-expert-master-drop/` (`README.md`, `RESOLUTION.md`); the diff is also there as
+`master-drop.patch`.  Gates at promotion: `validate-set.sh` green (fresh tarball, strict `git am`, tree
+`e51b1023…`), `gate-per-block-build.sh --changed-from 8bb85cc82` → blocks 12/13 built clean, 0 failed.
+
+**What the mode does now.**  `--host-experts pool` keeps its bounded pinned budget and gives up the
+master: host expert tensors are placed in the **read-only model mapping** through a new per-device host
+buffer type (`ROCm_HostMap`, host + device, so the scheduler still puts the `MUL_MAT_ID` on the owning
+GPU), and every GPU read is served through the pinned pool -- or a per-table pinned **bounce ring** when
+the pool declines (a slot held by the background worker, a geometry that does not fit a slot).  The
+cold-UVA serve and the device-side gather stand down for a pageable master (they read the master in
+place, issue #116), and `moe_cache_gather_host` already declined on `host_dev == nullptr`.  The reader
+inventory that had to become pool-aware: the eager fill, the fused/sliced fill, the identity fill, the
+prefill/heat seeds, the whole-table staging (`moe_cache_stage_table`, which now serves the pre-sizing
+prefill too) and the scheduler's used-expert copies (`moe_cache_upload_pageable`, wired into
+`set_tensor_async`/`stage_upload`/`stage_gather`).  `MOE_HOST_POOL_FRAC` stays 25 %; `MOE_HOST_POOL_DIO=1`
+is the disk-only tier; a non-mapped load (`--load-mode none/dio`) keeps the pinned master and warns.
+
+**Result.**  `RssShmem` 18.6 -> **6.8 GiB** (35B-A3B UD-Q4_K_M, `-ncmoe 40`, 18 662 MiB of host experts,
+1x R9700) and 40.8 -> **11.2 GiB** on the 100 GB Flash-Next GSQ-IQ3_XXS (2 GPU `-sm tensor -ncmoe 48`),
+the difference sitting in reclaimable page cache (18.5 / 26.0 GiB).  FRAC 50 pins 10.2 GiB and FRAC 100
+reproduces the old footprint, so **the pinning is a knob**.  Under a 12 GiB or 8 GiB cgroup (MemoryMax,
+no swap) the `pinned` arm is OOM-killed (rc 137) and the `pool` arm runs at 93.3 / 93.4 t/s; at 6 GiB the
+pool arm needs `MOE_HOST_POOL_FRAC=10` and then also runs (93.6 t/s).  That is the "host expert set larger
+than RAM" case the TODO asked for.
+
+**Gates (all green, ROCm 10.1.0, gfx1201, `ROCBLAS_USE_HIPBLASLT=0`).**  Generated text identical to the
+`pinned` arm on: 1 GPU `-ncmoe 40`; 2 GPU `-sm tensor` plain and `--spec-type draft-mtp`; 3 GPU tensor;
+gemma4 26B-A4B Q8_0 (the fused `ffn_gate_up_exps` tables); Flash-Next GSQ-IQ3_XXS.  Prefill-logit KLD
+(2 GPU tensor, 35B-A3B, wikitext `-c 512 --chunks 8`, base recorded on `pinned`): **mean KLD -0.000000,
+mean Δp 0.000 %, RMS Δp 0.001 %, same-top-p 100.000 %**, recorded PPL 6.2080.  `none == draft-mtp`
+holds on both arms.  `test-backend-ops -o MUL_MAT_ID` 947/947 (3/3 backends).  Throughput: decode parity
+everywhere (97.9/97.6; 111.0/111.2; 216.2/216.4 MTP; 18.5/18.7 at 3 GPU; 73.0/73.2 gemma4; 56.5/55.7
+Flash-Next), prefill -1..-6 % except **B=1 pp512 on the 2 GPU tensor config -34 %** (165.7 -> 109.0 t/s): a
+single 512-token ubatch stages the whole expert set once and dropping the master adds one host memcpy of
+it.  Decode never pays it (the band is served by the arena/pool).
+
+**Disk tier, measured** (1 GPU, arena forced to 4096 MiB so the pool misses): buffered `pool` 41.8 t/s
+with 18.0 GiB of page cache; `MOE_HOST_POOL_DIO=1` (nothing cached, every miss a disk read) **7.5 t/s**.
+That is the honest shape of a third cache level -- and the reason the fraction knob exists.
+
+**Three PRE-EXISTING bugs fixed en route** (all reachable only once the pool became the sole host source):
+(1) `pool_dio_read` used a shared `static` bounce buffer while the background prefetch worker reads the
+GGUF without `g_mutex`, corrupting the tail of an expert (~520 KiB into 576 KiB, variably) -- found with
+a new `MOE_HOST_POOL_VERIFY=1` byte-compare against the mapping, fixed by `thread_local`; (2) `g_host_pools`
+was a static `std::map` touched by the DETACHED worker, so at exit the map was destroyed under a worker
+still inside a slow (DIO) read -> `double free or corruption` in `pool_reap_locked`, fixed by leaking it
+like the worker's mutex/cv/queue; (3) the AUTO pool budget was a running `+=` over every preflight call
+(`--fit` probe + real load + draft = 3x) AND divided by the host tensors registered SO FAR (pools are
+created lazily during sizing), so FRAC 25 pinned 75 % of the host set -- fixed by deriving the total from
+the per-device MAX and giving each pool `frac %` of its own experts.  Bugs (1) and (2) are independent of
+this campaign and should be kept even if the master-drop is not promoted.
+
+**Docs with it:** `ENVIRONMENT.md` §1.2.1 rewritten (the "it does not reduce host RSS yet" paragraph is
+gone; `MOE_HOST_POOL_VERIFY` and `LLAMA_HOST_MASTER_PINNED` are documented), `AGENTS.md` gains a
+`--host-experts pool` critical fact and its pinning fact is qualified, `patches/README.md` gets the block-12
+entry, and `TODO.md` #55 is closed.  `MOE_HOST_POOL_FRAC` stays **25 %** by decision (frees page cache to
+back the reads so the disk is hit less often); tuning it and the prefill staging cost is a follow-up
+session.
+
 ## 261022.005 (r110) -- the expert cache gets a policy instrument, and its two host-tally gaps close (TODO #61, #64)
 
 **Shipped:** `v14-097cf33d9-r110`, block **09** amended (blocks 10-13 are re-cut with a new `From` line
@@ -5051,7 +5118,8 @@ warnings fire.  `scripts/validate-set.sh` strict 12/12, tree `59b9a7fa`; whitesp
 **Docs.**  `ENVIRONMENT.md` §6 documents the two knobs (`GGML_CUDA_AR_SPIN_TIMEOUT_MS` was previously
 undocumented); `README.md`, `MANIFESTS.md`, `BASELINE.md` and `patches/README.md` current-state headers
 updated.  The issue record moves to `archive/work/issue-139-ar-spin-timeout/` with a `RESOLUTION.md`.
-The memory-pressure half stays tracked separately in `wip/host-expert-master-drop/` (TODO #55).
+The memory-pressure half stays tracked separately in `wip/host-expert-master-drop/` (TODO #55; promoted in
+**r111** as block 12 -- now `archive/work/host-expert-master-drop/`).
 
 **Publish (2026-10-14).**  Delivery `main` pushed (`60d8207` -> `b766960`; `validate.yml` green on
 `main` and on the tag).  Fork `rdna-boosts` refreshed from the r59 tip and force-pushed to the personal
@@ -5853,7 +5921,8 @@ reason the field preferred `--load-mode none` is gone.  Warm-load cost ~1 s (thi
 `ROCm_Host` master (the source logs *"Phase 2b; full pinned master kept"*); measured `RssShmem` is
 identical with and without the pool (18.7 GiB on 35B-A3B `-ncmoe 40`; 54.1 GiB on Flash-Next IQ4_NL
 `-ncmoe 40`).  The r49 peak is therefore dominated by that master.  Re-seeded as the separate campaign
-`wip/host-expert-master-drop/` (`TODO #55`); it is the strongest lever for issue #139.  `ENVIRONMENT.md`
+`wip/host-expert-master-drop/` (`TODO #55`, promoted in **r111**: `archive/work/host-expert-master-drop/`);
+it is the strongest lever for issue #139.  `ENVIRONMENT.md`
 §1.2.1 now says so.
 
 **Block 15 -- Q1_0 `__byte_perm` -> `v_perm_b32` (TODO #54).**  New `ggml_cuda_byte_perm(x, y, s)` (HIP:

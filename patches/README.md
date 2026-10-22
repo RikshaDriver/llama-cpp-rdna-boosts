@@ -45,7 +45,7 @@ only as a rough shape.
 | 09 | `0009-…-block-09-host-resident-MoE-iface-schedul` | host-resident MoE: iface, scheduler, cache, slab hooks | +14175 / −535 | 65 |
 | 10 | `0010-…-block-10-slab-fusion-dispatcher-async-in` | slab + fusion dispatcher + async input ring (infrastructure) | +11794 / −4753 | 75 |
 | 11 | `0011-…-block-11-qwen4exp-model-hyper-connection` | qwen4exp model/QSA/HC/lazy reader/indexer cache | +11775 / −419 | 46 |
-| 12 | `0012-…-block-12-campaign-remainder-CPU-wins-bac` | campaign remainder (+ r106: Meta `ALL_GATHER`, DFlash2 `-sm tensor`, slab narrow-2) | +1329 / −157 | 23 |
+| 12 | `0012-…-block-12-campaign-remainder-CPU-wins-bac` | campaign remainder (+ r106: Meta `ALL_GATHER`, DFlash2 `-sm tensor`, slab narrow-2; + r111: `--host-experts pool` drops the pinned master) | +2168 / −315 | 33 |
 | 13 | `0013-…-block-13-MTP-draft-vocabulary-subset-spe` | MTP draft vocabulary subset (`--spec-draft-mtp-vocab N`, opt-in) | +569 / −6 | 19 |
 
 Block 05's file count is `template-instances/*.cu` (the FA kernel instantiations); block 10 is the
@@ -820,10 +820,35 @@ had no other home.
   `common/speculative.cpp` half — see block 09 for the predicate in `common/`): with `--spec-type none`
   the extra model is neither loaded nor given a context, so the gemma4 drafter's warm-up decode no longer
   aborts on the missing state embedding.
+* **`--host-experts pool` drops the full pinned master** (r111, TODO #55; this block, not 09/10 — see
+  "A block owns its code" below).  The host expert tensors are placed in the read-only **model mapping**
+  through a new per-device host buffer type `ROCm_HostMap` (`ggml_backend_dev_moe_host_master_buft` +
+  `ggml_backend_host_buffer_from_ptr`), which still carries its device so the scheduler keeps the
+  `MUL_MAT_ID` on the owning GPU, and **every** host read of a pooled table is staged through pinned
+  memory: the bounded host pool (`pool_fill_slot_locked`: a `memcpy` out of the page cache, or a `pread`
+  with `MOE_HOST_POOL_DIO=1`), a per-table pinned **bounce ring** when the pool declines (`expert_host_src`
+  / `expert_src_done`, grown on demand, never reused until its event drains), and `moe_cache_upload_pageable`
+  for the scheduler's used-expert copies (`set_tensor_async` / `stage_upload` / `stage_gather`).  A pageable
+  `cudaMemcpyAsync` is never used for a pooled master: ROCm stages a pageable upload through a shared
+  internal bounce and back-to-back copies tear (that is what made the first cut nondeterministic).  Staging
+  serves the pre-sizing prefill too (`moe_cache_stage_table` no longer needs a built arena), it bypasses the
+  pool (a whole-table staging reads every expert anyway, and the misses were evicting the decode band), and
+  the cold-UVA serve / device gather stand down for a pageable master (issue #116).  Measured: `RssShmem`
+  **18.6 → 6.8 GiB** on 35B-A3B `-ncmoe 40` (FRAC 25; the rest is reclaimable page cache), 40.8 → 11.2 GiB
+  on the 100 GB Flash-Next; **a 12 GiB / 8 GiB cgroup OOM-kills the `pinned` arm and runs this one at
+  ~93 t/s**; text identical to `pinned` on 1/2/3-GPU tensor, gemma4 (fused tables), Flash-Next and MTP;
+  prefill-logit KLD -0.000000 / same-top-p 100.000 %; `MUL_MAT_ID` 947/947; decode parity everywhere, prefill
+  -1..-6 % (one extra host memcpy per staged byte; a single-ubatch `pp512` on the 2-GPU tensor config -34 %).
+  Three pre-existing pool bugs were fixed with it: the `pool_dio_read` shared static bounce raced by the
+  background worker (now `thread_local`), `g_host_pools` destroyed under the detached worker at exit (now
+  leaked, like the worker's mutex/cv/queue), and an AUTO budget that was both a 3x running sum and
+  registration-order dependent (now the per-device max and a per-tensor share).  `MOE_HOST_POOL_VERIFY` and
+  `LLAMA_HOST_MASTER_PINNED` are the new diagnostic / A/B knobs.
 
 **Knobs.**  `LLAMA_OUTPUT_PINNED`, `MTP_DRAFT_N_UBATCH`, `GGML_LF_DFLASH_DEV`, `GGML_LF_FAST_TOPK`,
 `LLAMA_STATE_GET_MERGE_GAP`, `LLAMA_STATE_ASYNC`, `LLAMA_STATE_ASYNC_MAX_MIB`,
-`GGML_CPU_MOE_OFFLOAD_THREADS`, `GGML_CUDA_SLAB_RING_MIB`.
+`GGML_CPU_MOE_OFFLOAD_THREADS`, `GGML_CUDA_SLAB_RING_MIB`, and (r111, POOL mode) `MOE_HOST_POOL_MIB` /
+`MOE_HOST_POOL_FRAC` / `MOE_HOST_POOL_DIO` / `MOE_HOST_POOL_VERIFY` / `LLAMA_HOST_MASTER_PINNED`.
 
 **Notes.**  A backend-iface entry is a compile-time contract: adding one to the struct means adding it to
 **every** backend's initializer, or the build breaks for that backend.  Keep the difference documented when
@@ -838,11 +863,15 @@ a hook is CUDA-only (the non-CUDA entries stay NULL and the feature is simply in
   of it; `GREEDY-PURITY.md` is the rulebook.
 * **A block owns its code.**  A fix goes into the block whose surface it changes (even an early block); the
   per-block build gate (`scripts/gate-per-block-build.sh`) exists because appending fixes to the last block
-  once broke blocks 06-14 silently.  **Two recent exceptions are deliberate and documented**: r106's
+  once broke blocks 06-14 silently.  **Three exceptions are deliberate and documented**: r106's
   `GGML_OP_ALL_GATHER` collective and the slab narrow-2 fix both landed in **block 12** rather than blocks
   09/10, because `ggml-cuda-slab.cu` does not exist before block 10 and re-cutting blocks 09/10's history for
-  an additive, last-block-applied change would have rebuilt the whole chain for no delivery difference.
-  Blocks 00-10 are byte-identical to r105; only what is now block 12 changed (it was block 11 at r106).
+  an additive, last-block-applied change would have rebuilt the whole chain for no delivery difference
+  (blocks 00-10 are byte-identical to r105; only what is now block 12 changed — it was block 11 at r106);
+  and **r111's host-expert master drop** landed in block 12 rather than 09 for the same reason plus one of
+  its own: its code depends on block 11's fused/`-sm tensor` slice geometry (`table_t::n_slices`), so a
+  block-09 fold would have needed a second, pre-fused version of the pool path that block 11 then had to
+  re-amend.  Blocks 00-11 are byte-identical to r110.
 * **The Meta backend's only cross-device primitive was a sum-reduce (`PARTIAL`)** until r106 added
   `GGML_OP_ALL_GATHER` (block 12): the result is `MIRRORED`, it is its own subgraph boundary, it is dropped
   from every per-device child graph, and the collective copies each device's slice into every device's copy

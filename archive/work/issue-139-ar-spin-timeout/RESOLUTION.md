@@ -56,5 +56,6 @@ B2 never involves the host on the hot path, so it matches the old path exactly.
 ## Not part of this fix
 
 The queue stops themselves (host-memory pressure) are a separate deliverable, tracked in
-`wip/host-expert-master-drop/` (TODO #55).  Kernel sysctl tuning to reduce reclaim pressure was offered
+`wip/host-expert-master-drop/` (TODO #55; promoted in r111 as block 12 -- now
+`archive/work/host-expert-master-drop/`).  Kernel sysctl tuning to reduce reclaim pressure was offered
 to the reporter in the issue response.
