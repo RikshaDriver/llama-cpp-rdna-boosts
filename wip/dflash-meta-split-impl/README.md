@@ -1,7 +1,10 @@
 # `dflash-meta-split-impl` — Meta distributed `TOP_K` (or split→mirrored gather) for the DFlash2 selector (TODO #58 follow-up)
 
-**Status: OPEN (seeded 2026-10-13), scoping + design.**  Not part of the delivery.  This is the *real
-fix* behind the clean rejection folded into r54
+**Status: IMPLEMENTED + VALIDATED 2026-10-21, awaiting the promotion decision** (`TODO.md` #78).
+Not part of the delivery yet — the change is `all-gather.patch` here and the working tree of `~/llama.cpp`;
+read [`FINDINGS-2026-10-21.md`](FINDINGS-2026-10-21.md) first (result, the two refuted routes, the
+`GGML_OP_ALL_GATHER` design, findings F1–F3, and the proposed block split).  The route taken is §1(b), the
+split→mirrored gather.  This is the *real fix* behind the clean rejection folded into r54
 ([`archive/work/dflash-meta-split/RESOLUTION.md`](../../archive/work/dflash-meta-split/RESOLUTION.md)).
 
 > **Cold start.**  Read `AGENTS.md` ("Report findings before shipping", the WIP/promotion rules, the
