@@ -125,6 +125,31 @@ Readings:
   (21.1 % vs 38.7 % residency) and hands more to the host tiers.  The knobs interact; that is the campaign's
   search space.
 
+## 4b. r112 shipped the default flip this campaign asked for
+
+`MOE_HOST_POOL_FRAC` **25 → 80** and `MOE_HOST_POOL_DIO` **0 → 1** when `--host-experts pool` is used (the
+`pinned` default mode is untouched).  Measured on the same gfx1100 / 30 GiB box with the new defaults and no
+env at all, 2000-token runs:
+
+| config | pool | pinned | page cache | swap | decode |
+|---|---|---:|---:|---:|---:|
+| `-ncmoe 40 --host-experts pool` (new defaults) | 26.0 GiB | 26.1 | 2.7 | 0.3 | **78.3 t/s** |
+| `-ncmoe 36 --host-experts pool` (new defaults) | 23.4 GiB | 23.6 | 5.0 | 0.3 | 75.2 t/s |
+| `-ncmoe 40 --host-experts pool` (r111 defaults, 25 % buffered) | 8.2 GiB | 8.7 | 19.9 | 0 | 48.6 t/s |
+| `-ncmoe 40 --host-experts pinned` | — | 0.8 (alloc failed) | | 15.9 | 2-3 t/s |
+
+So the flagship case (whole 31.9 GiB host expert set, 30 GiB box) is **+61 % decode over the r111 defaults**
+and ~30x over the degenerate `pinned` arm.  gfx1201 (184 GiB RAM, `-ncmoe 40`, 2-GPU tensor) is unaffected:
+115.8 t/s vs 115.2 for `pinned` (arena fully resident, so there is nothing to fill).
+
+Two things this campaign still owns:
+
+* **The first prefill is a full O_DIRECT read** of the host set (~10 s on that box, so a short prompt shows
+  ~0.6 "prompt t/s"; a 1400-token prompt measures 49 t/s).  Item (b) — a prefill-band access must not fill
+  or evict pool slots — does not remove that *first* pass (the pool starts empty), but it stops later
+  prefills from evicting the decode band and lets the very first pass populate the pool for free.
+* **The swap/LRU coordination** (item c) is untouched.
+
 ## 5. Repro
 
 ```sh

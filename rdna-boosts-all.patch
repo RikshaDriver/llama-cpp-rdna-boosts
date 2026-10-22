@@ -49496,10 +49496,10 @@ index 5605bf7a4..10b689844 100644
 \ No newline at end of file
 diff --git a/ggml/src/ggml-cuda/moe-expert-cache.cu b/ggml/src/ggml-cuda/moe-expert-cache.cu
 new file mode 100644
-index 000000000..7fc7601f2
+index 000000000..bf68f8052
 --- /dev/null
 +++ b/ggml/src/ggml-cuda/moe-expert-cache.cu
-@@ -0,0 +1,5907 @@
+@@ -0,0 +1,5917 @@
 +// wip/moe-expert-cache — Phase 1a foundation.  See moe-expert-cache.h for the contract.
 +
 +#include "moe-expert-cache.h"
@@ -49749,7 +49749,13 @@ index 000000000..7fc7601f2
 +bool    g_pool_enabled     = false;
 +bool    g_pool_requested   = false;  // --host-experts pool (set by the loader before tables are registered)
 +bool    g_pool_auto        = false;  // MOE_HOST_POOL_MIB unset/auto: size from the MoE host expert bytes
-+int     g_pool_frac        = 25;     // MOE_HOST_POOL_FRAC: AUTO pool size as a % of the MoE host expert bytes
++// r112: the defaults are tuned for the case POOL mode exists for -- a host expert set that does NOT fit in
++// RAM, where the pool is the working set and the rest must come from disk.  80 % keeps most of the set
++// hot in pinned RAM (the disk only serves the remainder, measured the knee: 80 % at 74.4 t/s / zero swap vs
++// 90 % at 71.8 t/s / 0.3 GiB swap on a 30 GiB gfx1100 box) and `DIO=1` stops the page cache from
++// double-caching the same bytes, which is what pushes a memory-tight box into swap thrash.  On a box where
++// the set fits in RAM, `--host-experts pinned` (the default mode) is faster and cheaper than either.
++int     g_pool_frac        = 80;     // MOE_HOST_POOL_FRAC: pool size as a % of the MoE host expert bytes
 +int64_t g_preflight_host_bytes = 0;  // Σ host expert bytes over host-expert devices (the AUTO basis)
 +bool    g_pool_prewarm     = true;   // MOE_HOST_POOL_PREWARM: fill every pool slot when it is built
 +bool    g_pool_dio         = false;  // MOE_HOST_POOL_DIO=1: O_DIRECT fill (debug fallback; bypasses the page cache)
@@ -50137,13 +50143,14 @@ index 000000000..7fc7601f2
 +        g_auto    = true;
 +        g_budget  = (size_t) -1;
 +    }
-+    // Phase 2b: the bounded, pinned host tier (L2).  PROCESS-WIDE: `g_pool_total_bytes` is the TOTAL
-+    // budget, split over all registered host tensors when a pool is created; one copy of each whole
-+    // expert serves every device.  Fills are buffered through the page cache by default.  The full
-+    // pinned master is KEPT for now (Phase 3 removes it and the scheduler fallback).
++    // The bounded, pinned host tier (L2).  PROCESS-WIDE: `g_pool_total_bytes` is the TOTAL budget, split
++    // over the registered host tensors in proportion to their size; one copy of each whole expert serves
++    // every device.  In `--host-experts pool` mode this is the ONLY pinned host tier (the master is the
++    // read-only model mapping, r111); fills read the GGUF with O_DIRECT by default (r112), so the page
++    // cache is not a second copy competing for RAM.
 +    g_pool_enabled     = moe_host_pool_on();
 +    g_pool_auto        = g_pool_enabled && (moe_host_pool_mib() < 0);
-+    g_pool_frac        = env_int("MOE_HOST_POOL_FRAC", 25);
++    g_pool_frac        = env_int("MOE_HOST_POOL_FRAC", 80);
 +    if (g_pool_frac < 1) {
 +        g_pool_frac = 1;
 +    }
@@ -50151,7 +50158,10 @@ index 000000000..7fc7601f2
 +        g_pool_frac = 100;
 +    }
 +    g_pool_prewarm     = env_int("MOE_HOST_POOL_PREWARM", 1) != 0;
-+    g_pool_dio         = env_int("MOE_HOST_POOL_DIO", 0) != 0;
++    // r112 default: bypass the page cache (see the g_pool_frac comment).  MOE_HOST_POOL_DIO=0 restores the
++    // buffered fill, which is faster only when the whole set fits in RAM -- i.e. when `pinned` is better
++    // anyway.
++    g_pool_dio         = env_int("MOE_HOST_POOL_DIO", 1) != 0;
 +    g_pool_bg          = env_int("MOE_HOST_POOL_BGFETCH", 1) != 0;
 +    g_pool_prefetch    = env_int("MOE_HOST_POOL_PREFETCH", 0) != 0;
 +    g_pool_total_bytes = (g_pool_enabled && !g_pool_auto) ? moe_host_pool_mib() * 1024 * 1024 : 0;
@@ -71368,10 +71378,10 @@ index 6c6393d57..8cce74993 100644
  
      void seek(size_t offset, int whence) const;
 diff --git a/src/llama-model-loader.cpp b/src/llama-model-loader.cpp
-index 6cc0b2028..dfdfcc19b 100644
+index 6cc0b2028..7017bc7b0 100644
 --- a/src/llama-model-loader.cpp
 +++ b/src/llama-model-loader.cpp
-@@ -10,14 +10,59 @@
+@@ -10,14 +10,61 @@
  #include <array>
  #include <cinttypes>
  #include <cstdint>
@@ -71404,8 +71414,10 @@ index 6cc0b2028..dfdfcc19b 100644
 +        for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
 +            ggml_backend_dev_moe_cache_set_host_pool(ggml_backend_dev_get(i), true);
 +        }
-+        LLAMA_LOG_INFO("%s: host_experts_mode=POOL: bounded pinned host pool enabled "
-+                       "(MOE_HOST_POOL_MIB, default 25%% of the MoE host expert bytes)\n", func);
++        LLAMA_LOG_INFO("%s: host_experts_mode=POOL: NO pinned master; the host experts stay in the model "
++                       "mapping and every GPU read is served through a bounded pinned pool "
++                       "(MOE_HOST_POOL_MIB, default MOE_HOST_POOL_FRAC=80%% of the host expert bytes, "
++                       "O_DIRECT fills unless MOE_HOST_POOL_DIO=0)\n", func);
 +    }
 +}
 +
@@ -71431,7 +71443,7 @@ index 6cc0b2028..dfdfcc19b 100644
  const char * llama_file_version_name(llama_fver version) {
      switch (version) {
          case GGUF_FILE_VERSION_V1: return "GGUF V1 (support until nov 2023)";
-@@ -96,8 +141,8 @@ static std::vector<std::string> llama_get_list_splits(const std::string & path,
+@@ -96,8 +143,8 @@ static std::vector<std::string> llama_get_list_splits(const std::string & path,
          throw std::runtime_error(format("invalid split file: %s", path.c_str()));
      }
  
@@ -71442,7 +71454,7 @@ index 6cc0b2028..dfdfcc19b 100644
          paths.push_back(std::string(buf.data(), ret));
      }
  
-@@ -537,9 +582,12 @@ llama_model_loader::llama_model_loader(
+@@ -537,9 +584,12 @@ llama_model_loader::llama_model_loader(
          std::vector<std::string> & splits,
          FILE * file,
          llama_load_mode load_mode,
@@ -71455,7 +71467,7 @@ index 6cc0b2028..dfdfcc19b 100644
          const llama_model_kv_override * param_overrides_p,
          const llama_model_tensor_buft_override * param_tensor_buft_overrides_p)
          : metadata(meta), set_tensor_data(set_tensor_data), set_tensor_data_ud(set_tensor_data_ud) {
-@@ -555,10 +603,26 @@ llama_model_loader::llama_model_loader(
+@@ -555,10 +605,26 @@ llama_model_loader::llama_model_loader(
      }
  
      tensor_buft_overrides = param_tensor_buft_overrides_p;
@@ -71482,7 +71494,7 @@ index 6cc0b2028..dfdfcc19b 100644
      if (!fname.empty()) {
          // Load the main GGUF
          struct ggml_context * ctx = NULL;
-@@ -1113,6 +1177,78 @@ bool llama_model_loader::lazy_read::add(const std::string & name, const ggml_ten
+@@ -1113,6 +1179,78 @@ bool llama_model_loader::lazy_read::add(const std::string & name, const ggml_ten
      return true;
  }
  
@@ -71561,7 +71573,7 @@ index 6cc0b2028..dfdfcc19b 100644
  struct ggml_tensor * llama_model_loader::create_tensor(
          const llama_hparams & hparams, const buft_list_t * buft_list_cpu, const buft_list_t * buft_list_input, const buft_list_t * buft_list_output,
          const buft_list_t * buft_list_layer, const LLM_TN_IMPL & tn, const std::initializer_list<int64_t> & ne, int flags) {
-@@ -1175,9 +1311,11 @@ struct ggml_tensor * llama_model_loader::create_tensor(
+@@ -1175,9 +1313,11 @@ struct ggml_tensor * llama_model_loader::create_tensor(
          }
  
          // skip unused tensors
@@ -71575,7 +71587,7 @@ index 6cc0b2028..dfdfcc19b 100644
  
              size_data -= nbytes;
              n_created++;
-@@ -1216,7 +1354,10 @@ struct ggml_tensor * llama_model_loader::create_tensor(
+@@ -1216,7 +1356,10 @@ struct ggml_tensor * llama_model_loader::create_tensor(
          const buft_list_t * buft_list;
          switch (info.layer) {
              case LLM_TENSOR_LAYER_INPUT:
@@ -71587,7 +71599,7 @@ index 6cc0b2028..dfdfcc19b 100644
                  break;
              case LLM_TENSOR_LAYER_OUTPUT:
                  buft_list = buft_list_output;
-@@ -1231,15 +1372,102 @@ struct ggml_tensor * llama_model_loader::create_tensor(
+@@ -1231,15 +1374,102 @@ struct ggml_tensor * llama_model_loader::create_tensor(
  
          ggml_backend_buffer_type_t buft = nullptr;
  
@@ -71694,7 +71706,7 @@ index 6cc0b2028..dfdfcc19b 100644
                          if (use_mmap) {
                              static std::once_flag once;
                              std::call_once(once, [] {
-@@ -1267,8 +1495,14 @@ struct ggml_tensor * llama_model_loader::create_tensor(
+@@ -1267,8 +1497,14 @@ struct ggml_tensor * llama_model_loader::create_tensor(
          }
  
          // avoid using a host buffer when using mmap
@@ -71710,7 +71722,7 @@ index 6cc0b2028..dfdfcc19b 100644
              auto * cpu_dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
              if (!cpu_dev) {
                  throw std::runtime_error("no CPU backend found");
-@@ -1326,7 +1560,12 @@ struct ggml_tensor * llama_model_loader::create_tensor(
+@@ -1326,7 +1562,12 @@ struct ggml_tensor * llama_model_loader::create_tensor(
          ggml_set_name(&t_meta, tn.str().c_str());
  
          ggml_backend_buffer_type_t buft = buft_for_tensor(&t_meta);
@@ -71724,7 +71736,7 @@ index 6cc0b2028..dfdfcc19b 100644
          ggml_context * ctx = ctx_for_buft(buft);
          ggml_tensor * ret = ggml_dup_tensor(ctx, &t_meta);
          ggml_set_name(ret, tn.str().c_str());
-@@ -1339,8 +1578,10 @@ struct ggml_tensor * llama_model_loader::create_tensor(
+@@ -1339,8 +1580,10 @@ struct ggml_tensor * llama_model_loader::create_tensor(
          return NULL;
      }
  
@@ -71736,7 +71748,7 @@ index 6cc0b2028..dfdfcc19b 100644
          is_lazy = lazy.add(tn.str(), cur, no_alloc ? nullptr : &require_weight(tn.str().c_str()));
      }
  
-@@ -1364,6 +1605,9 @@ struct ggml_tensor * llama_model_loader::create_tensor(
+@@ -1364,6 +1607,9 @@ struct ggml_tensor * llama_model_loader::create_tensor(
      if (buft == nullptr) {
          return nullptr;
      }
@@ -71746,7 +71758,7 @@ index 6cc0b2028..dfdfcc19b 100644
  
      ggml_context * ctx = ctx_for_buft(buft);
  
-@@ -1407,6 +1651,15 @@ void llama_model_loader::done_getting_tensors(bool partial) const {
+@@ -1407,6 +1653,15 @@ void llama_model_loader::done_getting_tensors(bool partial) const {
      }
  }
  
@@ -71762,7 +71774,7 @@ index 6cc0b2028..dfdfcc19b 100644
  void llama_model_loader::init_mappings(bool prefetch, llama_mlocks * mlock_mmaps) {
      // note: read_lazy also requires mmap; this condition make sure it's usable even when --load-mode is not set to mmap
      if (use_mmap || lazy.any()) {
-@@ -1426,11 +1679,14 @@ void llama_model_loader::init_mappings(bool prefetch, llama_mlocks * mlock_mmaps
+@@ -1426,11 +1681,14 @@ void llama_model_loader::init_mappings(bool prefetch, llama_mlocks * mlock_mmaps
                  }
              }
  
@@ -71779,7 +71791,7 @@ index 6cc0b2028..dfdfcc19b 100644
              if (mlock_mmaps) {
                  std::unique_ptr<llama_mlock> mlock_mmap(new llama_mlock());
                  mlock_mmap->init(mapping->addr());
-@@ -1446,6 +1702,13 @@ void llama_model_loader::init_mappings(bool prefetch, llama_mlocks * mlock_mmaps
+@@ -1446,6 +1704,13 @@ void llama_model_loader::init_mappings(bool prefetch, llama_mlocks * mlock_mmaps
      }
  }
  
@@ -71793,7 +71805,7 @@ index 6cc0b2028..dfdfcc19b 100644
  void llama_model_loader::get_mapping_range(size_t * first, size_t * last, void ** addr, int idx, ggml_context * ctx) const {
      GGML_ASSERT(!mappings.empty());
      const auto & mapping = mappings.at(idx);
-@@ -1504,6 +1767,8 @@ bool llama_model_loader::load_all_data(
+@@ -1504,6 +1769,8 @@ bool llama_model_loader::load_all_data(
      }
      GGML_ASSERT(size_data != 0 && "call init_mappings() first");
  
@@ -71802,7 +71814,7 @@ index 6cc0b2028..dfdfcc19b 100644
      std::vector<std::future<std::pair<ggml_tensor *, bool>>> validation_result;
  
      // 4 staging buffers for async uploads, each sized 1MB seems to be a good default for single NVMe drives.
-@@ -1542,6 +1807,20 @@ bool llama_model_loader::load_all_data(
+@@ -1542,6 +1809,20 @@ bool llama_model_loader::load_all_data(
              return nullptr;
          }
  
@@ -71823,7 +71835,7 @@ index 6cc0b2028..dfdfcc19b 100644
          if (buft != ggml_backend_dev_buffer_type(dev)) {
              LLAMA_LOG_DEBUG("%s: buffer type %s is not the default buffer type for device %s for async uploads\n", func,
                  ggml_backend_buft_name(buft), ggml_backend_dev_name(dev));
-@@ -1557,6 +1836,21 @@ bool llama_model_loader::load_all_data(
+@@ -1557,6 +1838,21 @@ bool llama_model_loader::load_all_data(
          }
  
          auto * host_buft = ggml_backend_dev_host_buffer_type(dev);
@@ -71845,7 +71857,7 @@ index 6cc0b2028..dfdfcc19b 100644
          if (!host_buft) {
              LLAMA_LOG_DEBUG("%s: no host buffer type found for device %s\n", func,
                  ggml_backend_dev_name(dev));
-@@ -1565,16 +1859,16 @@ bool llama_model_loader::load_all_data(
+@@ -1565,16 +1861,16 @@ bool llama_model_loader::load_all_data(
  
          // If the backend is supported, create pinned memory buffers and events for synchronisation.
          for (size_t idx = 0; idx < n_buffers; ++idx) {
@@ -71866,7 +71878,7 @@ index 6cc0b2028..dfdfcc19b 100644
  
              auto * event = ggml_backend_event_new(dev);
              if (!event) {
-@@ -1662,11 +1956,31 @@ bool llama_model_loader::load_all_data(
+@@ -1662,11 +1958,31 @@ bool llama_model_loader::load_all_data(
                      lmlock->grow_to(weight->offs + n_size);
                  }
  
@@ -71901,7 +71913,7 @@ index 6cc0b2028..dfdfcc19b 100644
              }
          } else {
              const auto & file = files.at(weight->idx);
-@@ -1746,6 +2060,17 @@ bool llama_model_loader::load_all_data(
+@@ -1746,6 +2062,17 @@ bool llama_model_loader::load_all_data(
              }
          }
  
@@ -71919,7 +71931,7 @@ index 6cc0b2028..dfdfcc19b 100644
          size_done += n_size;
      }
  
-@@ -1777,11 +2102,20 @@ bool llama_model_loader::load_all_data(
+@@ -1777,11 +2104,20 @@ bool llama_model_loader::load_all_data(
          // unmap offloaded tensors and metadata
          if (use_mmap) {
              for (uint32_t idx = 0; idx < mappings.size(); idx++) {

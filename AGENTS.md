@@ -251,8 +251,11 @@ stub alive to serve them, and treat a `wip/` path in an old record as a historic
 - **`--host-experts pool` (r111) has NO pinned master: the master IS the read-only model mapping, and
   every GPU read of a pooled host expert goes through pinned memory.**  The tensors live in the model
   mapping (host buft `ROCm_HostMap`, device-carrying, r111, **block 12**) and are never read by a device
-  copy or a kernel; the L2 tier is the bounded pool (`MOE_HOST_POOL_MIB`/`FRAC`, default 25 % of the host
-  expert bytes, *per tensor*, process-wide) and the L3 tier is the page cache / GGUF.  The invariants:
+  copy or a kernel; the L2 tier is the bounded pool (`MOE_HOST_POOL_MIB`/`FRAC`, default **80 %** of the
+  host expert bytes since r112, *per tensor*, process-wide) and the L3 tier is the GGUF, read with
+  **O_DIRECT** (`MOE_HOST_POOL_DIO` default **1** since r112) so the page cache is not a second copy.  The
+  mode is only for the case where the set does **not** fit in RAM: when it fits, `pinned` is faster on every
+  axis.  80 % is the measured knee (90 % was slower and swapped).  The invariants:
   (1) a pooled table must never be served by a **pageable** `cudaMemcpyAsync` -- ROCm stages a pageable
   upload through a shared internal bounce and back-to-back copies tear (this is what made the first cut
   nondeterministic; `moe_cache_upload_pageable`, the staging bounce and the `stage_gather` host-gather

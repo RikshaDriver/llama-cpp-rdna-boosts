@@ -1,5 +1,40 @@
 # WORKLOG - dated delivery records
 
+## 261022.007 (r112) -- POOL-mode defaults: `MOE_HOST_POOL_FRAC=80`, `MOE_HOST_POOL_DIO=1`
+
+**Shipped:** `v14-097cf33d9-r112`, **block 12** amended (blocks 00-11 byte-identical to r111; block 13
+re-cut with a new `From` line and an unchanged body).  Two default values only -- no code-path change, and
+the `pinned` default mode is untouched.
+
+`--host-experts pool` exists for one case: the host expert set does **not** fit in RAM.  Its r111 defaults
+(25 % pool, buffered fills) were inherited from the r35 era, when the pool sat *next to* a pinned master and
+the page cache was the real tier.  On a memory-tight box that shape is wrong twice over: the pool only holds
+a quarter of the working set, and the page cache tries to hold a second copy of the same bytes, which is what
+pushes the box into swap.  r112 sets `MOE_HOST_POOL_FRAC=80` and `MOE_HOST_POOL_DIO=1` (O_DIRECT, no page
+cache), measured on the field case (gfx1100, 24 GB VRAM, **30 GiB RAM**, 35B-A3B **Q8_0** = 37.8 GB,
+`-ncmoe 40` = 31.9 GiB of host experts, 2000-token greedy runs):
+
+| config | pool | swap | decode |
+|---|---:|---:|---:|
+| r112 defaults (`-ncmoe 40`) | 26.0 GiB | 0.3 GiB | **78.3 t/s** |
+| r112 defaults (`-ncmoe 36`) | 23.4 GiB | 0.3 GiB | 75.2 t/s |
+| r111 defaults, 25 % buffered (`-ncmoe 40`) | 8.2 GiB | 0 | 48.6 t/s |
+| `pinned` (`-ncmoe 40`, same box) | 0.8 GiB (the pinned allocation FAILS) | 15.9 GiB | 2-3 t/s |
+
+80 % is the knee (90 % measured 71.8 t/s *and* started swapping), and gfx1201 is unaffected (184 GiB RAM,
+`-ncmoe 40`, 2-GPU tensor: 115.8 t/s vs 115.2 for `pinned` -- the arena is fully resident, so nothing fills).
+Texts stay identical across every arm and every FRAC/ncmoe combination tested (2000-token runs at
+`-ncmoe` 36 and 40 byte-identical to each other and 200-char-prefix-identical to the r111 arms).
+
+**Known follow-ups (unchanged, `TODO.md` #87 / `wip/host-pool-swap-and-prefill/`):** the buffered fill
+(`MOE_HOST_POOL_DIO=0`) still SIGSEGVs in the background pool worker at high FRAC on a memory-tight box --
+now opt-in only; a prefill-band access must not fill/evict pool slots (the first prefill is inherently a full
+O_DIRECT read: ~10 s on that box, which is why a short prompt shows ~0.6 "prompt t/s" while a 1400-token
+prompt measures 49 t/s); and the arena-evict ⟷ pool-admit LRUs are still independent.
+
+**Docs with it:** `ENVIRONMENT.md` §1.2.1 (defaults, rationale, the knee, the defect note), `AGENTS.md`
+pool critical fact, `patches/README.md` block 12, the campaign README, TODO #87.
+
 ## 261022.006 (r111) -- `--host-experts pool` drops the full pinned master (TODO #55, phase 3)
 
 **Shipped:** `v14-097cf33d9-r111`, **block 12** amended (blocks 00-11 are byte-identical to r110; block 13

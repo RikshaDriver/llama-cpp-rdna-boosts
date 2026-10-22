@@ -145,7 +145,8 @@ the slack up front moves the cost to before the arena is sized.
 The pool is an **option** for systems that cannot hold the weights resident; the default `--host-experts
 pinned` (and `auto`) keeps the usual behaviour (a full pinned `ROCm_Host` master) and allocates **no**
 pool.  r35 shipped the pool as a bounded bounce tier *next to* that master; **r111 completes it**: in POOL
-mode there is no master at all.
+mode there is no master at all.  **POOL mode is only for the case where the host expert set does NOT fit in
+RAM** — when it does fit, `pinned` is faster and cheaper on every axis, and POOL mode will be slower.
 
 | tier | what |
 |---|---|
@@ -165,24 +166,34 @@ Measured (35B-A3B UD-Q4_K_M, `-ncmoe 40` = 18 662 MiB of host experts, 1x R9700)
 and FRAC 100 reproduces the old footprint, so **the pinning is the fraction knob**.  Under a 12 GiB or
 8 GiB cgroup (`MemoryMax`, no swap) the `pinned` arm is OOM-killed and the `pool` arm runs at ~93 t/s —
 that is the point of the mode: a host expert set larger than RAM streams from disk instead of failing.
-Cost: one extra host memcpy per staged byte on the host-expert *prefill* staging path (decode parity;
-`llama-cli` prefill −1…−6 %, a single-ubatch `pp512` on the 2-GPU tensor config −34 %), and with the page
-cache out of the picture (`MOE_HOST_POOL_DIO=1`, 4 GiB arena) decode drops 41.8 → 7.5 t/s.  A non-mapped
-load (`--load-mode none/dio`) has no mapping to place the tensors in and keeps the pinned master (warned);
-use the default mmap load mode, or `MOE_HOST_POOL_DIO=1` with it.  r111.
+Cost: one extra host memcpy per staged byte on the host-expert *prefill* staging path when the fills are
+buffered (decode parity; `llama-cli` prefill −1…−6 %, a single-ubatch `pp512` on the 2-GPU tensor config
+−34 %).  A non-mapped load (`--load-mode none/dio`) has no mapping to place the tensors in and keeps the
+pinned master (warned); use the default mmap load mode.  r111.
+
+**r112 — the defaults are tuned for the case the mode exists for.**  `MOE_HOST_POOL_FRAC` defaults to
+**80 %** and `MOE_HOST_POOL_DIO` to **1** (O_DIRECT, no page cache).  A memory-tight box cannot afford two
+copies of the same weights (pinned pool *and* page cache), and a page cache that cannot hold the set only
+buys swap thrash; 80 % keeps the working set hot and lets the disk serve the remainder.  Measured on the
+field case (gfx1100, 24 GB VRAM, **30 GiB RAM**, 35B-A3B **Q8_0** = 37.8 GB, `-ncmoe 40` = 31.9 GiB of host
+experts, 2000-token runs): pool 26.0 GiB pinned, **78.3 t/s decode**, 0.3 GiB swap — versus 48.6 t/s for
+r111's 25 % buffered default and 2-3 t/s (16 GiB of swap) for `pinned` on the same box.  The knee is 80 %:
+90 % measured 71.8 t/s *and* started swapping.  The cost is the first prefill: with nothing cached it stages
+the whole set through O_DIRECT (~10 s on that box, i.e. a short prompt shows ~0.6 "prompt t/s"; a 1400-token
+prompt measures 49 t/s).  On a box where the set fits in RAM, stay on `--host-experts pinned`.
 
 | variable / flag | default | class | notes |
 |---|---|---|---|
 | `--host-experts pool` | `pinned` | option | select the bounded host pool and **drop the pinned master** (r111).  `pinned`/`auto` = full pinned master, no pool; `mmap` was removed in r33. |
 | `MOE_HOST_POOL_MIB` | `auto` | tuning | process-wide pool budget: unset/`auto` = `MOE_HOST_POOL_FRAC` % of the MoE host expert bytes (`moe_host_expert_bytes`), split over the host tensors in proportion to their size; `N` = explicit MiB; `0` = disable the pool (with `--host-experts pool` the master is then still dropped and every miss takes the pageable-free bounce path). |
-| `MOE_HOST_POOL_FRAC` | `25` | tuning | the auto percentage (1–100).  Now this is the **whole** non-swappable host footprint, not a tier beside it: 25 % of 18.6 GiB pins 4.65 GiB. |
+| `MOE_HOST_POOL_FRAC` | **`80`** (r112; `25` in r111) | tuning | the auto percentage (1–100).  This is the **whole** non-swappable host footprint, not a tier beside it.  80 % is the measured knee for the "set does not fit in RAM" case (90 % was slower *and* swapped); lower it when RAM is needed elsewhere. |
 | `MOE_HOST_POOL_VERIFY` | unset | diagnostic | `1` byte-compares every pool fill against the model mapping and logs the first mismatching expert (`POOLREAD MISMATCH`).  The instrument that found the O_DIRECT bounce race; costs a memcmp per fill, never default-on. |
 | `LLAMA_HOST_MASTER_PINNED` | unset | A/B only | force the pinned master even with `--host-experts pool` — the control arm for a measured comparison. |
 | `MOE_HOST_POOL_POLICY` | — | **removed (r40)** | the pooled-table device-policy selector.  The device-policy fill (and the whole device-remap family) was deleted 2026-10-10; pooled tables always fill from the pinned pool (a master fallback only exists in `pinned` mode).  The variable is ignored. |
 | `MOE_HOST_POOL_PREFETCH` | `0` | opt-in | routing-driven speculative pool prefill; **off** because a long-prompt sweep showed it hurts until the pool nears full residency (`1` enables). |
 | `MOE_HOST_POOL_PREWARM` | `1` | kill-switch | one-shot slot fill when a pool is built (ranked by the prefill tally / arena residents). |
 | `MOE_HOST_POOL_BGFETCH` | `1` | kill-switch | low-priority background eviction prefetch; `0` is the synchronous path. |
-| `MOE_HOST_POOL_DIO` | `0` | diagnostic / disk tier | `1` = every fill (and the staging bounce) reads the GGUF with O_DIRECT, so nothing is cached: the pure L3/disk mode.  `0` fills are a `memcpy` out of the model mapping (the page cache). |
+| `MOE_HOST_POOL_DIO` | **`1`** (r112; `0` in r111) | kill-switch | `1` = every fill (and the staging bounce) reads the GGUF with O_DIRECT, so the page cache is never populated and cannot compete with the pool for RAM.  `0` restores the buffered fill (a `memcpy` out of the model mapping), which is only better when the set fits in RAM — i.e. when `pinned` is the right mode anyway.  **`0` also carries a known defect** (SIGSEGV in the background pool worker at high FRAC on a memory-tight box): `TODO.md` #87. |
 
 ### 1.3 The movable-boundary slab (block 06) — `GGML_CUDA_SLAB`, default **on**
 

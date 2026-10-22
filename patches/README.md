@@ -45,7 +45,7 @@ only as a rough shape.
 | 09 | `0009-…-block-09-host-resident-MoE-iface-schedul` | host-resident MoE: iface, scheduler, cache, slab hooks | +14175 / −535 | 65 |
 | 10 | `0010-…-block-10-slab-fusion-dispatcher-async-in` | slab + fusion dispatcher + async input ring (infrastructure) | +11794 / −4753 | 75 |
 | 11 | `0011-…-block-11-qwen4exp-model-hyper-connection` | qwen4exp model/QSA/HC/lazy reader/indexer cache | +11775 / −419 | 46 |
-| 12 | `0012-…-block-12-campaign-remainder-CPU-wins-bac` | campaign remainder (+ r106: Meta `ALL_GATHER`, DFlash2 `-sm tensor`, slab narrow-2; + r111: `--host-experts pool` drops the pinned master) | +2168 / −315 | 33 |
+| 12 | `0012-…-block-12-campaign-remainder-CPU-wins-bac` | campaign remainder (+ r106: Meta `ALL_GATHER`, DFlash2 `-sm tensor`, slab narrow-2; + r111/r112: `--host-experts pool` drops the pinned master; FRAC 80 + O_DIRECT defaults) | +2179 / −322 | 33 |
 | 13 | `0013-…-block-13-MTP-draft-vocabulary-subset-spe` | MTP draft vocabulary subset (`--spec-draft-mtp-vocab N`, opt-in) | +569 / −6 | 19 |
 
 Block 05's file count is `template-instances/*.cu` (the FA kernel instantiations); block 10 is the
@@ -843,7 +843,14 @@ had no other home.
   background worker (now `thread_local`), `g_host_pools` destroyed under the detached worker at exit (now
   leaked, like the worker's mutex/cv/queue), and an AUTO budget that was both a 3x running sum and
   registration-order dependent (now the per-device max and a per-tensor share).  `MOE_HOST_POOL_VERIFY` and
-  `LLAMA_HOST_MASTER_PINNED` are the new diagnostic / A/B knobs.
+  `LLAMA_HOST_MASTER_PINNED` are the new diagnostic / A/B knobs.  **r112** then tuned the defaults for the
+  case the mode exists for (a set that does not fit in RAM): `MOE_HOST_POOL_FRAC` **25 → 80 %** and
+  `MOE_HOST_POOL_DIO` **0 → 1** (O_DIRECT fills, no page-cache copy competing for RAM).  Measured on the
+  field case (gfx1100, 30 GiB RAM, 35B-A3B Q8_0, `-ncmoe 40` = 31.9 GiB of host experts, 2000-token runs):
+  **78.3 t/s decode / 0.3 GiB swap / 26.0 GiB pinned**, versus 48.6 t/s for the r111 defaults and 2-3 t/s
+  (16 GiB of swap) for `pinned`.  80 % is the knee (90 % → 71.8 t/s *and* swapping).  A buffered-fill
+  defect at high FRAC on a memory-tight box is tracked as `TODO.md` #87 (DIO is the default, so it is
+  opt-in).
 
 **Knobs.**  `LLAMA_OUTPUT_PINNED`, `MTP_DRAFT_N_UBATCH`, `GGML_LF_DFLASH_DEV`, `GGML_LF_FAST_TOPK`,
 `LLAMA_STATE_GET_MERGE_GAP`, `LLAMA_STATE_ASYNC`, `LLAMA_STATE_ASYNC_MAX_MIB`,

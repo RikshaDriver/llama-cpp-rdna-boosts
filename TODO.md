@@ -70,6 +70,10 @@ should be guarded cheaply.  Suspects: the one path that reads the file/mapping *
 `cudaHostAlloc`-failure path under pressure leaving an inconsistent pool.  Needs a fix (and an r11x); the
 workaround is `MOE_HOST_POOL_DIO=1` or a lower FRAC.
 
+**r112 update:** the defaults are now `MOE_HOST_POOL_FRAC=80` + `MOE_HOST_POOL_DIO=1` (the measured knee for
+the disk tier: `-ncmoe 40` on the 30 GiB box, 2000-token runs, 78.3 t/s decode / 0.3 GiB swap), which also
+makes the (a) crash opt-in (`DIO=0` only).  The items below stay open.
+
 **(b) Prefill must not evict pool entries.**  Whole-table staging already bypasses the pool (r111: +13 %
 prefill on gfx1201), but the used-expert upload and the pre-sizing eager fills still churn it.  The rule to
 implement: a PREFILL-band access may read a pool slot but must never evict or admit one; only the

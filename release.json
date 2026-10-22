@@ -1,13 +1,13 @@
 {
-  "release": "v14-097cf33d9-r111",
+  "release": "v14-097cf33d9-r112",
   "base": "097cf33d9",
   "base_tree": "30c400ccea2e2fb47b663036a6cee08a4dc542d8",
   "n_blocks": 14,
-  "tip": "0349d6b4af5ff2bbcf88d1c4631599a625df0d53",
-  "tree": "e51b1023a42b1183c3fca8b93be677ffa4cb194b",
+  "tip": "c9b12e988ad1",
+  "tree": "9a49150e4c32e662d22ba0553777497c2e75434b",
   "all_patch": {
     "name": "rdna-boosts-all.patch",
-    "sha256": "287fcaeacf574367a8df3e3e9ba95a9fb524bc80f720aaca3047563d50247c53"
+    "sha256": "8ee6206c95eaeb5ab224627c27dcca08f2a49ea450f30706bbdfeb30126a2e6f"
   },
   "patches": {
     "0000-rdna-boosts-block-00-foundation-band-uniformity-Meta.patch": "e4259056cb4a139b2f4d513575fad6991b893689d6dca1dfe9f3088a0a029672",
@@ -22,7 +22,7 @@
     "0009-rdna-boosts-block-09-host-resident-MoE-iface-schedul.patch": "1fd9dce459585958f6a0e3960901c3ee47033f82fd79e730a5f450af08833ab3",
     "0010-rdna-boosts-block-10-slab-fusion-dispatcher-async-in.patch": "012374ccdd2fd5733a5f58e15fea75b5ab978784053dd58e982be4417f3e8edb",
     "0011-rdna-boosts-block-11-qwen4exp-model-hyper-connection.patch": "fdf22bc9ad483c4681ec103ee8293731d533555c542ec1d9e7ab4620f3495854",
-    "0012-rdna-boosts-block-12-campaign-remainder-CPU-wins-bac.patch": "ca35e0c97a960dd1bfda96979f718f462aec2aa99d8a326eb35ca1439670eb21",
-    "0013-rdna-boosts-block-13-MTP-draft-vocabulary-subset-spe.patch": "9fdde7c69badf860fe86b1da5cf86234e8918a4bf524784df0bf004289394985"
+    "0012-rdna-boosts-block-12-campaign-remainder-CPU-wins-bac.patch": "f546e78febfd3146c353f71227fc171aefe6ecc9f30f65dbfc067f4398a2895d",
+    "0013-rdna-boosts-block-13-MTP-draft-vocabulary-subset-spe.patch": "62fd2a1a1bac83f3dcd64639370143bd2361ae68f60996a67112d42f331fcc3d"
   }
 }
