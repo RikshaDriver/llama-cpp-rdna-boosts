@@ -63,6 +63,18 @@ knob/purity split), `MANIFESTS.md`, `BASELINE.md`, `README.md`, `ENVIRONMENT.md`
 `upstream/*` candidate block references, `CONTAINERS.md` / `scripts/container-watch.sh` tag examples,
 `beta/README.md` numbering example, `TODO.md` (MTP-vocab block number).
 
+**Housekeeping (2026-10-22).**  The dev checkout and the gate caches were pruned after the release:
+`~/llama.cpp` 13 G -> 2.3 G (13 stale per-PR/experiment `build-*` dirs, 5 worktrees, 43 superseded
+branches, 1 redundant stash), `/tmp` 2.8 G -> 13 M, and `~/.cache/rdna-boosts/gates` 29 G -> 4.8 G (the
+five stale prefill-logit bases, including the two one-offs).  The **Qwen3.8-27B base was re-recorded** from
+the refresh build (`b5df21373`, tree `8e67f977`) before pruning: `base_ppl` 5.9314 and `base_sha256
+44d7605be68c...` are **identical to the pruned file**, so the r109 logit claim above is still reproducible
+against it.  The `~/llama-fold` / `~/llama-prefold` scratch checkouts were removed after fetching their
+unique chains into `~/llama.cpp` under `refs/archive/llama-fold/{fold,pre-fold}` and
+`refs/archive/llama-prefold/{prefold,folded,r94}` (the `fold` bisection chain referenced by
+`archive/work/moe-expert-cache/`).  Also fixed in the same pass: `scripts/gate-prefill-logits.sh` defaulted
+`--ppl` to the stale `build-rocm-hybrid` dir (2026-10-17) and now defaults to the canonical `build-rocm`.
+
 ## 261022.002 (r108) -- block 10 amendment: the gate/beta BF16 fusion was wrong for every sequence but the first (issue #204)
 
 **Release `v13-097cf33d9-r108`**, 13 blocks, fork point `097cf33d9`, tip `70815f407`, tree
