@@ -39,6 +39,11 @@ maintainer's go-ahead (see the WIP and promotion rules in `AGENTS.md`).
 > harness + raw numbers in [`tools/arms-2026-10-22/`](tools/arms-2026-10-22/).  This does **not** close the
 > item — the MoE/field-config arm and the `-sm layer` / AR-profile grid are still outstanding.
 
+> **Next session: [`HANDOVER-2026-10-23.md`](HANDOVER-2026-10-23.md)** — the self-contained prompt to
+> finish this campaign: re-measure the field/MoE arm on r116, fill the remaining §1 matrix (including the
+> `-sm layer` column), run the 2-vs-3-device all-reduce profile, settle suspects 2/4 and the block-13
+> −2.2 % regression, then close `TODO #51` and archive this directory.
+
 ## 0. Current symptom and findings (2026-10-16, r73)
 
 Measured on this box: Qwen3.8-Flash-Next GSQ-IQ3_XXS, `-ncmoe 48 -sm tensor`, 13.8K-token prompt, 200
