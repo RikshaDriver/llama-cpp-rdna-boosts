@@ -49496,10 +49496,10 @@ index 5605bf7a4..10b689844 100644
 \ No newline at end of file
 diff --git a/ggml/src/ggml-cuda/moe-expert-cache.cu b/ggml/src/ggml-cuda/moe-expert-cache.cu
 new file mode 100644
-index 000000000..69d41cabd
+index 000000000..1ff9919eb
 --- /dev/null
 +++ b/ggml/src/ggml-cuda/moe-expert-cache.cu
-@@ -0,0 +1,5940 @@
+@@ -0,0 +1,6284 @@
 +// wip/moe-expert-cache — Phase 1a foundation.  See moe-expert-cache.h for the contract.
 +
 +#include "moe-expert-cache.h"
@@ -49654,14 +49654,26 @@ index 000000000..69d41cabd
 +    // band by the device tally (`moe_cache_heat_observe`, so the staged path and the identity path
 +    // are covered).  NOT decayed (unlike `count`/`ghost`) - it is a workload prior, not eviction state.
 +    std::vector<uint32_t> heat;             // [n_experts], saturating
++    // TODO #88: the DECODE-band part of `heat`.  `heat` is one counter fed by both bands, and a prefill
++    // ubatch routes ~n_tok experts, so on a long prompt the prefill outweighs the decode by tens of times
++    // and the ranking degenerates toward "nearly every expert is hot".  The ARENA serves the
++    // decode/verify band only, so its seed is ranked by THIS vector (`heat_rank_vec`); the host pool
++    // stages whole tables for prefill and keeps using the combined one.  Measured on a real trace: a
++    // decode-only prior covers 95.3 % of the decode mass where the combined one covers 80.3 %.
++    std::vector<uint32_t> heat_dec;         // [n_experts], saturating
 +    // The part of `heat` already folded into `g_heat_loaded`.  The persisted prior is loaded *into*
 +    // `heat` at registration, so without this the save's merge re-added the whole running total at every
 +    // flush: the map doubled per flush, saturated at 0xffffffff within ~6 flushes of a server session,
 +    // and every heat-driven ranking silently degenerated to expert-id order (measured 2026-10-17).
 +    std::vector<uint32_t> heat_merged;      // [n_experts], saturating
++    std::vector<uint32_t> heat_dec_merged;  // [n_experts], saturating (TODO #88)
 +    uint32_t *  heat_dev  = nullptr;        // device mirror for the prefill tally (lazy, fail-soft)
++    uint32_t *  heat_dec_dev = nullptr;     // device mirror for the sampled identity DECODE tally (TODO #88)
 +    int64_t     heat_dev_cap = 0;           // capacity in elements
 +};
++
++// TODO #88: the band a heat-driven arena decision ranks by (defined with the heat-map code below).
++static const std::vector<uint32_t> & heat_rank_vec(const table_t & t);
 +
 +std::mutex                          g_mutex;
 +std::vector<table_t>                g_tables;
@@ -49746,21 +49758,36 @@ index 000000000..69d41cabd
 +// r112: the defaults are tuned for the case POOL mode exists for -- a host expert set that does NOT fit in
 +// RAM, where the pool is the working set and the rest must come from disk.  80 % keeps most of the set
 +// hot in pinned RAM (the disk only serves the remainder, measured the knee: 80 % at 74.4 t/s / zero swap vs
-+// 90 % at 71.8 t/s / 0.3 GiB swap on a 30 GiB gfx1100 box) and `DIO=1` stops the page cache from
-+// double-caching the same bytes, which is what pushes a memory-tight box into swap thrash.  On a box where
-+// the set fits in RAM, `--host-experts pinned` (the default mode) is faster and cheaper than either.
++// 90 % at 71.8 t/s / 0.3 GiB swap on a 30 GiB gfx1100 box) and, since r114, the FILL MODE is decided per box
++// (buffered when the set fits beside the pool, O_DIRECT when it does not) instead of being pinned to DIO=1.
++// On a box where the set fits in RAM, `--host-experts pinned` (the default mode) is still faster and
++// cheaper than either.
 +int     g_pool_frac        = 80;     // MOE_HOST_POOL_FRAC: pool size as a % of the MoE host expert bytes
-+int     g_pool_ram_pct     = 80;     // MOE_HOST_POOL_RAM_PCT: ceiling on the WHOLE pinned pool, as a % of
++int     g_pool_ram_pct     = 85;     // MOE_HOST_POOL_RAM_PCT: ceiling on the WHOLE pinned pool, as a % of
 +                                     //   MemAvailable at the first pool build (0 = no ceiling).  The FRAC is
 +                                     //   a percentage of the model's host expert set, which says nothing about
 +                                     //   whether the box can PIN that much: on a tight box an oversized pool
 +                                     //   makes each table's cudaHostAlloc fail and silently falls back to the
 +                                     //   per-table bounce (disk reads), so bound it by real RAM instead.
++                                     //   85 % (r114, was 80) is the measured knee: on the 30 GiB gfx1100
++                                     //   field box the pinned set is 32.6 GiB, so the FRAC wants more than the
++                                     //   ceiling allows; 85 % of MemAvailable pins ~2 GiB more of the set and
++                                     //   stays clear of swap (see ENVIRONMENT.md).
 +int64_t g_pool_ram_cap     = -1;     // bytes; -1 = not computed yet
 +int64_t g_pool_ram_used    = 0;      // bytes pinned by the pools built so far
 +int64_t g_preflight_host_bytes = 0;  // Σ host expert bytes over host-expert devices (the AUTO basis)
 +bool    g_pool_prewarm     = true;   // MOE_HOST_POOL_PREWARM: fill every pool slot when it is built
-+bool    g_pool_dio         = false;  // MOE_HOST_POOL_DIO=1: O_DIRECT fill (debug fallback; bypasses the page cache)
++// TODO #87 (1): `MOE_HOST_POOL_DIO` is AUTO by default -- decided once, at the first pool build, from
++// MemAvailable vs the host expert set (the same measurement `MOE_HOST_POOL_RAM_PCT` takes).  Buffered fills
++// (DIO=0) let the page cache act as an L3, which is worth +90 % decode / +155 % prefill when the set fits;
++// O_DIRECT (DIO=1) is right when it does not, because a page cache that cannot hold the set just competes
++// with the pinned pool for the same RAM.  `MOE_HOST_POOL_DIO=0|1` forces either arm (and keeps the A/B
++// reproducible); the decision and its inputs are logged.
++bool    g_pool_dio         = false;  // the EFFECTIVE mode (forced, or decided by `pool_decide_dio_locked`)
++int     g_pool_dio_req     = -1;      // MOE_HOST_POOL_DIO: -1 = auto, 0 = force buffered, 1 = force O_DIRECT
++bool    g_pool_dio_decided = false;
++bool    g_pool_stage_batch = true;   // MOE_HOST_POOL_STAGE_BATCH=0: one cudaMemcpyAsync per expert for the
++                                     //   pool-backed prefill staging (the pre-r114 arm; A/B only)
 +bool    g_pool_prefetch   = false; // MOE_HOST_POOL_PREFETCH=1: speculatively warm the pool from the routing
 +                                   //   (a net loss unless the pool nears full residency -- long-prompt sweep)
 +int64_t g_pool_total_bytes = 0;   // PROCESS-WIDE total budget (split over all registered host tensors)
@@ -49888,7 +49915,14 @@ index 000000000..69d41cabd
 +// wip/moe-heatmap-persistence: the on-disk heat map (sidecar next to the model, geometry-keyed).
 +// `g_heat_loaded` is keyed by (layer, sem_role, n_experts, host_bytes) and consulted at table
 +// registration; `g_heat_path` is the chosen sidecar (model dir, else the cache-dir fallback).
-+std::map<std::tuple<int, std::string, int, size_t>, std::vector<uint32_t>> g_heat_loaded;
++// TODO #88: each entry carries both bands -- `all` (prefill + decode, the pool's ranking) and `dec` (the
++// decode band alone, the arena seed's ranking).  A version-1 file loads with `dec = all`, which is exactly
++// the pre-r115 behaviour; a version-2 file carries the real split.
++struct heat_prior_t {
++    std::vector<uint32_t> all;
++    std::vector<uint32_t> dec;
++};
++std::map<std::tuple<int, std::string, int, size_t>, heat_prior_t> g_heat_loaded;
 +std::string                         g_heat_path;
 +std::string                         g_heat_path_fallback;   // used when the model dir is read-only
 +bool                                g_heat_path_set   = false;
@@ -50143,7 +50177,7 @@ index 000000000..69d41cabd
 +    if (g_pool_frac > 100) {
 +        g_pool_frac = 100;
 +    }
-+    g_pool_ram_pct     = env_int("MOE_HOST_POOL_RAM_PCT", 80);
++    g_pool_ram_pct     = env_int("MOE_HOST_POOL_RAM_PCT", 85);
 +    if (g_pool_ram_pct < 0) {
 +        g_pool_ram_pct = 0;
 +    }
@@ -50151,19 +50185,26 @@ index 000000000..69d41cabd
 +        g_pool_ram_pct = 100;
 +    }
 +    g_pool_prewarm     = env_int("MOE_HOST_POOL_PREWARM", 1) != 0;
-+    // r112 default: bypass the page cache (see the g_pool_frac comment).  MOE_HOST_POOL_DIO=0 restores the
-+    // buffered fill, which is faster only when the whole set fits in RAM -- i.e. when `pinned` is better
-+    // anyway.
-+    g_pool_dio         = env_int("MOE_HOST_POOL_DIO", 1) != 0;
++    // TODO #87 (1): AUTO by default (see `g_pool_dio_req`).  An explicit `MOE_HOST_POOL_DIO=0|1` wins and is
++    // decided here, so an A/B never depends on the machine.
++    g_pool_dio_req     = env_int("MOE_HOST_POOL_DIO", -1);
++    if (g_pool_dio_req < -1) {
++        g_pool_dio_req = -1;
++    }
++    if (g_pool_dio_req >= 0) {
++        g_pool_dio         = g_pool_dio_req != 0;
++        g_pool_dio_decided = true;
++    }
 +    g_pool_prefetch    = env_int("MOE_HOST_POOL_PREFETCH", 0) != 0;
++    g_pool_stage_batch = env_int("MOE_HOST_POOL_STAGE_BATCH", 1) != 0;
 +    g_pool_total_bytes = (g_pool_enabled && !g_pool_auto) ? moe_host_pool_mib() * 1024 * 1024 : 0;
 +    if (g_pool_enabled) {
 +        if (g_pool_auto) {
-+            GGML_LOG_INFO("%s: MoE host expert pool: AUTO = %d%% of the MoE host expert bytes, pinned, "
-+                          "page-cache-filled (Phase 2b; full pinned master kept)\n", __func__, g_pool_frac);
++            GGML_LOG_INFO("%s: MoE host expert pool: AUTO = %d%% of the MoE host expert bytes, pinned; fill "
++                          "mode AUTO (MOE_HOST_POOL_DIO=0|1 forces it)\n", __func__, g_pool_frac);
 +        } else {
-+            GGML_LOG_INFO("%s: MoE host expert pool: %lld MiB PROCESS-WIDE, pinned, page-cache-filled "
-+                          "(Phase 2b; full pinned master kept)\n", __func__, (long long) moe_host_pool_mib());
++            GGML_LOG_INFO("%s: MoE host expert pool: %lld MiB PROCESS-WIDE, pinned; fill mode AUTO "
++                          "(MOE_HOST_POOL_DIO=0|1 forces it)\n", __func__, (long long) moe_host_pool_mib());
 +        }
 +    }
 +    g_slots_hint  = env_int("MOE_EXPERT_CACHE_SLOTS",   0);
@@ -50492,6 +50533,56 @@ index 000000000..69d41cabd
 +#endif
 +}
 +
++// TODO #87 (1): decide whether the pool fills from the page cache or with O_DIRECT.  Called ONCE, from the
++// first pool build, so every pool and every bounce path in the process agrees.
++//
++// The trade is RAM, not I/O policy: a buffered fill leaves the set in the page cache, which then serves the
++// bytes no tier holds (the FRAC remainder, and the whole set for a prefill ubatch's staging) at RAM speed --
++// measured on the 2x R9700 field config, `--host-experts pool` went 287 -> 733 t/s prefill and 23.1 -> 53.7
++// t/s decode for the switch alone.  But the page cache and the pinned pool compete for the same RAM, so on a
++// box where the set does not fit in what the pool leaves, buffering thrashes and O_DIRECT wins (the 30 GiB
++// gfx1100 box: DIO=1 is the stable disk-tier shape, FRAC 90 + buffered swapped).
++//
++// The test is the one `MOE_HOST_POOL_RAM_PCT` already takes: if the planned pinned pool PLUS the whole host
++// expert set fits in MemAvailable, the page cache can hold the set and buffering is free; otherwise every
++// buffered miss evicts the cache it needs.  The middle band (the set fits, the set + a full pool does not)
++// is unmeasured -- a forced `MOE_HOST_POOL_DIO=0|1` is the escape hatch there.
++// Caller holds `g_mutex`.
++static void pool_decide_dio_locked(int64_t host_total, int64_t planned_pool) {
++    if (g_pool_dio_decided) {
++        return;
++    }
++    g_pool_dio_decided = true;
++    if (g_pool_dio_req >= 0) {
++        g_pool_dio = g_pool_dio_req != 0;
++        GGML_LOG_INFO("%s: host pool fill mode: %s (forced by MOE_HOST_POOL_DIO=%d)\n", __func__,
++                      g_pool_dio ? "O_DIRECT (page cache bypassed)" : "buffered (page cache as L3)",
++                      g_pool_dio_req);
++        return;
++    }
++    const int64_t avail = pool_available_ram_bytes();
++    if (avail <= 0 || host_total <= 0) {
++        g_pool_dio = true;   // no MemAvailable to reason with: keep the memory-tight default (r112)
++        GGML_LOG_INFO("%s: host pool fill mode: O_DIRECT (no MemAvailable, keeping the memory-tight default;"
++                      " MOE_HOST_POOL_DIO=0 forces buffered)\n", __func__);
++        return;
++    }
++    int64_t pool = planned_pool;
++    if (g_pool_ram_pct > 0) {
++        const int64_t cap = (int64_t) ((double) avail * (double) g_pool_ram_pct / 100.0);
++        if (pool <= 0 || pool > cap) {
++            pool = cap;
++        }
++    }
++    g_pool_dio = pool + host_total > avail;
++    GGML_LOG_INFO("%s: host pool fill mode: %s -- MemAvailable %.1f MiB, planned pool %.1f MiB, host expert"
++                  " set %.1f MiB (%s; MOE_HOST_POOL_DIO=0|1 forces either arm)\n", __func__,
++                  g_pool_dio ? "O_DIRECT (page cache bypassed)" : "buffered (page cache as L3)",
++                  (double) avail / (1024.0 * 1024.0), (double) pool / (1024.0 * 1024.0),
++                  (double) host_total / (1024.0 * 1024.0),
++                  g_pool_dio ? "the set does not fit beside the pool" : "the set fits beside the pool");
++}
++
 +// Cap `slots` so the WHOLE pinned pool stays under `MOE_HOST_POOL_RAM_PCT` % of MemAvailable.  Caller holds
 +// `g_mutex` (it updates the process-wide running total).
 +static int pool_clamp_slots_to_ram(int slots, size_t host_bytes, const table_t & t) {
@@ -50583,6 +50674,9 @@ index 000000000..69d41cabd
 +        }
 +    }
 +    int slots = 0;
++    // TODO #87 (1): decide the fill mode before ANY read happens, from the process-wide numbers.
++    pool_decide_dio_locked(host_total, g_pool_total_bytes > 0 ? g_pool_total_bytes
++                                                             : (host_total * g_pool_frac) / 100);
 +    if (g_pool_total_bytes > 0) {
 +        // explicit process-wide budget, split proportionally to each tensor's share of the host set
 +        if (host_total > 0) {
@@ -51570,6 +51664,9 @@ index 000000000..69d41cabd
 +    if ((int) t.heat.size() != t.n_experts || t.n_experts <= 0) {
 +        return;
 +    }
++    // TODO #88: rank by the DECODE band (with the combined vector as the fallback), because the arena serves
++    // the decode/verify band.  `heat`'s own total is what decides whether there is a prior at all.
++    const std::vector<uint32_t> & rank_by = heat_rank_vec(t);
 +    uint64_t total = 0;
 +    for (uint32_t v : t.heat) {
 +        total += v;
@@ -51582,8 +51679,8 @@ index 000000000..69d41cabd
 +        rank[(size_t) e] = e;
 +    }
 +    std::sort(rank.begin(), rank.end(), [&](int32_t a, int32_t b) {
-+        if (t.heat[(size_t) a] != t.heat[(size_t) b]) {
-+            return t.heat[(size_t) a] > t.heat[(size_t) b];
++        if (rank_by[(size_t) a] != rank_by[(size_t) b]) {
++            return rank_by[(size_t) a] > rank_by[(size_t) b];
 +        }
 +        return a < b;
 +    });
@@ -51621,8 +51718,9 @@ index 000000000..69d41cabd
 +    if (seeded > 0) {
 +        t.fills     += seeded;
 +        t.slot_dirty = true;
-+        GGML_LOG_INFO("%s: layer=%d role=%s heat-seeded %d/%d slots from the persisted map (%d experts)\n",
-+                      __func__, t.layer, t.role.c_str(), seeded, t.slots, t.n_experts);
++        GGML_LOG_INFO("%s: layer=%d role=%s heat-seeded %d/%d slots from the persisted map (%d experts, "
++                      "ranked by the %s band)\n", __func__, t.layer, t.role.c_str(), seeded, t.slots,
++                      t.n_experts, &rank_by == &t.heat_dec ? "DECODE" : "combined");
 +    }
 +}
 +
@@ -51658,6 +51756,34 @@ index 000000000..69d41cabd
 +    return s > m ? (uint32_t) (s - m) : 0u;
 +}
 +
++// TODO #88: the same delta for the decode-band counter.
++static uint32_t heat_dec_delta(const table_t & t, size_t e) {
++    if (e >= t.heat_dec.size()) {
++        return 0u;
++    }
++    const uint32_t s = t.heat_dec[e];
++    const uint32_t m = e < t.heat_dec_merged.size() ? t.heat_dec_merged[e] : 0u;
++    return s > m ? (uint32_t) (s - m) : 0u;
++}
++
++// TODO #88: which counter a HEAT-DRIVEN ARENA DECISION ranks by.  The arena serves the decode/verify band
++// (`moe_cache_update_host` returns early for a prefill ubatch, and the whole-table staging bypasses the
++// arena), so the decode band is what its residents are worth.  `heat` remains the combined prior for the
++// host pool's layout (`pool_rank_experts_locked`), which stages whole tables *for a prefill*: there the
++// prefill mass is the right signal, not noise.  A map with no decode mass (a v1 sidecar, a run that never
++// decoded, or `MOE_EXPERT_HEATMAP=0` in between) falls back to the combined vector, i.e. to the pre-#88
++// behaviour.
++static const std::vector<uint32_t> & heat_rank_vec(const table_t & t) {
++    if ((int) t.heat_dec.size() == t.n_experts && t.n_experts > 0) {
++        for (uint32_t v : t.heat_dec) {
++            if (v != 0) {
++                return t.heat_dec;
++            }
++        }
++    }
++    return t.heat;
++}
++
 +// Fold every table's NEW heat (host) into `g_heat_loaded` so a save writes the merged prior.  The
 +// DELTA, not the running total: `heat` already contains the prior it was seeded from, so adding it
 +// whole would double the prior at every flush (see `heat_merged`).
@@ -51668,15 +51794,24 @@ index 000000000..69d41cabd
 +            continue;
 +        }
 +        const auto key = std::make_tuple(t.layer, t.role, t.n_experts, t.host_bytes);
-+        std::vector<uint32_t> & dst = g_heat_loaded[key];
-+        if (dst.size() != (size_t) t.n_experts) {
-+            dst.assign((size_t) t.n_experts, 0);
++        heat_prior_t & prior = g_heat_loaded[key];
++        if (prior.all.size() != (size_t) t.n_experts) {
++            prior.all.assign((size_t) t.n_experts, 0);
++        }
++        if ((int) t.heat_dec.size() != t.n_experts && t.n_experts > 0) {
++            t.heat_dec.assign((size_t) t.n_experts, 0);
++        }
++        if (prior.dec.size() != (size_t) t.n_experts) {
++            prior.dec.assign((size_t) t.n_experts, 0);
 +        }
 +        for (int e = 0; e < t.n_experts; e++) {
-+            const uint64_t s = (uint64_t) dst[(size_t) e] + (uint64_t) heat_delta(t, (size_t) e);
-+            dst[(size_t) e] = s > 0xffffffffull ? 0xffffffffu : (uint32_t) s;
++            const uint64_t sa = (uint64_t) prior.all[(size_t) e] + (uint64_t) heat_delta(t, (size_t) e);
++            prior.all[(size_t) e] = sa > 0xffffffffull ? 0xffffffffu : (uint32_t) sa;
++            const uint64_t sd = (uint64_t) prior.dec[(size_t) e] + (uint64_t) heat_dec_delta(t, (size_t) e);
++            prior.dec[(size_t) e] = sd > 0xffffffffull ? 0xffffffffu : (uint32_t) sd;
 +        }
-+        t.heat_merged = t.heat;
++        t.heat_merged     = t.heat;
++        t.heat_dec_merged = t.heat_dec;
 +    }
 +}
 +
@@ -51703,11 +51838,14 @@ index 000000000..69d41cabd
 +    heat_merge_into_loaded_locked();
 +    std::vector<uint8_t> buf;
 +    mht1_hdr_t hdr{};
-+    memcpy(hdr.magic, "MHT1", 4);
-+    hdr.version   = 1;
++    // TODO #88: format v2 carries BOTH bands per table (`all` then `dec`).  A v1 reader ignores a v2 file
++    // (it checks the version), which costs that build its prior but never corrupts anything; a v2 reader
++    // accepts v1 and uses `all` for both, i.e. exactly the pre-r115 behaviour.
++    memcpy(hdr.magic, "MHT2", 4);
++    hdr.version   = 2;
 +    hdr.n_tables  = 0;
 +    for (const auto & kv : g_heat_loaded) {
-+        if (kv.second.size() == (size_t) std::get<2>(kv.first)) {
++        if (kv.second.all.size() == (size_t) std::get<2>(kv.first)) {
 +            hdr.n_tables++;
 +        }
 +    }
@@ -51717,7 +51855,7 @@ index 000000000..69d41cabd
 +        const std::string role     = std::get<1>(kv.first);
 +        const int         n_exp    = std::get<2>(kv.first);
 +        const uint64_t    host_b   = (uint64_t) std::get<3>(kv.first);
-+        if (kv.second.size() != (size_t) n_exp) {
++        if (kv.second.all.size() != (size_t) n_exp) {
 +            continue;
 +        }
 +        mht1_rec_t rec{};
@@ -51726,8 +51864,14 @@ index 000000000..69d41cabd
 +        rec.n_experts  = (uint32_t) n_exp;
 +        rec.host_bytes = host_b;
 +        buf.insert(buf.end(), (const uint8_t *) &rec, (const uint8_t *) &rec + sizeof(rec));
-+        buf.insert(buf.end(), (const uint8_t *) kv.second.data(),
-+                   (const uint8_t *) kv.second.data() + (size_t) n_exp * sizeof(uint32_t));
++        buf.insert(buf.end(), (const uint8_t *) kv.second.all.data(),
++                   (const uint8_t *) kv.second.all.data() + (size_t) n_exp * sizeof(uint32_t));
++        if (kv.second.dec.size() == (size_t) n_exp) {
++            buf.insert(buf.end(), (const uint8_t *) kv.second.dec.data(),
++                       (const uint8_t *) kv.second.dec.data() + (size_t) n_exp * sizeof(uint32_t));
++        } else {
++            buf.insert(buf.end(), (size_t) n_exp * sizeof(uint32_t), 0);
++        }
 +    }
 +    const std::string tmp = g_heat_path + ".tmp." + std::to_string((long) getpid());
 +    bool ok = true;
@@ -51772,7 +51916,16 @@ index 000000000..69d41cabd
 +        return;   // cold start
 +    }
 +    mht1_hdr_t hdr{};
-+    if (fread(&hdr, sizeof(hdr), 1, f) != 1 || memcmp(hdr.magic, "MHT1", 4) != 0 || hdr.version != 1) {
++    if (fread(&hdr, sizeof(hdr), 1, f) != 1) {
++        fclose(f);
++        return;
++    }
++    // TODO #88: v1 carries one counter per expert (both bands mixed); v2 carries `all` then `dec`.  A v1
++    // map is READ and used for both, which is the pre-r115 behaviour -- never an error, never a fallback to
++    // "no prior".
++    const bool v2 = memcmp(hdr.magic, "MHT2", 4) == 0 && hdr.version == 2;
++    const bool v1 = memcmp(hdr.magic, "MHT1", 4) == 0 && hdr.version == 1;
++    if (!v1 && !v2) {
 +        fclose(f);
 +        GGML_LOG_INFO("%s: ignoring an unreadable/stale heat map at %s\n", __func__, path.c_str());
 +        return;
@@ -51782,8 +51935,15 @@ index 000000000..69d41cabd
 +        mht1_rec_t rec{};
 +        if (fread(&rec, sizeof(rec), 1, f) != 1) { break; }
 +        if (rec.n_experts == 0 || rec.n_experts > (1u << 22)) { break; }
-+        std::vector<uint32_t> h((size_t) rec.n_experts, 0);
-+        if (fread(h.data(), sizeof(uint32_t), rec.n_experts, f) != rec.n_experts) { break; }
++        heat_prior_t h;
++        h.all.assign((size_t) rec.n_experts, 0);
++        if (fread(h.all.data(), sizeof(uint32_t), rec.n_experts, f) != rec.n_experts) { break; }
++        if (v2) {
++            h.dec.assign((size_t) rec.n_experts, 0);
++            if (fread(h.dec.data(), sizeof(uint32_t), rec.n_experts, f) != rec.n_experts) { break; }
++        } else {
++            h.dec = h.all;
++        }
 +        const std::string role(rec.role, strnlen(rec.role, sizeof(rec.role)));
 +        g_heat_loaded[std::make_tuple((int) rec.layer, role, (int) rec.n_experts, (size_t) rec.host_bytes)] =
 +            std::move(h);
@@ -51801,7 +51961,7 @@ index 000000000..69d41cabd
 +        size_t total = 0, sat = 0, nonzero = 0;
 +        uint32_t lo = 0xffffffffu, hi = 0;
 +        for (const auto & kv : g_heat_loaded) {
-+            for (uint32_t v : kv.second) {
++            for (uint32_t v : kv.second.all) {
 +                total++;
 +                if (v == 0xffffffffu) { sat++; }
 +                if (v > 0) {
@@ -51983,8 +52143,14 @@ index 000000000..69d41cabd
 +    if (it == g_heat_loaded.end()) {
 +        return;
 +    }
-+    t.heat = it->second;
-+    t.heat_merged = t.heat;   // the prior is already IN g_heat_loaded: only this session's routing is new
++    if ((int) it->second.all.size() != t.n_experts) {
++        return;
++    }
++    t.heat             = it->second.all;
++    t.heat_dec         = (int) it->second.dec.size() == t.n_experts ? it->second.dec
++                                                                   : it->second.all;
++    t.heat_merged      = t.heat;       // the prior is already IN g_heat_loaded: only this session's routing is new
++    t.heat_dec_merged  = t.heat_dec;
 +}
 +
 +// Coalesced copy of `n` bytes with `nt` threads.  dst/src are assumed 8-byte aligned for the bulk
@@ -52019,11 +52185,19 @@ index 000000000..69d41cabd
 +// alias (a 2-D strided copy for an axis-0 slice).  The destination is the ordinary staged table in
 +// expert order, so every consumer is unchanged.  `prs` is the immutable prefill residency snapshot
 +// (expert -> slot, -1 = not usable); it is never the decode policy and never mutated by decode.
++//
++// TODO #87 (2): a POOL-BACKED master has a third source.  `pool_dev` is the pinned pool's device alias and
++// a snapshot value `<= -2` means "pool slot `(-v - 2)`", so the experts that live in either VRAM tier are
++// filled by ONE launch instead of one `cudaMemcpyAsync` per expert (measured: 733 -> 836-class prefill on the
++// field config, where the pinned-master path already staged with a single launch).  `skip_miss` makes a `-1`
++// entry a no-op: the host has already copied those experts (they are in neither tier, so they come from the
++// mapping/the disk) into the destination before this kernel runs on the same stream.
 +static __global__ void moe_cache_stage_kernel(char * __restrict__ dst, const char * __restrict__ arena,
 +                                              const char * __restrict__ host_dev, const int32_t * __restrict__ prs,
 +                                              int slots, int64_t expert_bytes, int64_t host_bytes,
 +                                              int64_t src_off, int64_t rows, int64_t row_bytes, int64_t host_pitch,
-+                                              int do2d) {
++                                              int do2d, const char * __restrict__ pool_dev,
++                                              int64_t pool_stride, int skip_miss) {
 +    const int e   = blockIdx.x;
 +    const int tid = threadIdx.x;
 +    const int nt  = blockDim.x;
@@ -52034,6 +52208,14 @@ index 000000000..69d41cabd
 +        return;
 +    }
 +    const char * src = host_dev + (int64_t) e * host_bytes + src_off;
++    if (s <= -2) {
++        if (pool_dev == nullptr) {
++            return;   // can't happen: the encoding is only produced when a pool exists
++        }
++        src = pool_dev + (int64_t) (-s - 2) * pool_stride + src_off;
++    } else if (skip_miss) {
++        return;       // a pool-backed staging already served this expert from the mapping/the disk
++    }
 +    if (!do2d) {
 +        moe_cache_policy_copy(d, src, (size_t) expert_bytes, tid, nt);
 +        return;
@@ -52138,31 +52320,60 @@ index 000000000..69d41cabd
 +// wip/moe-heatmap-persistence (R2): fold this table's device heat mirror into `heat`, then free the
 +// mirror.  Called wherever a table is torn down or migrated devices.  Caller holds `g_mutex`.
 +static void free_heat_dev_locked(table_t & t) {
-+    if (t.heat_dev == nullptr) {
++    if (t.heat_dev == nullptr && t.heat_dec_dev == nullptr) {
 +        t.heat_dev_cap = 0;
 +        return;
 +    }
 +    if (t.device >= 0 && t.heat_dev_cap > 0) {
 +        device_guard dg(t.device);
-+        std::vector<uint32_t> tmp((size_t) t.heat_dev_cap, 0);
-+        if (cudaMemcpy(tmp.data(), t.heat_dev, (size_t) t.heat_dev_cap * sizeof(uint32_t),
-+                       cudaMemcpyDeviceToHost) == cudaSuccess) {
-+            if ((int) t.heat.size() != t.n_experts) {
-+                t.heat.assign((size_t) t.n_experts, 0);
++        if (t.heat_dev != nullptr) {
++            std::vector<uint32_t> tmp((size_t) t.heat_dev_cap, 0);
++            if (cudaMemcpy(tmp.data(), t.heat_dev, (size_t) t.heat_dev_cap * sizeof(uint32_t),
++                           cudaMemcpyDeviceToHost) == cudaSuccess) {
++                if ((int) t.heat.size() != t.n_experts) {
++                    t.heat.assign((size_t) t.n_experts, 0);
++                }
++                const int cap = t.n_experts < (int) t.heat_dev_cap ? t.n_experts : (int) t.heat_dev_cap;
++                for (int e = 0; e < cap; e++) {
++                    const uint64_t s = (uint64_t) t.heat[(size_t) e] + (uint64_t) tmp[(size_t) e];
++                    t.heat[(size_t) e] = s > 0xffffffffull ? 0xffffffffu : (uint32_t) s;
++                }
++            } else {
++                (void) cudaGetLastError();
 +            }
-+            const int cap = t.n_experts < (int) t.heat_dev_cap ? t.n_experts : (int) t.heat_dev_cap;
-+            for (int e = 0; e < cap; e++) {
-+                const uint64_t s = (uint64_t) t.heat[(size_t) e] + (uint64_t) tmp[(size_t) e];
-+                t.heat[(size_t) e] = s > 0xffffffffull ? 0xffffffffu : (uint32_t) s;
-+            }
-+        } else {
-+            (void) cudaGetLastError();
 +        }
++        // TODO #88: the identity DECODE tally has its own mirror; fold it into the decode counter before
++        // the mirror goes away, exactly as the combined one is folded above.
++        if (t.heat_dec_dev != nullptr) {
++            std::vector<uint32_t> tmp((size_t) t.heat_dev_cap, 0);
++            if (cudaMemcpy(tmp.data(), t.heat_dec_dev, (size_t) t.heat_dev_cap * sizeof(uint32_t),
++                           cudaMemcpyDeviceToHost) == cudaSuccess) {
++                if ((int) t.heat_dec.size() != t.n_experts) {
++                    t.heat_dec.assign((size_t) t.n_experts, 0);
++                }
++                const int cap = t.n_experts < (int) t.heat_dev_cap ? t.n_experts : (int) t.heat_dev_cap;
++                for (int e = 0; e < cap; e++) {
++                    const uint64_t s = (uint64_t) t.heat_dec[(size_t) e] + (uint64_t) tmp[(size_t) e];
++                    t.heat_dec[(size_t) e] = s > 0xffffffffull ? 0xffffffffu : (uint32_t) s;
++                }
++            } else {
++                (void) cudaGetLastError();
++            }
++        }
++    }
++    if (t.heat_dev != nullptr) {
++        device_guard dg(t.device >= 0 ? t.device : 0);
 +        (void) cudaFree(t.heat_dev);
 +        (void) cudaGetLastError();   // fail soft
 +    }
-+    t.heat_dev     = nullptr;
-+    t.heat_dev_cap = 0;
++    if (t.heat_dec_dev != nullptr) {
++        device_guard dg(t.device >= 0 ? t.device : 0);
++        (void) cudaFree(t.heat_dec_dev);
++        (void) cudaGetLastError();   // fail soft
++    }
++    t.heat_dev      = nullptr;
++    t.heat_dec_dev  = nullptr;
++    t.heat_dev_cap  = 0;
 +}
 +
 +// Ensure a table's device heat mirror exists.  Caller holds `g_mutex`.  MUST run outside a captured
@@ -52199,6 +52410,21 @@ index 000000000..69d41cabd
 +    }
 +    t.heat_dev     = (uint32_t *) p;
 +    t.heat_dev_cap = t.n_experts;
++    // TODO #88: the identity DECODE tally gets a mirror of its own, so the fold can tell the bands apart
++    // (the same table also receives PREFILL tallies in `heat_dev`).  Same raw cudaMalloc, same fail-soft:
++    // without it the decode band simply keeps tallying into the combined vector.
++    void * q = nullptr;
++    if (cudaMalloc(&q, (size_t) t.n_experts * sizeof(uint32_t)) == cudaSuccess) {
++        if (cudaMemset(q, 0, (size_t) t.n_experts * sizeof(uint32_t)) == cudaSuccess) {
++            t.heat_dec_dev = (uint32_t *) q;
++        } else {
++            (void) cudaGetLastError();
++            (void) cudaFree(q);
++            (void) cudaGetLastError();
++        }
++    } else {
++        (void) cudaGetLastError();
++    }
 +    return true;
 +}
 +
@@ -52718,7 +52944,8 @@ index 000000000..69d41cabd
 +            for (const auto & kv : by_layer) {
 +                uint64_t s = 0;
 +                for (int i : kv.second) {
-+                    for (uint32_t v : g_tables[i].heat) {
++                    // TODO #88: the DECODE band (the arena's own band), same source as the seed ranking.
++                    for (uint32_t v : heat_rank_vec(g_tables[i])) {
 +                        s += v;
 +                    }
 +                }
@@ -53976,7 +54203,8 @@ index 000000000..69d41cabd
 +// counts stay on the same scale as the exact tallies).
 +static __global__ void moe_cache_heat_kernel(const int32_t * __restrict__ ids, int64_t nb0, int64_t nb1,
 +                                             int n_used, int n_tok, int n_experts, uint32_t w,
-+                                             uint32_t * __restrict__ heat) {
++                                             uint32_t * __restrict__ heat,
++                                             uint32_t * __restrict__ heat_dec, int is_decode) {
 +    const int64_t n = (int64_t) n_used * (int64_t) n_tok;
 +    for (int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x; i < n;
 +         i += (int64_t) gridDim.x * blockDim.x) {
@@ -53986,6 +54214,10 @@ index 000000000..69d41cabd
 +                                              (size_t) j * (size_t) nb0);
 +        if (e >= 0 && e < n_experts) {
 +            atomicAdd(&heat[e], w);
++            // TODO #88: the DECODE band's own counter (the arena seed ranks by it).
++            if (is_decode != 0 && heat_dec != nullptr) {
++                atomicAdd(&heat_dec[e], w);
++            }
 +        }
 +    }
 +}
@@ -54046,6 +54278,8 @@ index 000000000..69d41cabd
 +    if (!prefill_band && !t.identity) {
 +        return;   // the eager host path tallies this table exactly; never double count it
 +    }
++    // TODO #88: PREFILL touches the combined prior only; a DECODE touch goes to the decode counter as well
++    // (it is the one the ARENA seed ranks by).
 +    g_heat_dirty = true;
 +    // The mirror is pre-allocated at sizing (alloc_table_locked).  Never allocate here on the decode
 +    // band: that path is a captured graph, where a `cudaMalloc` aborts the capture.
@@ -54063,7 +54297,8 @@ index 000000000..69d41cabd
 +    }
 +    moe_cache_heat_kernel<<<(unsigned) nb, threads, 0, (cudaStream_t) stream>>>(
 +        (const int32_t *) ids->data, (int64_t) ids->nb[0], (int64_t) ids->nb[1],
-+        n_used, n_tok, t.n_experts, weight, t.heat_dev);
++        n_used, n_tok, t.n_experts, weight, t.heat_dev,
++        prefill_band ? nullptr : t.heat_dec_dev, prefill_band ? 0 : 1);
 +}
 +
 +// Fold every table's device heat mirror into the host `heat` vector and zero the mirror.  Run at a
@@ -54088,6 +54323,23 @@ index 000000000..69d41cabd
 +        for (int e = 0; e < cap; e++) {
 +            const uint64_t s = (uint64_t) t.heat[(size_t) e] + (uint64_t) tmp[(size_t) e];
 +            t.heat[(size_t) e] = s > 0xffffffffull ? 0xffffffffu : (uint32_t) s;
++        }
++        // TODO #88: the identity DECODE tally has its own mirror, folded into the decode counter.
++        if (t.heat_dec_dev != nullptr) {
++            std::vector<uint32_t> tdec((size_t) t.heat_dev_cap, 0);
++            if (cudaMemcpy(tdec.data(), t.heat_dec_dev, (size_t) t.heat_dev_cap * sizeof(uint32_t),
++                           cudaMemcpyDeviceToHost) == cudaSuccess) {
++                (void) cudaMemset(t.heat_dec_dev, 0, (size_t) t.heat_dev_cap * sizeof(uint32_t));
++                if ((int) t.heat_dec.size() != t.n_experts) {
++                    t.heat_dec.assign((size_t) t.n_experts, 0);
++                }
++                for (int e = 0; e < cap; e++) {
++                    const uint64_t s = (uint64_t) t.heat_dec[(size_t) e] + (uint64_t) tdec[(size_t) e];
++                    t.heat_dec[(size_t) e] = s > 0xffffffffull ? 0xffffffffu : (uint32_t) s;
++                }
++            } else {
++                (void) cudaGetLastError();
++            }
 +        }
 +    }
 +}
@@ -54450,11 +54702,18 @@ index 000000000..69d41cabd
 +
 +        device_guard dg(device);
 +
-+        // wip/host-expert-master-drop (TODO #55): a POOL-BACKED (pageable) master cannot be read by the
-+        // staging kernel, so the same destination is filled expert by expert: resident experts are a D2D
-+        // copy out of the arena, the rest come from the per-table pinned bounce (the pool is deliberately
-+        // bypassed -- see the comment in the loop).  Only the source of the bytes changes; the destination
-+        // layout is exactly the one the kernel produces, so every consumer is unchanged.
++        // wip/host-expert-master-drop (TODO #55): a POOL-BACKED (pageable) master is not readable by the
++        // staging kernel, so the bytes come from the two pinned tiers instead: the arena (a D2D copy) and
++        // the pinned pool (a device-readable mapped alias).  Only the source of the bytes changes; the
++        // destination layout is exactly the one the kernel produces, so every consumer is unchanged.
++        //
++        // TODO #87 (2): the tiers are filled by ONE kernel launch.  This loop used to issue one
++        // `cudaMemcpyAsync` per expert for them (~200 per table per ubatch on the field config), and that
++        // per-copy issue cost was the rest of the prefill gap to the pinned-master path, which has always
++        // staged with a single launch.  The per-expert map encodes both tiers (`>= 0` arena slot,
++        // `<= -2` pool slot `-v-2`, `-1` in neither), so the kernel needs no extra bookkeeping; the experts
++        // in NEITHER tier are still copied here, one at a time, because each of those is a distinct read
++        // from the mapping/disk.
 +        if (!t.host_pinned) {
 +            host_pool_t * pool = table_pool_locked(t);
 +            cudaError_t   err  = cudaSuccess;
@@ -54464,13 +54723,74 @@ index 000000000..69d41cabd
 +                g_stage_arena_bytes += resident * (int64_t) t.expert_bytes;
 +                g_stage_host_bytes  += ((int64_t) t.n_experts - resident) * (int64_t) t.expert_bytes;
 +            }
++            // The two-tier snapshot is rebuilt on EVERY pool-backed staging call: unlike the arena map it
++            // also depends on the pool's slot map, which the demand path (and the bulk layout) changes
++            // without bumping `g_write_seq`.  It is `n_experts` int32s (~1 KiB) against a whole-table
++            // staging copy, so the freshness is free.
++            if (t.prs_dev == nullptr || t.prs_n != t.n_experts) {
++                if (t.prs_dev != nullptr) {
++                    (void) cudaFree(t.prs_dev);
++                    t.prs_dev = nullptr;
++                }
++                if (cudaMalloc((void **) &t.prs_dev, (size_t) t.n_experts * sizeof(int32_t)) != cudaSuccess) {
++                    (void) cudaGetLastError();
++                    t.prs_dev = nullptr;
++                    return false;
++                }
++                t.prs_n   = t.n_experts;
++                t.prs_gen = 0;
++            }
++            if ((int) t.prs_host.size() != t.n_experts) {
++                t.prs_host.assign((size_t) t.n_experts, -1);
++            } else {
++                std::fill(t.prs_host.begin(), t.prs_host.end(), -1);
++            }
++            for (const auto & kv : t.expert_slot) {
++                const int e = kv.first;
++                if (e >= 0 && e < t.n_experts) {
++                    t.prs_host[(size_t) e] = kv.second;
++                }
++            }
++            const bool pool_dev_ok = pool != nullptr && pool->base_dev != nullptr &&
++                                     t.src_off + t.expert_bytes <= t.host_bytes && !pool->failed;
++            // Kill switch (`MOE_HOST_POOL_STAGE_BATCH=0`) for the single-launch arm: the pre-r114 behaviour
++            // is one `cudaMemcpyAsync` per tier-resident expert, which is what the A/B is measured against.
++            const bool batch = g_pool_stage_batch && pool_dev_ok;
++            if (batch) {
++                for (const auto & kv : pool->expert_slot) {
++                    const int e = kv.first;
++                    const int s = kv.second;
++                    if (e < 0 || e >= t.n_experts || s < 0 || s >= pool->slots ||
++                        (size_t) s >= pool->slot_state.size() || pool->slot_state[(size_t) s] != 1) {
++                        continue;
++                    }
++                    if (t.prs_host[(size_t) e] < 0) {
++                        t.prs_host[(size_t) e] = -(s + 2);
++                    }
++                }
++            }
++            if (cudaMemcpyAsync(t.prs_dev, t.prs_host.data(), (size_t) t.n_experts * sizeof(int32_t),
++                                cudaMemcpyHostToDevice, (cudaStream_t) copy_stream) != cudaSuccess) {
++                (void) cudaGetLastError();
++                return false;
++            }
++            t.prs_gen   = g_write_seq.load();
++            t.prs_arena = (void *) t.arena;
++            t.prs_slots = t.slots;
++            g_prs_rebuilds++;
 +            for (int e = 0; e < t.n_experts && err == cudaSuccess; e++) {
++                if (batch && t.prs_host[(size_t) e] != -1) {
++                    continue;   // served by the kernel (arena or pool)
++                }
 +                char * d = (char *) dst + (size_t) e * t.expert_bytes;
-+                const auto hit = t.expert_slot.find(e);
-+                if (hit != t.expert_slot.end() && hit->second >= 0 && hit->second < t.slots) {
-+                    err = cudaMemcpyAsync(d, (const char *) t.arena + (size_t) hit->second * t.expert_bytes,
-+                                          t.expert_bytes, cudaMemcpyDeviceToDevice, (cudaStream_t) copy_stream);
-+                    continue;
++                if (!batch) {
++                    const auto hit = t.expert_slot.find(e);
++                    if (hit != t.expert_slot.end() && hit->second >= 0 && hit->second < t.slots) {
++                        err = cudaMemcpyAsync(d, (const char *) t.arena + (size_t) hit->second * t.expert_bytes,
++                                              t.expert_bytes, cudaMemcpyDeviceToDevice,
++                                              (cudaStream_t) copy_stream);
++                        continue;
++                    }
 +                }
 +                // TODO #87: the PREFILL band reads a pool slot but never evicts one, and a miss fills an
 +                // EMPTY slot (so the next ubatch finds it there).  Only an expert in neither tier is read
@@ -54499,6 +54819,19 @@ index 000000000..69d41cabd
 +            if (err != cudaSuccess) {
 +                (void) cudaGetLastError();
 +                return false;
++            }
++            // The copies above are on `copy_stream`, so this kernel is ordered after every miss fill.
++            if (batch && t.n_experts > 0) {
++                moe_cache_stage_kernel<<<t.n_experts, 256, 0, (cudaStream_t) copy_stream>>>(
++                    (char *) dst, (const char *) t.arena, (const char *) t.host_dev, t.prs_dev, t.slots,
++                    (int64_t) t.expert_bytes, (int64_t) t.host_bytes, (int64_t) t.src_off,
++                    rows, row_bytes, (int64_t) t.host_pitch, do2d ? 1 : 0,
++                    pool_dev_ok && pool != nullptr ? (const char *) pool->base_dev : nullptr,
++                    pool != nullptr ? (int64_t) pool->host_bytes : 0, /*skip_miss*/ 1);
++                if (cudaGetLastError() != cudaSuccess) {
++                    (void) cudaGetLastError();
++                    return false;
++                }
 +            }
 +            return true;
 +        }
@@ -54568,7 +54901,7 @@ index 000000000..69d41cabd
 +        moe_cache_stage_kernel<<<t.n_experts, 256, 0, (cudaStream_t) copy_stream>>>(
 +            (char *) dst, (const char *) t.arena, (const char *) t.host_dev, t.prs_dev, t.slots,
 +            (int64_t) t.expert_bytes, (int64_t) t.host_bytes, (int64_t) t.src_off,
-+            rows, row_bytes, (int64_t) t.host_pitch, do2d ? 1 : 0);
++            rows, row_bytes, (int64_t) t.host_pitch, do2d ? 1 : 0, nullptr, 0, /*skip_miss*/ 0);
 +        return cudaGetLastError() == cudaSuccess;
 +    }
 +    g_stage_decline_nomatch++;
@@ -54875,10 +55208,21 @@ index 000000000..69d41cabd
 +        if ((int) t.heat.size() != t.n_experts) {
 +            t.heat.assign((size_t) t.n_experts, 0);
 +        }
++        // TODO #88: this IS the decode band (the prefill returns above), so it feeds the decode counter
++        // too -- the one the arena seed ranks by.
++        if ((int) t.heat_dec.size() != t.n_experts) {
++            t.heat_dec.assign((size_t) t.n_experts, 0);
++        }
 +        for (int32_t e : used) {
-+            if (e >= 0 && e < t.n_experts && t.heat[(size_t) e] != 0xffffffffu) {
-+                t.heat[(size_t) e]++;
-+                g_heat_dirty = true;
++            if (e >= 0 && e < t.n_experts) {
++                if (t.heat[(size_t) e] != 0xffffffffu) {
++                    t.heat[(size_t) e]++;
++                    g_heat_dirty = true;
++                }
++                if (t.heat_dec[(size_t) e] != 0xffffffffu) {
++                    t.heat_dec[(size_t) e]++;
++                    g_heat_dirty = true;
++                }
 +            }
 +        }
 +    }

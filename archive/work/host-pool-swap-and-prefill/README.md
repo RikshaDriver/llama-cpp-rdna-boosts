@@ -1,18 +1,21 @@
 # `host-pool-swap-and-prefill` — the pool as the arena's swap partner, and why prefill must not touch it
 
-**Status: OPEN (seeded 2026-10-22, r111) — re-scoped 2026-10-22 (r113).  The release-relevant halves are
-DONE: §2 (the SIGSEGV) is moot (the background worker was removed), §3 (prefill must not evict) is satisfied
-by construction (the demand path never evicts at all), and the "one shared LRU" question in §1 was answered
-by a measurement rather than a design: the pool's CONTENT dominates the disk traffic (15x) and every
+**Status: CLOSED 2026-10-22 (r114) — all three §7 follow-ups are resolved.**  The release-relevant halves
+closed in r113: §2 (the SIGSEGV) is moot (the background worker was removed), §3 (prefill must not evict) holds
+by construction (the demand path never evicts at all), and the "one shared LRU" question in §1 was answered by
+a measurement rather than a design — the pool's CONTENT dominates the disk traffic (15x) and every
 eviction/hand-over policy is within 0-246 MiB of the others, so r113 lays the pool out in bulk from the
-persisted heat prior and leaves it alone.  Record: `../../archive/work/host-pool-layout/`.  What is still
-OPEN is the remainder in §7: `DIO` auto-selection, a pool-aware prefill staging kernel, and long-session
-adaptation.**
+persisted heat prior and leaves it alone (record: [`../host-pool-layout/`](../host-pool-layout/)).  §7 then
+closed in r114: (1) `DIO` is **auto** (decided per box from `MemAvailable`), (2) the pool-backed prefill
+staging fills both tiers with **one kernel launch** (+34 % prefill), (3) long-session adaptation was
+**measured and declined** (the oracle-layout ceiling is ~6 % of the L3 traffic per topic shift, and every
+churning policy costs several times that).  See [`RESOLUTION.md`](RESOLUTION.md) and `WORKLOG.md`
+261022.009.**
 
 Seeded from the gfx1100 (fingon, 7900 XTX 24 GB / **30 GiB RAM** / ROCm 10.1.0) session that validated
 `--host-experts pool` on a model **larger than RAM** (Qwen3.6-35B-A3B **Q8_0**, 37.8 GB file, host expert
 set 32 640 MiB at `-ncmoe 40`).  That session established the feature (see
-`../../archive/work/host-expert-master-drop/`) and produced the questions below.
+`../host-expert-master-drop/`) and produced the questions below.
 
 ## 1. The design question: is an arena eviction a swap with the pool?
 
@@ -178,12 +181,12 @@ MOE_HOST_POOL_FRAC=75 llama-cli -m $M -ngl 99 -ncmoe 36 --host-experts pool \
 
 ## 6. Pointers
 
-* The feature and its purity gates: `../../archive/work/host-expert-master-drop/` (`README.md`,
+* The feature and its purity gates: `../host-expert-master-drop/` (`README.md`,
   `RESOLUTION.md`); `WORKLOG.md` 261022.006 (r111).
-* Pool knobs: `../../ENVIRONMENT.md` §1.2.1.  The fill path: `moe_cache_fill_slot_locked` /
+* Pool knobs: `../../../ENVIRONMENT.md` §1.2.1.  The fill path: `moe_cache_fill_slot_locked` /
   `expert_host_src` / `expert_src_done` / `access_locked` in `ggml/src/ggml-cuda/moe-expert-cache.cu`.
 * Admission quality (the sibling question, different axis): `../moe-admission-quality/` (TODO #86).
-* Issue #139 (why a smaller pinned footprint matters at all): `../../archive/work/issue-139-ar-spin-timeout/`.
+* Issue #139 (why a smaller pinned footprint matters at all): `../issue-139-ar-spin-timeout/`.
 
 ## 7. What is still open after r113 (2026-10-22)
 

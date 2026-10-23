@@ -45,7 +45,7 @@ static bound (global top-f, same slot count): 96.14 % of the routed mass
   slot-allocation one.  `window` (pass-start pre-admission of the whole routed set) does not capture it
   because a real prefetcher does not know the pass's routing in advance; the honest next question is a
   *history*-driven prefetcher, which is a new campaign, not a P2 variant -- filed as
-  **TODO #86**, [`wip/moe-admission-quality/`](../../../wip/moe-admission-quality/README.md).
+  **TODO #86**, [`archive/work/moe-admission-quality/`](../../moe-admission-quality/README.md) (closed in r114).
 * **Caveat on `--mass-band all`:** the prefill band routes ~`n_tok` experts per layer in a single pass,
   so it dominates any mass ranking; it also loses one table per pass to the staged path (offline
   `src0->buffer == nullptr`), which distorts a per-layer ranking.  The tool defaults to the decode band

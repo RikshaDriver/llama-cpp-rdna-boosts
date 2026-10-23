@@ -219,6 +219,23 @@ stub alive to serve them, and treat a `wip/` path in an old record as a historic
   (`MOE_EXPERT_HEATMAP_DECODE_SAMPLE`, default 64, 0 off) and weighted by the period.  The heat mirror
   is pre-allocated at sizing: the decode band is a captured graph and a `cudaMalloc` there aborts the
   capture (`operation failed due to a previous error during capture`).
+- **The disk tier is bounded by this box's SSD at ~1.8 GB/s, so the cache's currency is `L3 MiB/token`, not
+  `h`.**  1 MiB/token of reads that neither VRAM nor the pinned pool holds is ~0.55 ms/token of unavoidable
+  stall (~1800 t/s of pure read budget at a 1 MiB/token traffic level, ~100 t/s at 18 MiB/token).  Every
+  tiering claim in the records is therefore quoted in MiB/token beside `h` (`scripts/moe-trace-replay.py`
+  reports both): r114's band-split heat prior took the long-prompt arm from 48.1 to 17.6 MiB/token, i.e.
+  **~26 ms → ~9.5 ms of disk per token**, which is what a decode on that config (46 t/s = 22 ms/token) can
+  and cannot afford.  Use the same conversion before proposing a prefetch/eviction policy: the pool-layout
+  and topic-shift candidates were all declined because their whole prize was 0.3-0.5 MiB/token.
+- **The heat prior is band-split (r114, block 12): the ARENA seed ranks by the decode-only counter, the host
+  pool's layout by the combined one.**  `apply_heat_seed_locked` + the heat-ordered layer placement call
+  `heat_rank_vec()` (the `heat_dec` vector, falling back to `heat` when a map has no decode mass); the pool's
+  `pool_rank_experts_locked` / `pool_rerank_from_heat_locked` keep `heat`, because the pool stages whole
+  tables *for a prefill* and there the prefill mass is signal, not noise.  Sidecar format **MHT2** (both
+  arrays per table); a **MHT1** file loads with `dec = all` (pre-r114 behaviour), never an error.  Do not
+  "simplify" this back to one counter: on a long prompt the prefill outweighs the decode 41x and the arena
+  ends up seeded from a nearly uniform distribution (+1.2 to +2.5 pts of `h` and ~3x less disk traffic on
+  the measured arms).  `ENVIRONMENT.md` (heat-map note), `patches/README.md` (block 12).
 - **Thread sizing is not optional.** `/usr/local/bin/pin_gpu_irqs.sh` puts the GPU IRQs on the top
   `NUM_GPUS` cores (13,14,15 with 3 GPUs); the default `-t` puts the worker pool there and starves the
   GPU (Q4_K_M `-ncmoe 99` tg1024: `-t 16` 19.6 vs `-t 8` 38.9). Size `-t` (or `--cpu-mask` with `-t`
@@ -252,8 +269,10 @@ stub alive to serve them, and treat a `wip/` path in an old record as a historic
   every GPU read of a pooled host expert goes through pinned memory.**  The tensors live in the model
   mapping (host buft `ROCm_HostMap`, device-carrying, r111, **block 12**) and are never read by a device
   copy or a kernel; the L2 tier is the bounded pool (`MOE_HOST_POOL_MIB`/`FRAC`, default **80 %** of the
-  host expert bytes since r112, *per tensor*, process-wide) and the L3 tier is the GGUF, read with
-  **O_DIRECT** (`MOE_HOST_POOL_DIO` default **1** since r112) so the page cache is not a second copy.  The
+  host expert bytes since r112, *per tensor*, process-wide, capped at **`MOE_HOST_POOL_RAM_PCT` = 85 %** of
+  `MemAvailable` since r114) and the L3 tier is the GGUF, read with O_DIRECT **only when the page cache
+  cannot hold the set** (`MOE_HOST_POOL_DIO` is **`auto`** since r114: decided once at the first pool build
+  from `MemAvailable` vs `planned pool + host expert set`; `0`/`1` still force either arm).  The
   mode is only for the case where the set does **not** fit in RAM: when it fits, `pinned` is faster on every
   axis.  80 % is the measured knee (90 % was slower and swapped).  The invariants:
   (1) a pooled table must never be served by a **pageable** `cudaMemcpyAsync` -- ROCm stages a pageable
@@ -265,8 +284,8 @@ stub alive to serve them, and treat a `wip/` path in an old record as a historic
   `moe_cache_upload_pageable`; (4) the mode needs a **mapped** load (`--load-mode none/dio` keeps the
   pinned master and warns).  Measured: `RssShmem` 18.6 GiB -> 6.8 GiB on 35B-A3B `-ncmoe 40`, and a
   12 GiB or 8 GiB cgroup that OOM-kills the `pinned` arm runs this one at ~93 t/s.  Cost: one extra host
-  memcpy per staged byte on the host-expert prefill path (decode parity; prefill -1..-6 %, single-ubatch
-  `pp512` on 2-GPU tensor -34 %), and `MOE_HOST_POOL_DIO=1` (nothing cached) is ~6x slower.  Record:
+  memcpy per staged byte on the host-expert prefill path (single-ubatch `pp512` on 2-GPU tensor -34 %),
+  which is why the staging copy itself must stay batched (`MOE_HOST_POOL_STAGE_BATCH`, r114).  Record:
   `archive/work/host-expert-master-drop/`.
 - **The host pool is a LAYOUT, not a churning cache (r113, block 12; TODO #87's disk-I/O half).**  The
   pool's **content** is what decides the disk traffic — measured offline on a real trace: pool ranked by
@@ -279,14 +298,24 @@ stub alive to serve them, and treat a `wip/` path in an old record as a historic
   `pool_fill_empty_locked`; the background worker and `MOE_HOST_POOL_BGFETCH` are gone) — do not reintroduce
   one: the literal swap cost **2x decode** for 0 MiB of L3; (3) the whole-table prefill staging reads the
   pool and fills empty slots (it used to bypass it and re-read the whole host set per ubatch); (4)
-  `MOE_HOST_POOL_RAM_PCT` (default **80**) caps the whole pinned pool at that % of `MemAvailable` — `FRAC`
+  `MOE_HOST_POOL_RAM_PCT` (default **85** since r114) caps the whole pinned pool at that % of `MemAvailable` — `FRAC`
   is a percentage of the model's host expert set, not of RAM, and an oversized pool fails each table's
   `cudaHostAlloc` *silently*.  Field config (70K prompt, 128-token decode, 2x R9700): pool hit 0.80 -> 0.92,
   evictions 4600 -> 0, prefill 39 -> 287 t/s (`DIO=1`) / 581 -> 733 t/s (`DIO=0`), decode 6.3 -> 23.1 /
   30.6 -> 53.7, against `pinned` 836 / 57.5.  The tool that decided it (`scripts/moe-trace-replay.py
   --pool-frac`, two-tier, reads a real `.moe-heatmap`): use it before proposing another pool policy.  Record:
-  `archive/work/host-pool-layout/`; still open: `DIO` auto-selection, a pool-aware staging kernel,
-  long-session adaptation (`wip/host-pool-swap-and-prefill/` §7).
+  `archive/work/host-pool-layout/`.
+- **POOL mode: the fill mode is automatic and the staging is one launch (r114, block 12, TODO #87).**
+  `MOE_HOST_POOL_DIO` = `auto` (decided once at the first pool build from `MemAvailable` vs `planned pool +
+  host expert set`: buffered when the set fits beside the pool, O_DIRECT when it does not; `0`/`1` force),
+  and `moe_cache_stage_kernel` fills **both** tiers (arena slot / pool slot) for a pool-backed table, so a
+  prefill staging is one launch instead of one `cudaMemcpyAsync` per expert.  Measured (2x R9700, 35B-A3B
+  Q4_K_M `-ncmoe 40 --host-experts pool`, 70K prompt, `-ub 2048`): prefill **2103 t/s** vs **1564** with
+  `MOE_HOST_POOL_STAGE_BATCH=0` (+34 %), decode 46.4; forced `DIO=1` 2088/**22.7**; `pinned` 2099/49.3.
+  Text is byte-identical across every arm and `MOE_HOST_POOL_VERIFY=1` is clean.  **Long-session adaptation
+  was measured and declined**: the oracle-layout ceiling is 7.45 MiB/token of L3 vs 8.05 for a
+  previous-topic layout (~6 % per topic shift), and every churning policy costs several times that.
+  Record: `archive/work/host-pool-swap-and-prefill/`.
 - **MTP gates must be long and reasoning-pinned.** Use `-n 3000` (`-n 2000` floor), `--reasoning on`
   for R and `--reasoning off` for P/C/K. Short runs are a correctness smoke test only. Rule 0 in
   `benchmarks/mtp-adaptive-methodology.md`.

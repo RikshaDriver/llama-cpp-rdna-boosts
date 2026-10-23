@@ -4,6 +4,18 @@
 the measured-and-dropped candidates and the gates.  Everything here is reference; nothing in this directory
 is part of the delivery.
 
+> **CORRECTION (r114, 2026-10-22) — the `sidecar` rows in §1 below are the ORACLE, not the sidecar.**
+> `scripts/moe-trace-replay.py`'s `load_heat_sidecar` did not normalise the role name (a `.moe-heatmap` stores
+> the GGUF tensor name `blk.0.ffn_gate_exps.weight`, a trace stores `ffn_gate_exps.weight` + the layer), so
+> every lookup missed and `--pool-init sidecar-complement` silently fell back to the whole-trace `heat`
+> prior.  The "persisted heat prior" row (237 MiB) and the "oracle prior" row (237 MiB) are therefore the
+> same measurement twice, and **this record's "the achievable prior matches the oracle" conclusion is not
+> established**.  The r113 *code* is unaffected (the C++ reads the real heat vector); only the offline
+> number was wrong.  Fixed in r114 (`archive/work/moe-admission-quality/RESOLUTION.md` §5) — re-run the model
+> with the corrected tool before quoting a pool-prior number.  The rest of the record (the pool's content
+> beats every eviction/hand-over policy by 0-246 MiB) rests on the `pool-*` policy rows, which never used the
+> sidecar, and stands.
+
 ## 0. TL;DR
 
 `--host-experts pool` was making the disk do work it did not need to.  Two independent causes, one fix each:
@@ -32,7 +44,7 @@ Pool hit rate **0.7999 → 0.9183** (10.5K prompt; 0.9044 at 70K), pool eviction
 `scripts/moe-trace-replay.py` grew a **two-tier** model for this campaign (`--pool-frac`, policies
 `pool-none`, `pool-retire`, `pool-shipped`, `pool-swap-slot`, `pool-swap-weakest`, and
 `--pool-init sidecar:<file>` which reads a REAL `MHT1` `.moe-heatmap` prior — the `#86` step-0 instrument,
-shared with `wip/moe-admission-quality/`).  Model: arena (L1) + pinned host pool (L2) + mapping/disk (L3),
+shared with `../moe-admission-quality/` (closed in r114)).  Model: arena (L1) + pinned host pool (L2) + mapping/disk (L3),
 one slot map per table, counting L3 reads and every host↔device copy a policy pays for.
 
 Trace: `MOE_EXPERT_TRACE` on the field config, 10.5K-token prompt, 512-token decode (11 523 D records,

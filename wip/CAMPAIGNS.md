@@ -22,10 +22,24 @@ is the signature of a stub, not of a campaign.
 |---|---|---|
 | [`three-gpu-performance/`](three-gpu-performance/README.md) | **3-GPU decode is slower than 2-GPU** — MTP and plain, partial and **fully resident** (the former `archive/work/mtp-3gpu-decode/`, closed at r55, **revived** 2026-10-16).  Fresh measurement: 2-GPU 84.4 vs 3-GPU 56.9 t/s at 100 % residency, while 3-GPU prefill is fastest.  Step 0 is to re-run the r55 harness on the current release (r104); note the available gfx1100 box (`ssh fingon`) is **single-RDNA3** — its second rocm-smi entry is an iGPU — so it cannot cover this campaign's 3-GPU arm, then the full {2,3} x {plain,MTP} x {partial,fully-resident} x {tensor,layer} grid, then profile the all-reduce / identity path / tensor-split gather.  **2026-10-22 (r109) dense 27B datapoint:** the deficit is *width*-dependent — 3 GPU wins +9.2 % at mean verify len 2.9 and loses −14.4 % at mean len 29.2 with bit-identical acceptance, −8.5 % at depth 16384 ([`FINDING-2026-10-22-dense-27b-and-mirrored-draft-subset.md`](three-gpu-performance/FINDING-2026-10-22-dense-27b-and-mirrored-draft-subset.md)); the same runs found the first 3-GPU regression owned by a delivery feature (block-13 mirrored draft subset, −2.2 %) | **OPEN (revived 2026-10-16)** — dense width/depth data in, MoE field-config grid still to run |
 | [`fp8-support/`](fp8-support/README.md) | native FP8 E4M3 for RDNA4 | PARKED (2026-09-26) — rebased and building, fully RDNA4-gated, but **gate 2 failed** (the fp8 4B is 0.69x Q8_0 where cllm had 1.16x, because the delivery's MMB/GEMM work made Q8_0 +32 % and the fp8 WMMA path did not follow).  Resume actions are in `PLAN.md`.  Not closed — paused behind the delivery work |
-| [`host-pool-swap-and-prefill/`](host-pool-swap-and-prefill/README.md) | the host pool as the arena's **swap partner**, and `MOE_HOST_POOL_FRAC`'s optimum (it is **inverted** between "the host set fits in RAM" and "it does not").  **Re-scoped by r113** (record: `archive/work/host-pool-layout/`): the swap/prefill/SIGSEGV halves are done — the pool is now laid out in bulk from the persisted heat prior and the demand path never evicts, so the background worker (and its defect) is gone.  What remains is §7: `DIO` auto-selection, a pool-aware prefill staging kernel, long-session adaptation | **OPEN (seeded 2026-10-22, r111; re-scoped 2026-10-22, r113)** |
-| [`moe-admission-quality/`](moe-admission-quality/README.md) | **why the shipped expert-cache policy is ~11 pts of hit rate below an oracle static placement** at the same slot count (0.8505 vs 0.8765; bound 96.1 % vs 91.4 % covered mass), and how much of it is recoverable — per-layer slot quota is ruled out (+0.0025, closed unshipped in r110), so the candidates are foreknowledge (the persisted heat seed) vs eviction churn vs an admission/prefetch policy | **OPEN (seeded 2026-10-22, r110)** — offline first: step 0 adds a `--seed heat\|trace` model to `scripts/moe-trace-replay.py` and publishes the `{seed} x {churn}` decomposition; only a candidate that wins there goes to C++ |
 | [`moe-cpu-overlap/`](moe-cpu-overlap/README.md) | genuine CPU/GPU overlap for the expert misses (the Strata shape) | OPEN / scoping (TODO #36) — **work in flight**: the note refutes the earlier "cannot be done" verdict for the interleaved shape and sets out the pipeline to try |
 | [`ngram-mod-host-experts/`](ngram-mod-host-experts/README.md) | `ngram-mod` + `draft-mtp-adaptive` roughly halves decode when the MoE experts are host-resident (`-ncmoe`/`-cmoe`, expert cache active); plain `draft-mtp-adaptive` restores the expected rate | **OPEN (seeded 2026-10-14), scoping + measurement** |
+
+**Closed (r114, 2026-10-22, block 12).**  Two campaigns left `wip/` for `archive/work/` with a
+`RESOLUTION.md` each, and both TODO items are retired.  **`#87`** (`host-pool-swap-and-prefill/`):
+`MOE_HOST_POOL_DIO` is now **`auto`** (per-box, from `MemAvailable` at the first pool build), the
+pool-backed prefill staging fills both tiers with **one kernel launch** (+34 % prefill; the pool now stages
+within 0.3 % of `pinned`), and long-session adaptation was **measured and declined** (the oracle-layout
+ceiling is ~6 % of the L3 traffic per topic shift; every churning policy costs several times that).
+**`#86`** (`moe-admission-quality/`): the 11-pt gap to a static oracle is **foreknowledge**, not admission
+and not churn — with the heat map on (the default) the delivered policy measures `h=0.8718` against the
+oracle's 0.8765 at the same slot count, and the campaign's number came from an `MOE_EXPERT_HEATMAP=0` run.
+The remaining lever was the persisted prior's *band mixing*, which the same release then implemented (`#88`,
+band-split heat prior: `h` 0.8747 -> 0.8862 and 0.8698 -> 0.8948 on two prompts, and 48.1 -> 17.6 MiB of L3
+per token on the long one, i.e. ~26 -> ~9.5 ms/token at the SSD's 1.8 GB/s).  The same
+release fixes two replayer defects that had produced published numbers (the sidecar role-name mismatch, which made
+`--pool-init sidecar` silently measure the oracle, and `--mass-band` not reaching the pass loop).  See
+`WORKLOG.md` 261022.009.
 
 **Closed (r113, 2026-10-22, block 12).**  The ad-hoc reproduction campaign for TODO #65/#87's disk-I/O half
 (`wip/iq4nl-field-pool-decode/`, a harness + logs, never listed in the table above) left `wip/` for
@@ -34,7 +48,7 @@ is the signature of a stub, not of a campaign.
 arena victim into it, the prefill staging reads the pool, and `MOE_HOST_POOL_RAM_PCT` (80 % of
 `MemAvailable`) bounds the pinned total.  `MOE_HOST_POOL_BGFETCH` (and the background worker whose SIGSEGV
 was #87(a)) was removed.  **TODO #65 is retired** (it did not reproduce) and **#87 is re-scoped** to the three
-follow-ups in `wip/host-pool-swap-and-prefill/` §7.  See `WORKLOG.md` 261022.008.
+follow-ups in `archive/work/host-pool-swap-and-prefill/` §7, which r114 then closed.  See `WORKLOG.md` 261022.008.
 
 **Promoted (r111, 2026-10-22, block 12).**  `host-expert-master-drop/` left `wip/` for
 `archive/work/host-expert-master-drop/` (with a `RESOLUTION.md`) and **TODO #55 is closed**.  `--host-experts

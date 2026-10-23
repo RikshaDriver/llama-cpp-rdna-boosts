@@ -1,4 +1,4 @@
-From 74d6310a03bfe062fe4d3d2282150a94ff4d1c29 Mon Sep 17 00:00:00 2001
+From c4bac6eb2e9283d05a34b26ab6bf38de17d60c1e Mon Sep 17 00:00:00 2001
 From: Stew Forster <ci@rdna-boosts.invalid>
 Date: Thu, 22 Oct 2026 05:53:08 -0500
 Subject: [PATCH 13/13] rdna-boosts: block 13: MTP draft vocabulary subset

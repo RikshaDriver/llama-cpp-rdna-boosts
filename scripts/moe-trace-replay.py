@@ -164,13 +164,38 @@ def decay(st, period):
     st.last_decay = st.clock - (st.clock % period)
 
 
-def access(st, expert, period, admit, touch, allow_cold=True, protect=None):
+def access(st, expert, period, admit, touch, allow_cold=True, protect=None, no_evict=False):
     """Mirror of `access_locked`: F-LRU eviction + the fill-vs-cold admission rule.
 
     `protect` is the record's own expert set: an expert admitted earlier in the same token/pass must
     not be chosen as this miss's victim (the real hook passes exactly that list), which is what keeps
     one token's experts from evicting each other.
+
+    `no_evict` is the campaign's `churn=off` arm (TODO #86): a miss may take an EMPTY slot but never
+    displaces a resident, so the arena is a pure function of its seed plus the first-touch order.  No
+    real policy does this; it exists to separate the seed's value from what eviction adds on top.
     """
+    if no_evict:
+        st.clock += 1
+        decay(st, period)
+        if expert in st.expert_slot:
+            st.hits += 1
+            st.count[expert] += 1
+            st.last[expert] = st.clock
+            return True
+        st.misses += 1
+        st.ghost[expert] += 1
+        slot = next((s for s in range(st.slots) if st.slot_expert[s] < 0), -1)
+        if slot < 0:
+            if allow_cold:
+                st.cold += 1
+            return False
+        st.slot_expert[slot] = expert
+        st.expert_slot[expert] = slot
+        st.fills += 1
+        st.count[expert] += 1
+        st.last[expert] = st.clock
+        return True
     st.clock += 1
     decay(st, period)
     if expert in st.expert_slot:
@@ -282,8 +307,61 @@ def quota_slots(tables, arena_bytes, mass_by_layer, min_slots):
 # scoring
 # ---------------------------------------------------------------------------------------------
 
+def seed_prior(tables, passes, seed, sidecar=None, probe_passes=0, mass_band="decode"):
+    """The arena's load-time prior: {(layer, role): [count per expert]} (TODO #86 step 0).
+
+    `none`  no seed at all -- the model the campaign calibrated against an `MOE_EXPERT_HEATMAP=0` run.
+    `heat`  this trace's own routing on the scored mass band: an ORACLE prior, and exactly the ranking
+            `static` uses (so `heat` x `churn=off` must reproduce `static` bit for bit).
+    `probe` the trace's first `probe_passes` passes only -- a same-session proxy for a prior, which is
+            the most a run can know before it starts generating.
+    `sidecar:<path>` a REAL persisted `.moe-heatmap` from a previous run: the achievable prior and the one the
+            delivery actually seeds from (`apply_heat_seed_locked`).  An **MHT2** map is ranked by its
+            DECODE counter (the band the arena serves, TODO #88); an **MHT1** map has only the combined
+            one, which is then used for both -- the pre-r114 behaviour.
+    """
+    if seed == "none":
+        return None
+    if seed == "heat":
+        return {k: [t.freq.get(e, 0) for e in range(t.n_experts)] for k, t in tables.items()}
+    if seed == "probe":
+        want = None if mass_band == "all" else ("D" if mass_band == "decode" else "P")
+        counts = collections.defaultdict(collections.Counter)
+        for p in passes[:max(0, probe_passes)]:
+            for r in p:
+                if want is not None and r.band != want:
+                    continue
+                for e in r.ids:
+                    counts[(r.layer, r.role)][e] += 1
+        return {k: [counts[k].get(e, 0) for e in range(t.n_experts)] for k, t in tables.items()}
+    if seed == "sidecar":
+        return sidecar or {}
+    sys.exit("unknown --seed %r" % seed)
+
+
+def apply_seed(states, tables, prior):
+    """Mirror of `apply_heat_seed_locked`: rank by the prior (count desc, expert id asc) and place the top
+    `slots` in slot order with `count=0, ghost=0, last=0` -- a pre-filled expert has not been USED yet, so it
+    must be the first thing eviction gives up (seeding `count=1` made arbitrary residents outlive genuinely
+    hot ones and cost the real cache ~800 tokens of hit rate)."""
+    for key, t in tables.items():
+        st = states.get(key)
+        prior_t = prior.get(key) if prior else None
+        if st is None or st.slots <= 0 or not prior_t or len(prior_t) != t.n_experts:
+            continue
+        if not sum(prior_t):
+            continue
+        order = sorted(range(t.n_experts), key=lambda e: (-prior_t[e], e))[:st.slots]
+        for s, e in enumerate(order):
+            st.slot_expert[s] = e
+            st.expert_slot[e] = s
+            st.count[e] = 0
+            st.ghost[e] = 0
+            st.last[e] = 0
+
+
 def score(tables, passes, slots_by_layer=None, arena_bytes=0, period=32, admit="touch", touch=2,
-          policy="shipped"):
+          policy="shipped", prior=None, churn=True, score_band="all"):
     states = {}
     for key, t in tables.items():
         slots = slots_by_layer.get(t.layer, 0) if slots_by_layer is not None else t.slots
@@ -298,10 +376,15 @@ def score(tables, passes, slots_by_layer=None, arena_bytes=0, period=32, admit="
                 st.slot_expert[s] = e
                 st.expert_slot[e] = s
                 st.last[e] = 0
+    elif prior is not None:
+        apply_seed(states, tables, prior)
 
     tokens = 0
     for p in passes:
-        tokens += p[0].n_tok if p else 0
+        band_tokens = p[0].n_tok if p else 0
+        if score_band == "decode" and band_tokens > 64:
+            continue    # the prefill band stages whole tables; scoring it only blurs a policy comparison
+        tokens += band_tokens
         if policy == "window":
             # pass-start pre-admission of the whole distinct routed set, hottest-miss first
             want = collections.defaultdict(set)
@@ -342,7 +425,7 @@ def score(tables, passes, slots_by_layer=None, arena_bytes=0, period=32, admit="
                         else:
                             st.misses += 1
                     else:
-                        access(st, e, period, admit, touch, protect=protect)
+                        access(st, e, period, admit, touch, protect=protect, no_evict=not churn)
 
     hits = sum(s.hits for s in states.values())
     misses = sum(s.misses for s in states.values())
@@ -358,6 +441,7 @@ def score(tables, passes, slots_by_layer=None, arena_bytes=0, period=32, admit="
     covered = sum(t.freq[e] for k, t in tables.items() for e in states[k].expert_slot)
     return {
         "policy": policy,
+        "seeded": prior is not None, "churn": churn,
         "hits": hits, "misses": misses, "reaches": reaches,
         "h": (hits / reaches) if reaches else 0.0,
         "cold": cold, "fills": fills, "evictions": evict,
@@ -536,22 +620,35 @@ class TwoTier:
         self.a_last[e] = self.clock
 
 
-def load_heat_sidecar(path):
-    """Read a real `MHT1` `.moe-heatmap` sidecar: {(layer, role): [heat per expert]}.
+def load_heat_sidecar(path, band="decode"):
+    """Read a real `.moe-heatmap` sidecar: {(layer, role): [heat per expert]} for `band`.
 
     Same layout as `heat_map_save_locked` in `ggml/src/ggml-cuda/moe-expert-cache.cu`: a 32-byte header
-    ("MHT1", version, n_tables, reserved, model_bytes, n_tensors, reserved) then, per table, an 80-byte
-    record (int32 layer, char role[64], uint32 n_experts, uint64 host_bytes) followed by `n_experts`
-    uint32 counters.  A truncated/corrupt file is ignored (a cold start), never fatal.
+    (magic, version, n_tables, reserved, model_bytes, n_tensors, reserved) then, per table, an 80-byte
+    record (int32 layer, char role[64], uint32 n_experts, uint64 host_bytes) followed by the counters.
+    Two formats exist:
+
+      MHT1/v1  one counter per expert -- the prefill and decode bands MIXED, which ranks the arena by a
+               prefill-dominated distribution (TODO #88).  `band="decode"` has to fall back to it.
+      MHT2/v2  TWO arrays per table: `all` (prefill + decode, what the host pool's layout ranks by) then
+               `dec` (the decode band alone, what the arena seed ranks by).
+
+    `band="decode"` (the arena seed) prefers `dec` and falls back to the combined vector when a map has no
+    decode mass; `band="all"` is the pool's ranking.  A truncated/corrupt file is ignored (a cold start),
+    never fatal.
     """
     import struct
     out = {}
     with open(path, "rb") as f:
         hdr = f.read(32)
-        if len(hdr) != 32 or hdr[:4] != b"MHT1":
+        if len(hdr) != 32:
+            return out
+        magic = hdr[:4]
+        if magic not in (b"MHT1", b"MHT2"):
             return out
         _magic, version, n_tables, _r0, _mb, _nt, _r1 = struct.unpack("<4sIIIQII", hdr)
-        if version != 1:
+        v2 = magic == b"MHT2" and version == 2
+        if not v2 and not (magic == b"MHT1" and version == 1):
             return out
         for _ in range(n_tables):
             rec = f.read(80)
@@ -559,12 +656,30 @@ def load_heat_sidecar(path):
                 break
             layer, role, n_exp, _hb = struct.unpack("<i64sIQ", rec)
             role = role.split(b"\0", 1)[0].decode("utf-8", "replace")
+            # The sidecar stores the GGUF tensor name (`blk.0.ffn_gate_exps.weight`); the trace stores the
+            # cache's role (`ffn_gate_exps.weight`) and the layer number separately.  Normalise, or every
+            # lookup misses -- which used to be invisible: the pool init fell back to the ORACLE (the
+            # trace's own counts) and reported the oracle's L3 as if it were the sidecar's.
+            if role.startswith("blk."):
+                parts = role.split(".", 2)
+                if len(parts) == 3 and parts[1].isdigit():
+                    role = parts[2]
             if n_exp == 0 or n_exp > (1 << 22):
                 break
             data = f.read(4 * n_exp)
             if len(data) != 4 * n_exp:
                 break
-            out[(layer, role)] = list(struct.unpack("<%dI" % n_exp, data))
+            comb = list(struct.unpack("<%dI" % n_exp, data))
+            dec = None
+            if v2:
+                data = f.read(4 * n_exp)
+                if len(data) != 4 * n_exp:
+                    break
+                dec = list(struct.unpack("<%dI" % n_exp, data))
+            if band == "all":
+                out[(layer, role)] = comb
+            else:
+                out[(layer, role)] = dec if (dec is not None and sum(dec) > 0) else comb
     return out
 
 
@@ -585,17 +700,22 @@ def score_pool(tables, passes, slots_a, slots_p, policy, pool_init="heat", perio
             if st.slots_p <= 0:
                 continue
             prior = None
-            if base_init in ("heat", "sidecar"):
-                prior = (sidecar or {}).get(key) if base_init == "sidecar" else None
-                if base_init == "sidecar" and (prior is None or len(prior) != t.n_experts):
+            prior = None
+            if base_init == "sidecar":
+                prior = (sidecar or {}).get(key)
+                if prior is None or len(prior) != t.n_experts:
                     prior = None
-            if base_init == "heat" or (base_init == "sidecar" and prior is None):
+            if base_init == "heat":
+                # The ORACLE prior (this trace's own counts) -- an upper bound, never the achievable one.
                 order = [e for e, _ in sorted(t.freq.items(), key=lambda kv: -kv[1])]
                 order += [e for e in range(t.n_experts) if t.freq.get(e, 0) == 0]
             elif prior is not None:
                 # ranked by the persisted counter, ties by expert id (exactly `pool_prepopulate_locked`)
                 order = sorted(range(t.n_experts), key=lambda e: (-prior[e], e))
             else:
+                # No prior for this table: the delivery's next rank source is the prefill tally, then expert
+                # id (`pool_rank_experts_locked`).  NEVER fall back to `heat` here -- that silently turns a
+                # sidecar measurement into the oracle's number.
                 order = list(range(t.n_experts))
             if complement:
                 # The real system heat-seeds the ARENA at sizing, so the pool's job is the complement of
@@ -694,6 +814,18 @@ def main(argv=None):
                          "experts per layer in one pass, and a prefill pass can also lose one table to "
                          "the staged path, which would distort the ranking)")
     ap.add_argument("--policies", default="shipped,static,quota,window")
+    ap.add_argument("--seed", default="none",
+                    help="arena pre-fill at sizing, i.e. `apply_heat_seed_locked` (TODO #86 step 0): 'none' = the "
+                         "unseeded model the campaign calibrated against an MOE_EXPERT_HEATMAP=0 run; 'heat' = "
+                         "this trace's whole-trace routing (an ORACLE prior -- the ranking `static` uses); "
+                         "'probe:N' = the trace's first N passes (a same-session prior, the most a run can know "
+                         "before generating); 'sidecar:<path>' = a REAL persisted `.moe-heatmap` (MHT2 ranked by "
+                         "its DECODE counter, or MHT1 read as dec=all) from a previous run -- the achievable "
+                         "prior, and what the delivery seeds from")
+    ap.add_argument("--churn", choices=("on", "off"), default="on",
+                    help="'off' = a miss may take an EMPTY arena slot but never evicts a resident, so the arena "
+                         "is a pure function of its seed.  No shipped policy does this: it isolates the seed's "
+                         "value (foreknowledge) from what eviction adds (churn), which is the #86 decomposition")
     ap.add_argument("--pool-frac", type=int, default=None,
                     help="model `--host-experts pool`: a pinned L2 of this %% of each table's experts in "
                          "front of the arena.  Selects the two-tier policy family (pool-*) and is REQUIRED "
@@ -707,6 +839,11 @@ def main(argv=None):
                          "suffix first heat-seeds the ARENA with the same prior and then gives the pool "
                          "only the non-resident experts (the real layout, and the one that makes "
                          "arena U pool cover the set)")
+    ap.add_argument("--score-band", choices=("all", "decode"), default="all",
+                    help="which passes the arena policies are scored on (default 'all', which is what the "
+                         "runtime's logged h= counts and therefore what the shipped-vs-measured calibration "
+                         "needs; 'decode' drops the prefill band, whose whole-table staging is not what an "
+                         "arena policy is about -- use it for policy comparisons, never for calibration)")
     ap.add_argument("--decode-only", action="store_true", default=True,
                     help="score the decode band only (the prefill stages whole tables, so it does not "
                          "discriminate between pool policies); default on")
@@ -757,12 +894,52 @@ def main(argv=None):
 
     sidecar = None
     if args.pool_init.startswith("sidecar"):
-        sidecar = load_heat_sidecar(args.pool_init.split(":", 1)[1])
+        sc_path = args.pool_init.split(":", 1)[1]
+        sidecar = load_heat_sidecar(sc_path, band="all")
         args.pool_init = args.pool_init.split(":", 1)[0]
+        matched = sum(1 for k, t in tables.items()
+                      if len((sidecar or {}).get(k) or []) == t.n_experts)
         if not sidecar:
-            sys.exit("could not read a heat sidecar at %s" % args.pool_init.split(":", 1)[1])
+            sys.exit("could not read a heat sidecar at %s" % sc_path)
+        if matched == 0:
+            sys.exit("the heat sidecar at %s matches NONE of this trace's %d tables (wrong model?)"
+                     % (sc_path, len(tables)))
         if not args.quiet:
-            print("heat prior : %d tables" % len(sidecar))
+            print("heat prior : %d tables, %d/%d matched to the trace" % (len(sidecar), matched, len(tables)))
+
+    # The arena seed (TODO #86 step 0).  `sidecar:<path>` is the real persisted prior; it is parsed here so
+    # the same path can also drive --pool-init sidecar:<path>.
+    seed = args.seed
+    probe_passes = 0
+    seed_sidecar = None
+    if seed.startswith("sidecar"):
+        p = seed.split(":", 1)[1]
+        seed_sidecar = load_heat_sidecar(p, band="decode")
+        if not seed_sidecar:
+            sys.exit("could not read a heat sidecar at %s" % p)
+        seed = "sidecar"
+        matched = sum(1 for k, t in tables.items() if len(seed_sidecar.get(k) or []) == t.n_experts)
+        if matched == 0:
+            sys.exit("the heat sidecar at %s matches NONE of this trace's %d tables (wrong model?)"
+                     % (p, len(tables)))
+        if not args.quiet:
+            print("arena seed : sidecar %s (%d tables, %d/%d matched to the trace)"
+                  % (p, len(seed_sidecar), matched, len(tables)))
+    elif seed.startswith("probe"):
+        probe_passes = int(seed.split(":", 1)[1]) if ":" in seed else 16
+        seed = "probe"
+        if not args.quiet:
+            print("arena seed : probe = the trace's first %d passes" % probe_passes)
+    elif seed not in ("none", "heat"):
+        sys.exit("unknown --seed %r" % args.seed)
+    prior = seed_prior(tables, passes, seed, sidecar=seed_sidecar, probe_passes=probe_passes,
+                       mass_band=args.mass_band)
+    if not args.quiet and prior is not None:
+        mass = sum(sum(v) for v in prior.values())
+        in_slots = sum(sum(sorted(prior.get(k) or [], reverse=True)[:min(t.slots, t.n_experts)])
+                       for k, t in tables.items())
+        print("arena seed : %s, %.1f%% of the prior's mass lands in the seeded slots"
+              % (args.seed, 100.0 * in_slots / mass if mass else 0.0))
 
     results = {}
     pols = [p.strip() for p in args.policies.split(",") if p.strip()]
@@ -784,11 +961,13 @@ def main(argv=None):
                 mass_by_layer[t.layer] += sum(t.freq.values())
             sq = quota_slots(tables, arena_bytes, mass_by_layer, args.min_slots)
             r = score(tables, passes, slots_by_layer=sq, arena_bytes=arena_bytes,
-                      period=args.period, admit=args.admit, touch=args.touch, policy="quota")
+                      period=args.period, admit=args.admit, touch=args.touch, policy="quota",
+                      prior=prior, churn=args.churn == "on", score_band=args.score_band)
             r["layer_slots"] = {str(k): v for k, v in sorted(sq.items())}
         else:
             r = score(tables, passes, slots_by_layer=None, arena_bytes=arena_bytes,
-                      period=args.period, admit=args.admit, touch=args.touch, policy=pol)
+                      period=args.period, admit=args.admit, touch=args.touch, policy=pol,
+                      prior=prior, churn=args.churn == "on", score_band=args.score_band)
         results[pol] = r
 
     bound = static_bound(tables, arena_bytes)
@@ -817,6 +996,7 @@ def main(argv=None):
                      r["covered_mass_pct"]))
         print()
         print("static bound (global top-f, same slot count): %.2f%% of the routed mass" % bound)
+        print("arena seed: %s, churn: %s" % (args.seed, args.churn))
         sh = results.get("shipped")
         if sh and args.measured_h is not None:
             print("calibration: model 'shipped' h=%.4f vs the run's logged h=%.4f (error %+.4f)"
@@ -838,6 +1018,7 @@ def main(argv=None):
         with open(args.json, "w", encoding="utf-8") as f:
             json.dump({"trace": args.trace, "arena_mib": arena_bytes / 1048576.0,
                        "uniform_slots": uni, "passes": len(passes), "tokens": tokens,
+                       "seed": args.seed, "churn": args.churn,
                        "static_bound_pct": bound, "results": results}, f, indent=2)
         if not args.quiet:
             print("\nwrote %s" % args.json)

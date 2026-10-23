@@ -848,9 +848,8 @@ had no other home.
   `MOE_HOST_POOL_DIO` **0 → 1** (O_DIRECT fills, no page-cache copy competing for RAM).  Measured on the
   field case (gfx1100, 30 GiB RAM, 35B-A3B Q8_0, `-ncmoe 40` = 31.9 GiB of host experts, 2000-token runs):
   **78.3 t/s decode / 0.3 GiB swap / 26.0 GiB pinned**, versus 48.6 t/s for the r111 defaults and 2-3 t/s
-  (16 GiB of swap) for `pinned`.  80 % is the knee (90 % → 71.8 t/s *and* swapping).  A buffered-fill
-  defect at high FRAC on a memory-tight box is tracked as `TODO.md` #87 (DIO is the default, so it is
-  opt-in).
+  (16 GiB of swap) for `pinned`.  80 % is the knee (90 % → 71.8 t/s *and* swapping).  The fill mode is no
+  longer a fixed `DIO=1`: r114 decides it per box (see below).
 * **The host pool is a LAYOUT, not a churning cache (r113, TODO #87).**  Two changes to POOL mode, both in
   `moe-expert-cache.cu`:
   1. **Content: the pool holds the arena's complement, ranked by the persisted heat prior**
@@ -875,12 +874,58 @@ had no other home.
      The measured-and-dropped candidates (a bounce-staged swap with the incoming's slot: 2x decode cost for
      0 MiB of L3; write-over-the-weakest-candidate: 105 MiB for 1 copy/eviction) are recorded in
      `archive/work/host-pool-layout/`.
+* **POOL mode's fill mode is chosen per box, and its prefill staging is one launch (r114, TODO #87).**  The
+  two remaining `#87` items, both in `moe-expert-cache.cu`:
+  1. **`MOE_HOST_POOL_DIO` defaults to `auto`**: decided once, at the first pool build, from `MemAvailable`
+     vs the host expert set — buffered (page cache as L3) when `planned pool + the whole set` fits in
+     `MemAvailable`, O_DIRECT when it does not (`pool_decide_dio_locked`; `0`/`1` still force either arm).
+     This closes the r113 "inverted optimum": the right arm was a hand-set guess that had to be
+     re-measured on every box, and the shipped `DIO=1` cost a RAM-rich box 287/23.1 t/s (prefill/decode)
+     against 733/53.7 at `DIO=0`.
+  2. **The pool-backed prefill staging fills both tiers with ONE kernel launch.**  `moe_cache_stage_kernel`
+     gained a pool source: its per-expert snapshot now encodes `>= 0` = arena slot, `<= -2` = pool slot
+     `-v-2`, `-1` = in neither tier (the host already copied those, since each one is a separate read from
+     the mapping/disk), so the ~200 `cudaMemcpyAsync` per table per ubatch that used to stage the
+     tier-resident experts are one launch.  That per-copy issue cost was the rest of the gap to the
+     pinned-master path, which has always staged with a single launch.
+     Measured, 2x R9700 / 35B-A3B Q4_K_M `-ncmoe 40 --host-experts pool`, 70K prompt, `-ub 2048`: prefill
+     **2103 t/s** vs **1564** with `MOE_HOST_POOL_STAGE_BATCH=0` (+34 %), decode 46.4 vs 46.2, against
+     `pinned` 2099/49.3; `DIO=1` forced 2088/**22.7**.  Greedy text is byte-identical across every arm
+     (`pinned`/pool/`DIO` 0 and 1/staging on and off) and `MOE_HOST_POOL_VERIFY=1` is clean.
+  3. **Long-session adaptation: measured and deliberately not implemented.**  On a long, topic-shifting
+     trace (a 1024-token code decode followed by a different-topic decode, through the two-tier model) the
+     ceiling for *any* adaptation is the oracle layout: **7.45 MiB/token** of L3 reads vs **8.05** for a
+     layout built from the previous topic and **7.55** for one built from the new topic — i.e. ~6 % of the
+     L3 traffic per shift.  Every policy that adapts by churning costs several times that
+     (`pool-retire` 24.6 MiB/token; re-admitting the arena victim into the pool trades 32.8 GiB of copies
+     for 8.7 GiB of L3, the 2x-decode result r113 already dropped).  The one candidate left is a periodic
+     bulk re-rank of the existing layout, bounded by that ~6 %.  Record:
+     `archive/work/host-pool-swap-and-prefill/`.
+
+* **The heat prior is split by band, and the arena seed ranks by the decode one (r114, TODO #88).**  `t.heat`
+  is one counter fed by both bands (`moe_cache_heat_observe` for the prefill, `moe_cache_update_host` for
+  the decode) and its consumers want opposite things: the **arena** serves the decode/verify band, while the
+  **host pool** stages whole tables for a prefill.  A prefill ubatch routes ~`n_tok` experts, so on a
+  long prompt the prefill outweighed the decode **41x** and the arena's seed was ranked by a nearly uniform
+  distribution — the prior's top-112/table covered 80.3 % of the decode mass where its decode component
+  covers **95.3 %** (the oracle's).  So: a second counter (`heat_dec`, fed by the decode host tally and by
+  the *sampled identity* decode device tally through its own mirror `heat_dec_dev`), `heat_rank_vec()`
+  for every HEAT-DRIVEN ARENA decision (the seed and the heat-ordered layer placement), and the combined
+  vector kept for the pool's bulk layout and its `prefill_count` fallback.  The sidecar is **MHT2**
+  (`all` then `dec` per table); **MHT1 still loads** with `dec = all`, i.e. the pre-r114 behaviour, so no
+  map is invalidated.  Measured with the SAME map in both arms (35B-A3B Q4_K_M, 2 GPU tensor, `-ncmoe 40`,
+  `MOE_EXPERT_CACHE_MIB=4096` = 43.8 % residency): `h` 0.8747 → **0.8862** (284-token prompt) and
+  0.8698 → **0.8948** (5256-token prompt), evictions 18798 → 12402 on the long one; offline (decode band)
+  0.9047 → **0.9400** and 0.8347 → **0.9397**.  Greedy text byte-identical (the prior only chooses which
+  byte-identical copy is resident) and `gate-prefill-logits.sh` KLD 0.000000 / 100.000 %.
 
 **Knobs.**  `LLAMA_OUTPUT_PINNED`, `MTP_DRAFT_N_UBATCH`, `GGML_LF_DFLASH_DEV`, `GGML_LF_FAST_TOPK`,
 `LLAMA_STATE_GET_MERGE_GAP`, `LLAMA_STATE_ASYNC`, `LLAMA_STATE_ASYNC_MAX_MIB`,
 `GGML_CPU_MOE_OFFLOAD_THREADS`, `GGML_CUDA_SLAB_RING_MIB`, and (r111+, POOL mode) `MOE_HOST_POOL_MIB` /
 `MOE_HOST_POOL_FRAC` / `MOE_HOST_POOL_DIO` / `MOE_HOST_POOL_VERIFY` / `LLAMA_HOST_MASTER_PINNED`, plus
-(r113) `MOE_HOST_POOL_RAM_PCT`; `MOE_HOST_POOL_BGFETCH` was removed in r113.
+(r113) `MOE_HOST_POOL_RAM_PCT` (default **85** since r114) and (r114) `MOE_HOST_POOL_STAGE_BATCH`;
+the heat prior's MHT2 sidecar is not a knob (an `MHT1` file is read as `dec = all`).
+`MOE_HOST_POOL_BGFETCH` was removed in r113.
 
 **Notes.**  A backend-iface entry is a compile-time contract: adding one to the struct means adding it to
 **every** backend's initializer, or the build breaks for that backend.  Keep the difference documented when
@@ -895,15 +940,18 @@ a hook is CUDA-only (the non-CUDA entries stay NULL and the feature is simply in
   of it; `GREEDY-PURITY.md` is the rulebook.
 * **A block owns its code.**  A fix goes into the block whose surface it changes (even an early block); the
   per-block build gate (`scripts/gate-per-block-build.sh`) exists because appending fixes to the last block
-  once broke blocks 06-14 silently.  **Three exceptions are deliberate and documented**: r106's
+  once broke blocks 06-14 silently.  **Four exceptions are deliberate and documented**: r106's
   `GGML_OP_ALL_GATHER` collective and the slab narrow-2 fix both landed in **block 12** rather than blocks
   09/10, because `ggml-cuda-slab.cu` does not exist before block 10 and re-cutting blocks 09/10's history for
   an additive, last-block-applied change would have rebuilt the whole chain for no delivery difference
   (blocks 00-10 are byte-identical to r105; only what is now block 12 changed — it was block 11 at r106);
-  and **r111's host-expert master drop** landed in block 12 rather than 09 for the same reason plus one of
+  **r111's host-expert master drop** landed in block 12 rather than 09 for the same reason plus one of
   its own: its code depends on block 11's fused/`-sm tensor` slice geometry (`table_t::n_slices`), so a
   block-09 fold would have needed a second, pre-fused version of the pool path that block 11 then had to
-  re-amend.  Blocks 00-11 are byte-identical to r110.
+  re-amend (blocks 00-11 are byte-identical to r110); and **r114's band-split heat prior** (a block-09
+  surface) landed in block 12 because blocks 12's r111/r113 amendments already rewrote the same functions
+  (`apply_heat_seed_locked`, the pool ranking) — a block-09 edit would have to be replayed through that
+  rewrite, and the block-12 delta is where the reviewers' diff already is.
 * **The Meta backend's only cross-device primitive was a sum-reduce (`PARTIAL`)** until r106 added
   `GGML_OP_ALL_GATHER` (block 12): the result is `MIRRORED`, it is its own subgraph boundary, it is dropped
   from every per-device child graph, and the collective copies each device's slice into every device's copy

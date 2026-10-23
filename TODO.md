@@ -12,13 +12,11 @@ Details never live here: they live in `AGENTS.md`, `patches/README.md`, `MANIFES
 still means the same subject after that item is closed and removed from this file.  New items append.
 
 **Current state:** the **14-block V2.1 set** (block 00 + blocks 01-13) at fork point **`097cf33d9`**,
-release **`v14-097cf33d9-r113`**.  `release.json` is the source of truth for the tip/tree and hashes; the
+release **`v14-097cf33d9-r114`**.  `release.json` is the source of truth for the tip/tree and hashes; the
 top of `WORKLOG.md` is the newest record.
 
 | # | subject | kind | status |
 |---|---|---|---|
-| **87** | `--host-experts pool` follow-ups: what is left after r113 (DIO auto-selection, a pool-aware prefill staging kernel, long-session adaptation) | performance + tuning | open (`wip/host-pool-swap-and-prefill/` §7).  The disk-I/O half shipped in **r113** (record `archive/work/host-pool-layout/`): the pool is laid out as the arena's complement ranked by the persisted heat prior, the demand path never evicts, the prefill staging reads it, `MOE_HOST_POOL_RAM_PCT=80` bounds the pinned total, and the background worker whose SIGSEGV was (a) is gone.  On the field config that took the pool hit rate 0.80 -> 0.92 and 70K-prompt prefill from 39 -> 287 t/s (`DIO=1`) / 581 -> 733 t/s (`DIO=0`) |
-| **86** | MoE expert-cache *admission quality*: the shipped policy is ~11 pts of hit rate below a static oracle — decompose foreknowledge vs churn, then prefetch/admission candidates offline | performance | open, scoping (`wip/moe-admission-quality/`) |
 | **80** | Meta split-state cache: 30+ lookups per node per re-allocation | performance | parked (see the section at the end; the lever is the lookup COUNT, not the comparison) |
 | **79** | RDNA3_0 verify-band fusions: no multi-device measurement, and gfx1101/gfx1102 untested | platform validation | open (shipped default-on in r95; needs a 2+ card gfx1100 box).  `ssh fingon` is single-RDNA3 (`ROCm0`; its second rocm-smi entry is an iGPU and is not a HIP device), so it does **not** cover the multi-device arm — it validates single-GPU gfx1100 only.  gfx1101/gfx1102 still have no hardware |
 | **70** | harden the expert-cache re-arm / wide-aux growth against a starved arena | robustness | open |
@@ -29,63 +27,6 @@ top of `WORKLOG.md` is the newest record.
 Accepted limitations that are deliberately **not** fixed are listed at the end — do not re-report them.
 
 ---
-
-## 87. `--host-experts pool` follow-ups — what is left after r113 — PERFORMANCE + TUNING
-
-
-Opened 2026-10-22 (r111) from the fingon (gfx1100, 24 GB VRAM, **30 GiB RAM**) session that validated the
-master drop on a model **larger than RAM**.  All configurations produced byte-identical text, so this was
-never a purity item.  **r113 closed its disk-I/O half** (record `archive/work/host-pool-layout/`, `WORKLOG.md`
-261022.008); the three items below are what remains, in priority order, with the full detail in
-[`wip/host-pool-swap-and-prefill/`](wip/host-pool-swap-and-prefill/README.md) §7.
-
-**Closed by r113.**  (a) the `pool_bg_worker` SIGSEGV is moot — the worker was removed (the demand path no
-longer moves an arena victim into the pool).  (b) "prefill must not evict pool entries" now holds by
-construction: nothing on the demand path evicts, the prefill staging reads the pool, and a miss takes only an
-EMPTY slot.  The measured answer to (c) replaced the design question: the pool's **content** dominates the
-disk traffic (15x between expert-id order and the heat-ranked arena complement, on a real trace through the
-new two-tier model in `scripts/moe-trace-replay.py`), while every eviction/hand-over policy measured within
-0-246 MiB of the others — so the pool is laid out in bulk and left alone, and the literal "swap with the
-entry being pulled from the pool" measured **2x slower decode** for no benefit.
-
-**(1) `MOE_HOST_POOL_DIO` is still a hand-set default — the "inverted optimum" is unfixed.**  On the field
-config (`-ncmoe 48`, 70K prompt, 128-token decode, 2x R9700) `DIO=0` measures 733 t/s prefill / 53.7 t/s
-decode against `pinned` 836 / 57.5, while the shipped `DIO=1` measures 287 / 23.1; on the 30 GiB box the
-opposite holds (page cache thrashes).  Fix: choose at the first pool build from `MemAvailable` vs the host
-expert set — the same measurement `MOE_HOST_POOL_RAM_PCT` already takes — with a kill switch.
-
-**(2) The pool-backed prefill issues one `cudaMemcpyAsync` per expert.**  The pinned-master path stages a
-whole table with ONE `moe_cache_stage_kernel` launch.  This is the rest of the gap to `pinned` (733 vs 836
-t/s at `DIO=0`) and needs a per-expert slot map upload (the `prs` pattern) plus a "no slot" sentinel falling
-back to the bounce.
-
-**(3) Long-session adaptation.**  Between the two bulk layouts the pool is static, so a single session that
-changes topic keeps its pre-prompt layout.  Do not add an eviction policy for this before re-running the
-two-tier model on a *long, topic-shifting* trace: on the short trace every policy was within noise.
-
-Related: #86 (admission quality) is the same tiering question on the *arena policy* axis.
-
-## 86. MoE expert-cache admission quality — the ~11 pt gap to a static oracle — PERFORMANCE (scoping)
-
-
-Opened 2026-10-22 (r110), from the P1 instrument that closed `#61`.  On a real 35B-A3B trace (2 GPU
-`-sm tensor -ncmoe 40`, `MOE_EXPERT_CACHE_MIB=4096` = 43.8 % residency, 296-token prompt, 128 decode
-tokens, `MOE_EXPERT_HEATMAP=0`) the delivered policy models `h` **0.8505** (0.8248 logged) while an oracle
-*static* placement of the **same slot count** reaches **0.8765**, and the global-top-f bound is 96.14 % of
-the routed mass against the shipped set's 91.42 %.  A per-layer slot **quota** does not explain it (+0.0025,
-closed unshipped — see `archive/work/moe-cache-coverage/RESOLUTION.md`), so the gap is either *foreknowledge*
-(the oracle ranks by the whole trace; the delivery carries only a persisted prior) or *eviction churn*
-(2112 evictions / ~37 k cold reads over 130 passes).
-
-The replayer does **not** model the persisted-prior seed, so it cannot currently tell those apart.  Step 0
-is to add it (`--seed heat|trace|none`, reading a real `.moe-heatmap` sidecar or the trace's first N
-passes) and publish the `{seed} x {churn}` decomposition.  If a heat-seeded arena lands near `static`, close
-the campaign with that measurement; if it stays near `shipped`, score the candidate admission/prefetch
-policies **offline** (lookback prefetch of the previous pass's routed set, heat-weighted victim choice,
-`admit=value` at the verify widths, decay-period sweep) before writing any C++.  Note the one result we
-already have: pass-start pre-admission (`window`) *lowers* `h` to 0.7846 while cutting traffic 25 %, so a
-prefetch is not automatically a win.  Design, invariants and gates:
-[`wip/moe-admission-quality/`](wip/moe-admission-quality/README.md).
 
 ## 80. Meta split-state cache: 30+ lookups per node per re-allocation — PERFORMANCE (parked)
 

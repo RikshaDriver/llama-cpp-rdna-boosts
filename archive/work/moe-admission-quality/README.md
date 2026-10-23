@@ -1,11 +1,13 @@
 # `moe-admission-quality` — why is the shipped expert-cache policy ~11 pts of hit rate below a static oracle, and how much of that is recoverable?
 
-**Status: OPEN, seeded 2026-10-22 (r110) — offline/measurement first, no delivery change yet.**
-Not part of the delivery; nothing here may be applied to the fork without the maintainer's go-ahead
-(see `AGENTS.md`).  This is `TODO.md` #86 (a TODO handle — distinct from GitHub issue #86).
+**Status: CLOSED 2026-10-22 (r114) — answered by measurement, no delivery change.**  Step 0 was run and the
+decomposition is in [`RESOLUTION.md`](RESOLUTION.md): the gap is **foreknowledge**, not admission or churn,
+and the lever it exposed is the heat prior's *band mixing*, which shipped in the same release (r114).  Record of the
+measurement: `WORKLOG.md` 261022.009.  Not part of the delivery; it was the scoping note for `TODO.md` #86
+(a TODO handle — distinct from GitHub issue #86).
 
-Seeded by the P1 instrument that closed `archive/work/moe-cache-coverage/` (the offline routing-trace
-replayer, `scripts/moe-trace-replay.py`, `MOE_EXPERT_TRACE`).  That campaign answered its own question
+Seeded by the P1 instrument that closed `../moe-cache-coverage/` (the offline routing-trace
+replayer, `../../../scripts/moe-trace-replay.py`, `MOE_EXPERT_TRACE`).  That campaign answered its own question
 (*slot allocation*: a per-layer quota is worth ~0.25 pt, closed unshipped) and in doing so exposed a
 much larger number it was never scoped to explain.
 
@@ -33,7 +35,7 @@ model, because the answer decides whether this campaign has any work in it at al
 ## 1. The measurement that opened this
 
 Qwen3.6-35B-A3B UD-Q4_K_M, 2x gfx1201, `-sm tensor -ncmoe 40`, `MOE_EXPERT_CACHE_MIB=4096`
-(112 of 256 slots/table = 43.8 % residency), `prompts/code-reasoning-mixed.txt` (296 tok),
+(112 of 256 slots/table = 43.8 % residency), `../../../prompts/code-reasoning-mixed.txt` (296 tok),
 `-n 128 --temp 0`, **`MOE_EXPERT_HEATMAP=0`** (so the replayer's unseeded model is comparable).
 130 passes / 15 600 decode records / 120 tables.  Trace + JSON: reproduce with
 
@@ -54,7 +56,7 @@ window     0.7846     84348   81108     61.66        4082.3    90.48
 static bound (global top-f, same slot count): 96.14 % of the routed mass
 ```
 
-Policy definitions (all identical in `scripts/moe-trace-replay.py`, so a new candidate is a small edit
+Policy definitions (all identical in `../../../scripts/moe-trace-replay.py`, so a new candidate is a small edit
 there and zero C++):
 
 | policy | what it models | shippable? |
@@ -76,7 +78,7 @@ Two side results from the same run, both worth remembering:
 ### How to read the replayer's metrics (rank order matters)
 
 Misses are PCIe traffic -- on this fleet each R9700 sits behind a **PCIe 5.0 x4** host uplink
-(~16 GB/s raw, half an x8, a quarter of an x16: `AGENTS.md`), so in the partially-resident decode band a
+(~16 GB/s raw, half an x8, a quarter of an x16: `../../../AGENTS.md`), so in the partially-resident decode band a
 cut in host bytes is *usually* a cut in token latency.  That makes the replayer's numbers a good proxy for
 t/s -- but not `h`:
 
@@ -95,7 +97,7 @@ at every arena size; and a very small arena can beat the CPU expert path on `h` 
 And a policy that wins a few percent of traffic still needs the real bench before it ships: decode is only
 *partly* miss-bound (at high residency the arithmetic, the all-reduce and the verify width dominate -- the
 3-GPU width-dependent deficit is an example), and hipBLASLt's per-start solution lottery (issue #67,
-`GREEDY-PURITY.md` §44) plus run-to-run spread swamp small deltas unless `ROCBLAS_USE_HIPBLASLT=0` is set
+`../../../GREEDY-PURITY.md` §44) plus run-to-run spread swamp small deltas unless `ROCBLAS_USE_HIPBLASLT=0` is set
 for the A/B.
 
 ## 2. What to measure, in order (offline first)
@@ -106,7 +108,7 @@ Add `--seed none|heat|trace`:
 
 * `none` — today's default (matches `MOE_EXPERT_HEATMAP=0`).
 * `heat` — pre-fill each table with its top-`slots` by a **prior** distribution.  Two sources:
-  (a) a `<model>.moe-heatmap` sidecar (`archive/work/moe-cache-coverage/tools/heatmap-audit.py` already
+  (a) a `<model>.moe-heatmap` sidecar (`../moe-cache-coverage/tools/heatmap-audit.py` already
   parses `MHT1`), so the number is the *real* prior; (b) the trace's own first N passes, as a proxy.
   The prior must be loaded **without** the trace's own counts (otherwise it is the oracle in disguise).
 * `trace` — the oracle (`static`); keep it as the upper bound.
@@ -131,7 +133,7 @@ Each is a few lines in the replayer, scored on the same trace *and* on a second,
 ### Step 2 — the smallest C++ that can win
 
 Only the winning candidate, behind an env kill-switch, with the same-eviction-order purity argument the
-existing policy has (`GREEDY-PURITY.md` §19/§24/§25 and the mmvq band rules): **placement/admission must
+existing policy has (`../../../GREEDY-PURITY.md` §19/§24/§25 and the mmvq band rules): **placement/admission must
 not change the numerics** (a cold read and an arena fill serve the same bytes), so the gate is
 bit-identical same-seed text plus the prefill-logit gate for the moved arena.
 
@@ -155,23 +157,23 @@ bit-identical same-seed text plus the prefill-logit gate for the moved arena.
 
 ## 4. Gates (unchanged from the coverage campaign)
 
-* Same-seed coherence (byte-identical text) and `scripts/gate-prefill-logits.sh` — both mandatory for a
+* Same-seed coherence (byte-identical text) and `../../../scripts/gate-prefill-logits.sh` — both mandatory for a
   placement change (a moved arena changes which path serves a prefill-band op).
-* Adaptive-MTP field gate (`benchmarks/mtp-adaptive-methodology.md`), `-n 3000`, `--reasoning` per axis,
+* Adaptive-MTP field gate (`../../../benchmarks/mtp-adaptive-methodology.md`), `-n 3000`, `--reasoning` per axis,
   plus the phase-switching prompt, for anything that touches decode residency.
 * `test-backend-ops -o MUL_MAT_ID`, the greedy-purity 8-type x 5-length grid, and
-  `scripts/validate-set.sh` if promoted.
+  `../../../scripts/validate-set.sh` if promoted.
 * Every policy claim comes with the replayer JSON (`--json`) and the trace's sha256, so it is re-derivable
   without a GPU.
 
 ## 5. Pointers
 
-* `scripts/moe-trace-replay.py` — the instrument; `policy=` in `score()` is where a candidate goes.
+* `../../../scripts/moe-trace-replay.py` — the instrument; `policy=` in `score()` is where a candidate goes.
 * `ggml/src/ggml-cuda/moe-expert-cache.cu` — `access_locked` (F-LRU + the admission gate),
   `decay_locked`, `apply_heat_seed_locked` (the persisted-prior seed), `apply_prefill_seed_locked`,
   `pool_rank_from_prefill_locked` (the pool's warm order), `alloc_all_locked` (sizing), `moe_cache_rearm`.
-* `archive/work/moe-cache-coverage/RESOLUTION.md` — the measurement that opened this (and the P2
+* `../moe-cache-coverage/RESOLUTION.md` — the measurement that opened this (and the P2
   no-ship decision).
-* `archive/work/moe-heatmap-persistence/` — the heat accumulator and its persistence contract.
-* `archive/work/slab-transient-absorption/` — the arena-size lever (worth 3-6 pts of coverage); **not**
+* `../moe-heatmap-persistence/` — the heat accumulator and its persistence contract.
+* `../slab-transient-absorption/` — the arena-size lever (worth 3-6 pts of coverage); **not**
   this campaign.

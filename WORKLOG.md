@@ -1,5 +1,101 @@
 # WORKLOG - dated delivery records
 
+## 261022.009 (r114) -- TODO #87 closed (DIO auto, one-launch pool staging, adaptation declined), #86 closed (foreknowledge, not churn), #88 implemented (band-split heat prior); `MOE_HOST_POOL_RAM_PCT` 85
+
+**Shipped:** `v14-097cf33d9-r114` (**block 12** amended; blocks 00-11 byte-identical to r113, block 13 re-cut
+with a new `From` line and an unchanged body).  Two campaign records closed:
+`archive/work/host-pool-swap-and-prefill/RESOLUTION.md` and
+`archive/work/moe-admission-quality/RESOLUTION.md`.  Both campaigns left `wip/` (no stubs).
+
+**1. `MOE_HOST_POOL_DIO` is now `auto` (`#87.1`).**  The r113 default (`1`, O_DIRECT) was a hand-set guess
+whose optimum *inverts* between boxes: on a RAM-rich box it throws away a page cache that could hold the whole
+host expert set.  `pool_decide_dio_locked()` decides once, at the first pool build, from the numbers
+`MOE_HOST_POOL_RAM_PCT` already reads — buffered iff `planned pool + host expert set <= MemAvailable`, else
+O_DIRECT — and logs all three.  `MOE_HOST_POOL_DIO=0|1` still forces either arm.  Measured (2x R9700, 35B-A3B
+Q4_K_M `-ncmoe 40 --host-experts pool`, 70K prompt, `-ub 2048`): `auto` → buffered, **2103 prefill / 46.6
+decode t/s**, against 2088/**22.7** for a forced `DIO=1` and 2099/49.3 for `pinned`.
+
+**2. The pool-backed prefill staging is ONE kernel launch (`#87.2`).**  It issued one `cudaMemcpyAsync` per
+expert (~200 per table per ubatch) where the pinned-master path has always staged a whole table with a single
+`moe_cache_stage_kernel`.  That kernel now takes a pool source: the per-expert snapshot encodes `>= 0` arena
+slot, `<= -2` pool slot (`-v-2`, read from the pool's UVA alias), `-1` in neither tier (the host copies those,
+each being a separate mapping/disk read).  **2103 vs 1564 t/s prefill** (`MOE_HOST_POOL_STAGE_BATCH=0`) = +34 %,
+decode flat — this is the rest of the gap to `pinned`, and it is larger than r113's estimate because that
+estimate was taken on a config where the staging was not crossed.  The pool now stages within 0.3 % of `pinned`.
+
+**3. Long-session adaptation: measured and declined (`#87.3`).**  On a real long, topic-shifting trace the
+oracle-layout ceiling is 7.45 MiB/token of L3 reads, a layout built for the *new* topic is 7.55, and one built
+for the *previous* topic (the delivered case) is 8.05 — so the whole prize is ~6 % of the L3 traffic per shift,
+while every churning policy costs several times that (`pool-retire` 24.6 MiB/token; re-admitting the arena
+victim trades 32.8 GiB of copies for 8.7 GiB of L3).  The only candidate left is a periodic bulk re-rank,
+bounded by that 6 %; not implemented, and the numbers are the bar.
+
+**4. `MOE_HOST_POOL_RAM_PCT` 80 → 85** (maintainer's call): the FRAC wants more than the ceiling allows on the
+30 GiB field box (32.6 GiB host set), and 85 % of `MemAvailable` pins ~2 GiB more of it while staying clear of
+swap.  This is the ceiling that turns an oversized pool into a *trim* instead of a silently failed
+`cudaHostAlloc` per table.  It binds only on a tight box (inert on the 184 GiB primary box: 147 GiB of ceiling
+against a 14.9 GiB pool), and the reference point is that box's own FRAC sweep, which pinned **26.0 GiB** with
+0.3 GiB of swap — 85 % of its `MemAvailable` allows ~24.6 GiB, below what it already tolerated.  **Not
+re-measured on the tight box with the r114 binary** (the box's checkout predates r113, so an A/B there needs a
+fresh build); the soak command is in `ENVIRONMENT.md`.
+
+**5. TODO #86 closed: the gap is FOREKNOWLEDGE, not admission or churn.**  Step 0 landed in the replayer:
+`--seed none|heat|probe:N|sidecar:<path>` (mirrors `apply_heat_seed_locked`, including `count=ghost=last=0`),
+`--churn on|off` (a miss may take an EMPTY slot but never evicts) and `--score-band all|decode`.  The 2x2 on
+two real 35B-A3B traces, 43.8 % residency: eviction is worth **+2.6 pts** unseeded and **+11.9** with a real
+prior — i.e. churn is refuted as the problem — while the same policy with an oracle prior gains **+13.2 pts**
+(0.8139 → 0.9461).  The delivered configuration (heat map on, its default) measures **`h=0.8718` on the GPU**
+and sits on the whole-trace `static` line (0.8765); the campaign's 11-pt gap was measured with
+`MOE_EXPERT_HEATMAP=0`, which is not a shipped configuration.  What is left is prior *quality*: the persisted
+map's top-112/table covers 71.8-80.1 % of the decode mass against a same-workload map's 92.2-80.3 % and an
+oracle's 95.4 %, and the prior's largest defect is **band mixing** — one counter for both bands means a
+5256-token prefill outweighs a 128-token decode by 41x, and restricting that same map to its decode component
+takes its coverage to **95.3 %** (the oracle's).  #86 itself shipped no C++: that lever is item 6 below, done in
+the same release.
+
+**6. TODO #88 — the heat prior is split by band, and it is worth real disk time.**  `t.heat` was ONE counter
+fed by both bands, and its consumers want opposite rankings: the **arena** serves the decode/verify band, the
+**host pool** stages whole tables *for a prefill*.  A prefill ubatch routes ~`n_tok` experts, so on a
+5256-token prompt the prefill outweighed the decode **41x** and the arena was seeded from a nearly uniform
+distribution.  Shipped: a `heat_dec` counter (decode host tally + the sampled identity decode device tally,
+through its own `heat_dec_dev` mirror), `heat_rank_vec()` for every heat-driven ARENA decision (the seed and
+the heat-ordered layer placement), the combined vector kept for the pool's bulk layout, and sidecar format
+**MHT2** (`all` + `dec` per table).  **MHT1 still loads with `dec = all`** (the pre-r114 behaviour), so no map
+is invalidated and nothing aborts; the split simply re-learns as the map is rewritten.
+
+Measured on the GPU with the **same** map in both arms — the decode band zeroed in one copy, everything else
+identical (35B-A3B Q4_K_M, 2 GPU tensor `-ncmoe 40`, `MOE_EXPERT_CACHE_MIB=4096` = 43.8 % residency):
+
+| prompt | ranked by combined | ranked by DECODE | delta |
+|---|---:|---:|---:|
+| 284-token (`code-reasoning-mixed`) | `h=0.8747` | **`h=0.8862`** | +1.15 pt |
+| 5256-token (`prose-rdna-boosts`) | `h=0.8698`, 18798 evictions | **`h=0.8948`**, 12402 evictions | +2.50 pt |
+
+Offline (decode band, the band the arena lives in; the runtime's `h=` also counts the prefill, which dilutes
+it): 0.9047 → **0.9400** and 0.8347 → **0.9397**, covered mass 91.7 % → 95.0 % — i.e. at the static oracle's
+line (0.9535) rather than 4-10 pts below it.  **In disk time** (this box's SSD peaks at **~1.8 GB/s**, so
+1 MiB/token ≈ 0.55 ms/token is the L3 floor): the long-prompt arm goes from **48.1 → 17.6 MiB/token**, i.e.
+from **~26 ms/token of unavoidable disk read (~38 t/s ceiling) to ~9.5 ms/token (~105 t/s)** — the prior was
+spending more time on the SSD than the whole decode was getting.  Short prompt: 27.7 → 17.5 MiB/token
+(~15.0 → ~9.5 ms/token).  Purity: greedy text byte-identical across the r114 build, a decode-ranked v2 map and
+a combined-ranked one (735 chars, one hash), `MOE_HOST_POOL_VERIFY` clean, `gate-prefill-logits.sh` KLD
+0.000000 / same-top-p 100.000 %.  Landed in **block 12** (its r111/r113 amendments already own the seed and
+pool-ranking functions; see `patches/README.md`, "Facts that span blocks").
+
+**Two instrument defects fixed (both had produced published numbers).**  (a) `load_heat_sidecar` did not
+normalise the role name (sidecar `blk.0.ffn_gate_exps.weight` vs trace `ffn_gate_exps.weight`), so every lookup
+missed and `--pool-init sidecar-complement` silently fell back to the **oracle** — the arm r113 quotes as "a
+real `.moe-heatmap` prior = 237 MiB, the same as the oracle" was the oracle twice, so **that r113 claim is not
+established** and must be re-measured before it is quoted again.  A sidecar matching no table is now a hard
+error and a missing table degrades to expert-id order, never to the oracle.  (b) `--mass-band` was not applied
+to the pass loop, so the arena policies were scored on all bands while `covered%` came from the decode band
+(which made `static` look *worse* than `shipped` on a long prompt: 0.7553 vs 0.8498) — now `--score-band`.
+
+**Purity.**  Greedy text byte-identical across `pinned` / pool / `DIO` 0 and 1 / staging on and off (one hash
+at `-n 32` and at `-n 200`), `MOE_HOST_POOL_VERIFY=1` clean (0 mismatches), `scripts/gate-prefill-logits.sh`
+green (mean KLD 0.000000, same-top-p 100.000 %).  A pool fill serves byte-identical bytes, so placement cannot
+move a value.  `patches/` + `release.json` regenerated; `validate-set.sh` green.
+
 ## 261022.008 (r113) -- the host pool is a LAYOUT, not a churning cache; TODO #65 retired
 
 **Shipped:** `v14-097cf33d9-r113` (**block 12** amended; blocks 00-11 byte-identical to r112, block 13 re-cut
@@ -103,7 +199,7 @@ cache), measured on the field case (gfx1100, 24 GB VRAM, **30 GiB RAM**, 35B-A3B
 Texts stay identical across every arm and every FRAC/ncmoe combination tested (2000-token runs at
 `-ncmoe` 36 and 40 byte-identical to each other and 200-char-prefix-identical to the r111 arms).
 
-**Known follow-ups (unchanged, `TODO.md` #87 / `wip/host-pool-swap-and-prefill/`):** the buffered fill
+**Known follow-ups (unchanged, `TODO.md` #87 / `archive/work/host-pool-swap-and-prefill/`):** the buffered fill
 (`MOE_HOST_POOL_DIO=0`) still SIGSEGVs in the background pool worker at high FRAC on a memory-tight box --
 now opt-in only; a prefill-band access must not fill/evict pool slots (the first prefill is inherently a full
 O_DIRECT read: ~10 s on that box, which is why a short prompt shows ~0.6 "prompt t/s" while a 1400-token
@@ -178,7 +274,7 @@ produces byte-identical text in every configuration tested (`-ncmoe` 28/32/36/40
 10/25/50/75/90, DIO on/off) — but **the buffered pool at `MOE_HOST_POOL_FRAC=75` SIGSEGVs in
 `pool_bg_worker`** (2/2, `memcpy` from the model mapping, `error 4`), while `MOE_HOST_POOL_DIO=1` at the same
 FRAC and the low-FRAC configurations are clean.  That is a defect to fix (r11x), not a tuning item: tracked
-as **TODO #87** with the campaign `wip/host-pool-swap-and-prefill/` (which also carries the two design
+as **TODO #87** with the campaign `archive/work/host-pool-swap-and-prefill/` (which also carries the two design
 questions: prefill must not evict pool entries, and the arena eviction ⟷ pool admit swap).  Field numbers
 for the record: `-ncmoe 32 pinned` 83.7 t/s decode / 492 t/s prefill (host set fits in RAM, pool is pure
 cost, as the default-on policy intends); `-ncmoe 36 pool FRAC 75 + DIO` 74.4 t/s decode with **zero swap**
@@ -265,7 +361,7 @@ one 128-thread kernel launch (~1.9 sampled ops/token): fully-resident gemma4-26B
 
 **TODO #86 opened (scoping) — the campaign's follow-on.**  The replayer's real number is the ~11 pt gap
 between the shipped policy and an oracle static placement, which the slot-quota question was never about.
-New `wip/moe-admission-quality/` (TODO #86), offline-first: step 0 adds a `--seed heat|trace` model to the
+New `archive/work/moe-admission-quality/` (TODO #86, closed in r114), offline-first: step 0 adds a `--seed heat|trace` model to the
 replayer so the gap decomposes into *foreknowledge* (the persisted prior) and *churn* (eviction); only a
 candidate that wins there is written in C++.  Its first measured warning is already in hand: pass-start
 pre-admission *lowers* `h` (0.7846) while cutting traffic 25 %, so prefetch is not automatically a win.
