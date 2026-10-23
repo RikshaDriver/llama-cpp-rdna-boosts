@@ -436,6 +436,11 @@ stub alive to serve them, and treat a `wip/` path in an old record as a historic
   (`GGML_CUDA_ASYNC_INPUT_BATCH`, r89/PR #182) stay default-on inside it.  Self-KLD control 91.0-95.1 %
   -> 99.967-100.000 %; decode +9.3 % (35B-A3B 2 GPU tensor tg400) / +5.2 % (27B MTP n3 end-to-end).
   Evidence: `archive/work/async-input-graph-ordering/` (`RESOLUTION.md`, `FINDINGS-2026-10-19b.md`).
+- **The batched state save and restore share one pinned `state_stage` per context (r96/r119, PRs #189/#209).**
+  `LLAMA_STATE_ASYNC` covers saves, `LLAMA_STATE_ASYNC_READ` (default on) covers restores, and
+  `LLAMA_STATE_ASYNC_MAX_MIB` bounds both.  Saves and restores on one context must not run concurrently.
+  The restore is a multi-device win (2 GPU `-sm tensor`: 35B-A3B 49 -> 40 ms, Flash-Next 89 -> 75 ms);
+  one GPU pays about 2 ms for the extra staging copy, so do not read the single-GPU number as a defect.
 - **The op-offload H2D staging ring (V2.0 block 09; old block 06, r12) has three invariants:** (1) prefill is never
   CUDA-graph captured, so a redirected split input that reaches a copy path aborts (tripwire asserts
   this); (2) the width gate is floored at **64 tokens**; (3) the arena lives **outside** the

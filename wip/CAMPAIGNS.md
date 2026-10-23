@@ -24,6 +24,15 @@ is the signature of a stub, not of a campaign.
 | [`moe-cpu-overlap/`](moe-cpu-overlap/README.md) | genuine CPU/GPU overlap for the expert misses (the Strata shape) | OPEN / scoping (TODO #36) — **work in flight**: the note refutes the earlier "cannot be done" verdict for the interleaved shape and sets out the pipeline to try |
 | [`ngram-mod-host-experts/`](ngram-mod-host-experts/README.md) | `ngram-mod` + `draft-mtp-adaptive` roughly halves decode when the MoE experts are host-resident (`-ncmoe`/`-cmoe`, expert cache active); plain `draft-mtp-adaptive` restores the expected rate | **OPEN (seeded 2026-10-14), scoping + measurement** |
 
+**Promoted (r119, 2026-10-23, block 12).**  `state-restore-batch/` left `wip/` for
+[`archive/work/state-restore-batch/`](../archive/work/state-restore-batch/RESOLUTION.md): PR #209
+(briansp2020) batches the device writes of a context state restore through the save path's pinned
+`state_stage`; `LLAMA_STATE_ASYNC_READ` is the A/B kill-switch.  On 2 GPU `-sm tensor` a 1571-token
+restore measured 35B-A3B 49 -> 40 ms, Flash-Next 89 -> 75 ms and the DFlash2 draft arm 68 -> 58 ms;
+one GPU is about 2 ms slower, accepted for the multi-device win.  Restored 48-token text equals a
+fresh run, and the four-axis MTP text/acceptance and the prefill-logit KLD are unchanged.  See
+`WORKLOG.md` 261023.004.
+
 **Closed (2026-10-23, r116/r117).**  `three-gpu-performance/` left `wip/` for
 [`archive/work/three-gpu-performance/`](../archive/work/three-gpu-performance/RESOLUTION.md) with a
 `RESOLUTION.md`, and **`TODO #51` is retired** (its remaining plain-decode residual is an accepted

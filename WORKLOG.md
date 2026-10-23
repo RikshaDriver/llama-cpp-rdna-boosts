@@ -1,5 +1,65 @@
 # WORKLOG - dated delivery records
 
+## 261023.004 (r119) -- PR #209: the state restore batches its device writes through the save path's pinned stage (block 12); ~15-18 % faster on 2 GPU tensor, ~2 ms slower on one GPU
+
+**Shipped:** `v14-097cf33d9-r119` (**block 12** amended; the only delivery content change is
+`src/llama-context.cpp` (+54 / -9).  Blocks 00-11 and 13 are otherwise unchanged; the later blocks differ
+only in their re-cut `From`/`index` lines and hunk offsets.  `scripts/validate-set.sh`: green (fresh-tarball
+strict apply -> tree `64a7d1492`).  PR #209 (briansp2020) is archived in
+[`archive/work/state-restore-batch/`](archive/work/state-restore-batch/) with a `RESOLUTION.md`.
+
+**1. What the restore still paid.**  r96 (#189) batched the save side: `llama_io_write_host` queues the
+deferred state reads as `ggml_backend_tensor_get_async` into one pinned stage, syncs each backend once,
+then copies to the caller's buffer.  The restore side still issued one synchronous
+`ggml_backend_tensor_set` per tensor piece.  A hybrid model's checkpoint is ~75 pieces; under `-sm tensor`
+each one bounces through a pinned chunk and synchronizes every device.  The r96 comment said restores
+measured no faster batched, but that was the r91 measurement; on r115/r118 the batched restore is faster on
+more than one device.
+
+**2. The change (PR #209).**  `llama_io_read_host` now takes the context (all three construction sites pass
+`this`).  On destruction it packs the deferred pieces into the same pinned `state_stage` the save side
+keeps, queues each with `ggml_backend_tensor_set_async` on the backend that owns it, and synchronizes each
+backend once.  The per-tensor synchronous path stays when there is no context, a tensor's backend cannot be
+resolved, the state exceeds `LLAMA_STATE_ASYNC_MAX_MIB`, or with `LLAMA_STATE_ASYNC_READ=0` (or
+`LLAMA_STATE_ASYNC=0`).  The stage is one buffer per context, so saves and restores on one context must not
+run concurrently; the comment now says so.
+
+**3. Measured (server prompt-cache restore, 1571-token checkpoint, q8_0 KV, 4 new tokens after the restore,
+`prompt_ms`; 2x R9700 gfx1201, same build dir, stock r118 vs r118 + the patch; medians of the timing
+samples):**
+
+| config | stock | + patch | Δ |
+|---|---:|---:|---:|
+| Flash-Next GSQ, 2 GPU `-sm tensor -ncmoe 10` | 88.6 ms | **75.5 ms** | **-14.8 %** |
+| 35B-A3B Q4_K_M, 2 GPU `-sm tensor -ncmoe 10` | 48.8 ms | **39.9 ms** | **-18.2 %** |
+| 35B-A3B Q4_K_M + DFlash2 draft, 2 GPU | 68.5 ms | **58.2 ms** | **-15.0 %** |
+| 35B-A3B Q4_K_M, 1 GPU | 39.1 ms | 40.9 ms | +4.6 % (about 2 ms; one 45.4 ms sample) |
+
+The 2 GPU tensor restores drop 15-18 %; the 1 GPU arm pays about 2 ms for the extra staging copy, which is
+the cost the submitter disclosed (their 1.5 ms).  The win is the multi-device sync saving; a single device
+has no sync to save.  Absolute times differ from the PR's G1 row because we do not have the shared Q8_0
+Flash-Next MTP head; the no-draft Flash-Next arm and a DFlash2 draft on 35B-A3B exercise the same
+target/draft `llama_state_seq_set_data_ext` path.
+
+**4. Correctness and gates.**
+* A restored checkpoint's **48 greedy tokens equal a fresh `cache_prompt:false` run** on all three 2 GPU
+  configs (35B-A3B plain, 35B-A3B + DFlash2, Flash-Next GSQ).
+* **Four-axis MTP A/B** (35B-A3B Q4_K_M, 2 GPU tensor, `-n 3000`, `draft-mtp n3`): the generated text is
+  identical stock vs patched on R/P/C/K, and so is acceptance: R 0.77335 (2095/2709), P 0.75685
+  (1326/1752), C 0.88240 (2176/2466), K 0.98148 (371/378); generation 242.4/235.3/266.5/284.1 vs
+  242.7/235.1/266.3/283.7 t/s.  The change is state-only, so this is the expected result.
+* **Same-seed coherence** (Qwen3.5 4B Q8_0, 3 GPU tensor, 20 tokens): text identical.
+* **Prefill-logit gate**: mean KLD **0.000000**, same-top-p **100.000 %** (no compute change).
+* `test-save-load-state` and `test-state-restore-fragmented` PASS (the fragmented test restores a 52.4 MiB
+  state through the new path).
+* `scripts/check-gpu-faults.sh` over the server logs and the kernel journal: clean.
+* `scripts/gate-per-block-build.sh --changed-from b0d8e4bf8`: block 12 and block 13 build the `all` target.
+
+**5. Docs and archive.**  `ENVIRONMENT.md` gains `LLAMA_STATE_ASYNC_READ` and the save/restore wording;
+`patches/README.md` block 12, `MANIFESTS.md` and `AGENTS.md` record the shared stage and the verification;
+the campaign moved from `wip/state-restore-batch/` to `archive/work/state-restore-batch/`.  The single-GPU
+cost is an accepted limitation, not a gate failure; `LLAMA_STATE_ASYNC_READ=0` is the A/B arm.
+
 ## 261023.003 (r118) -- PR #206: the MTP prompt tail no longer forces a whole-path `synchronize()` (or the target's nextn readback) after every prompt batch (block 02); +1.24 % prefill with `LLAMA_MTP_INGEST_TAIL`, nothing without it
 
 **Shipped:** `v14-097cf33d9-r118` (**block 02** amended; the deliverable changes are `common/speculative.cpp`,

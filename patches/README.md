@@ -45,7 +45,7 @@ only as a rough shape.
 | 09 | `0009-…-block-09-host-resident-MoE-iface-schedul` | host-resident MoE: iface, scheduler, cache, slab hooks | +14175 / −535 | 65 |
 | 10 | `0010-…-block-10-slab-fusion-dispatcher-async-in` | slab + fusion dispatcher + async input ring (infrastructure) | +11794 / −4753 | 75 |
 | 11 | `0011-…-block-11-qwen4exp-model-hyper-connection` | qwen4exp model/QSA/HC/lazy reader/indexer cache | +11775 / −419 | 46 |
-| 12 | `0012-…-block-12-campaign-remainder-CPU-wins-bac` | campaign remainder (+ r106: Meta `ALL_GATHER`, DFlash2 `-sm tensor`, slab narrow-2; + r111/r112: `--host-experts pool` drops the pinned master; FRAC 80 + O_DIRECT defaults) | +2179 / −322 | 33 |
+| 12 | `0012-…-block-12-campaign-remainder-CPU-wins-bac` | campaign remainder (+ r106: Meta `ALL_GATHER`, DFlash2 `-sm tensor`, slab narrow-2; + r111/r112: `--host-experts pool` drops the pinned master; FRAC 80 + O_DIRECT defaults; + r119: batched state restore) | +2958 / −679 | 33 |
 | 13 | `0013-…-block-13-MTP-draft-vocabulary-subset-spe` | MTP draft vocabulary subset (`--spec-draft-mtp-vocab N`, opt-in) | +569 / −6 | 19 |
 
 Block 05's file count is `template-instances/*.cu` (the FA kernel instantiations); block 10 is the
@@ -849,14 +849,22 @@ had no other home.
   next reserve sizes from the current graph), the per-device `max_host_expert_slice_bytes` split rule, the
   application of the embeddings-layer-input preset, and the `-sm tensor` H2D-ring auto-size + narrow-band
   pin.
-* **The batched state save** (r96, PR #189): `llama_io_write_host` queues its deferred reads as
-  `ggml_backend_tensor_get_async` into one pinned staging buffer kept by the context, synchronizes each
-  backend once, then copies to the caller's buffer.  A recurrent model's checkpoint is about 75 small
-  ranges, and under `-sm tensor` each was one synchronous read per device, so a checkpoint paid about 150
-  device syncs before every prompt chunk of a follow-up turn (Flash-Next + MTP: -55 ms/-59 ms TTFT,
-  isolated by the same-binary `LLAMA_STATE_ASYNC=0` arm).  States above `LLAMA_STATE_ASYNC_MAX_MIB` and any
-  state with a tensor no context backend owns keep the synchronous path, and restores are unchanged.  The
-  file also gains `#include <algorithm>` (the patch as submitted does not compile without it).
+* **The batched state save and restore** (r96, PR #189; restore r119, PR #209): `llama_io_write_host`
+  queues its deferred reads as `ggml_backend_tensor_get_async` into one pinned staging buffer kept by the
+  context, synchronizes each backend once, then copies to the caller's buffer.  A recurrent model's
+  checkpoint is about 75 small ranges, and under `-sm tensor` each was one synchronous read per device, so
+  a checkpoint paid about 150 device syncs before every prompt chunk of a follow-up turn (Flash-Next + MTP:
+  -55 ms/-59 ms TTFT, isolated by the same-binary `LLAMA_STATE_ASYNC=0` arm).  The restore side writes the
+  same pieces the same way: `llama_io_read_host` packs them into the same `state_stage`, queues each with
+  `ggml_backend_tensor_set_async` on the backend that owns it, and synchronizes each backend once.
+  `LLAMA_STATE_ASYNC_READ=0` keeps the per-tensor synchronous restore.  States above
+  `LLAMA_STATE_ASYNC_MAX_MIB` and any state with a tensor no context backend owns keep the synchronous
+  path in both directions.  The stage is one buffer per context, so saves and restores on one context must
+  not run concurrently.  Measured on r118 (2 GPU `-sm tensor`, 1571-token checkpoint, q8_0 KV): 35B-A3B
+  restore 49 -> 40 ms, Flash-Next GSQ 89 -> 75 ms, the DFlash2 draft arm 68 -> 58 ms; one GPU is about
+  2 ms slower because the extra staging copy has no multi-device sync to save, which is accepted for the
+  multi-device win.  The file also gains `#include <algorithm>` (the PR #189 patch as submitted does not
+  compile without it).
 * **Build time**: one FA template instantiation TU per `(ncols1, ncols2, head size)` instead of per
   `(ncols1, ncols2)` — same instantiations, grouped so the backend build is no longer one-file-bound.
 * **The expected `--fit` probe failure logs as a warning** (r101, campaign 0012): `--fit` builds the extra
