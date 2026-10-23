@@ -452,6 +452,21 @@ whatever VRAM is left.
   in the same order and computes the same states (proven with `GGML_META_SS_VERIFY=1`, which recomputes
   every outer hit), and an exhausted arena falls back to the upstream allocator, so nothing is capped.
   `GGML_META_SS_SCRATCH=0` restores the heap containers (A/B and bisection only).
+* **The HIP graph cache key is the first node's `data` pointer, not its tensor object** (r115, TODO
+  #51).  `ggml_cuda_graph_get_key()` was `{ nodes[0], n_tokens }`, and under the Meta backend every
+  per-device subgraph is built from *simple tensors* that `ggml_backend_meta_graph_compute` re-creates
+  on each rebuild — so the object address changed on every reallocation even when the graph was
+  structurally identical and pointed at the same device buffer, and the graph cache **never warmed**
+  (measured 3x R9700, 27B Q8_0, `-sm tensor`, 300-token decode: 3954 keys / 1206 captures / 484 ms of
+  `hipGraphInstantiate`, against 67 keys / 9 ms with `-sm layer`; the host-side bursts were the
+  user-visible 200-450 ms 3-GPU stutter).  Keyed on `data`: 144 keys / 45 captures / 15 ms, **+41 %**
+  decode at 3 devices (+6 % at 2, unchanged at 1), byte-identical text and bit-identical MTP
+  acceptance at every verify width.  Safety: `ggml_cuda_graph_update_required()` still re-checks every
+  node's op/type/shape/`data`/`src` pointers before a replay (a meta rebuild assigns a fresh
+  `cgraph_uid`, which forces the check), so a key collision costs a recapture, never a mismatched
+  replay.  `GGML_CUDA_GRAPH_KEY_DATA=0` restores the object-address key.  This is *not* the dropped r25
+  PR #106 patch 0002, which **added** data pointers to the object key and fragmented a warm cache.
+  Record: `../archive/work/graph-key-churn/`.
 * **The copy callback is invoked again, so the upstream MoE cache works** (r99, TODO #56).  This block's
   rewrite of `ggml_backend_sched_copy_input` kept no `sched->callback_copy` call, and that call is the only
   driver of `llama_moe_cache::copy()`: with `--moe-cache-mib` set the slot map stayed `-1` while the graph had

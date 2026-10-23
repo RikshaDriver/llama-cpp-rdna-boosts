@@ -1,5 +1,49 @@
 # WORKLOG - dated delivery records
 
+## 261022.010 (r115) -- TODO #51: the 3-GPU stutter is HIP graph-capture churn under the `-sm tensor` Meta backend (graph key is a data pointer now)
+
+**Shipped:** `v14-097cf33d9-r115` (**block 09** amended; blocks 00-08 and 13 byte-identical, 10-12 differ
+only in `index` lines and hunk offsets because block 10's big hunk carries the key function as context).
+Record: [`archive/work/graph-key-churn/`](archive/work/graph-key-churn/README.md) (diagnosis,
+elimination table, numbers, reproducer, the probe patch).
+
+**1. The symptom.**  The field 27B server (`-sm tensor`, `--parallel 3`, bf16 KV, `draft-mtp-adaptive` +
+`ngram-mod`) stutters: 2494 streamed tokens at 86 t/s with ~20 gaps of **475-485 ms** per 30 s, and the
+whole gap sits inside `ggml_backend_sched_graph_compute_async`.  The all-reduce is **not** involved
+(`GGML_CUDA_AR_PROFILE=1`: max 2 ms per call, spin p99 243 us — the user's `ce`-vs-`hybrid` theory is
+disproved), nor memory (zero reclaim/PSI), nor power (55 W at a stall against a 250 W cap), nor PCIe
+runtime PM (`active` in every sample).  Stack sampling during stalls lands in `hipGraphInstantiate` /
+`hipGraphExecDestroy`; the kernel timeline shows the GPU dispatching **nothing** for the gap.
+
+**2. The cause.**  `ggml_cuda_graph_get_key()` was `{ nodes[0], n_tokens }` — the first node's *tensor
+object* address.  The Meta (tensor-split) backend re-creates its per-device *simple tensors* on every
+rebuild, so that address changes on every scheduler reallocation even when the graph is identical and
+points at the same device buffer, and the graph cache never warms.  Measured (same binary, 300-token
+decode): 3 GPU tensor **3954 keys / 1206 captures / 484 ms instantiate** vs 67 keys / 9 ms for
+`-sm layer` on the same three devices — the meta backend is the whole of it, and it is why 3 GPUs
+decoded slower than 2 (3947 ms at 2 devices vs 4315 at 3).
+
+**3. The fix.**  Key on `nodes[0]->data`, the per-device buffer address the captured graph actually
+bakes in: **144 keys / 45 captures / 15 ms** and **+41 % decode at 3 devices** (+6 % at 2, unchanged at
+1).  Safe by construction: the per-call `update_required` node-property check (forced by the meta's
+fresh `cgraph_uid` per rebuild) recaptures on any difference, so a key collision costs a recapture, not
+a mismatched replay.  This is *not* the dropped r25 PR #106 patch 0002 — that one **added** data
+pointers to the object key and fragmented a warm cache; this **replaces** the unstable object address.
+Kill switch `GGML_CUDA_GRAPH_KEY_DATA=0`.
+
+**4. Validation.**  Same-seed text **byte-identical** to r114 at 2 and 3 GPUs (dense 27B and Flash-Next
+GSQ, resident and `-ncmoe 46`).  Adaptive-MTP 4-axis gate (`-n 3000`, R `--reasoning on`, P/C/K off):
+R 83.1 → 90.9, P 97.1 → 109.7, C 105.9 → 119.0, K 99.7 → 128.1 (**aggregate 96.5 → 111.9, +16.0 %**)
+with acceptance, accepted/generated counts and mean accepted length **bit-identical on every axis**.
+Flash-Next GSQ 3 GPU: 91.7 → 128.3 t/s (**+40 %**), `-ncmoe 46`: 79.4 → 119.5 (**+50 %**).
+`scripts/validate-set.sh` green (strict 14/14 `git am`, tree == `release.json.tree`).
+
+**5. Left open (TODO #51 stays open, narrower).**  A residual ~70 ms per-device stall remains (~3 times
+per 2500 tokens, first subgraph of a step, every op in the window inflated, unchanged by
+`GGML_CUDA_DISABLE_GRAPHS=1`, ~2-3 % of wall time); its signature says lazy kernel module load, not
+scheduling.  The deeper cache fix (stable simple tensors, or a stable child-cgraph uid so the
+`uid == uid` fast path applies) is recorded in the campaign README §6.
+
 ## 261022.009 (r114) -- TODO #87 closed (DIO auto, one-launch pool staging, adaptation declined), #86 closed (foreknowledge, not churn), #88 implemented (band-split heat prior); `MOE_HOST_POOL_RAM_PCT` 85
 
 **Shipped:** `v14-097cf33d9-r114` (**block 12** amended; blocks 00-11 byte-identical to r113, block 13 re-cut

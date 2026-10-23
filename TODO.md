@@ -21,7 +21,8 @@ top of `WORKLOG.md` is the newest record.
 | **79** | RDNA3_0 verify-band fusions: no multi-device measurement, and gfx1101/gfx1102 untested | platform validation | open (shipped default-on in r95; needs a 2+ card gfx1100 box).  `ssh fingon` is single-RDNA3 (`ROCm0`; its second rocm-smi entry is an iGPU and is not a HIP device), so it does **not** cover the multi-device arm — it validates single-GPU gfx1100 only.  gfx1101/gfx1102 still have no hardware |
 | **70** | harden the expert-cache re-arm / wide-aux growth against a starved arena | robustness | open |
 | **59** | `ngram-mod` + `draft-mtp-adaptive` halves decode with host-resident experts | performance | open (`wip/ngram-mod-host-experts/`) |
-| **51** | 3-GPU decode is slower than 2-GPU | performance | open (`wip/three-gpu-performance/`).  2026-10-22 datapoint (dense 27B Q8_0, `wip/three-gpu-performance/FINDING-2026-10-22-dense-27b-and-mirrored-draft-subset.md`): it is **width**-dependent, not direction-dependent — 3 GPU wins +9.2 % at mean verify len 2.9 and loses **−14.4 %** at mean len 29.2 with *bit-identical* acceptance, and at depth 16384 it loses 8.5 %.  The MoE/field-config arm is still the campaign's target |
+| **51** | 3-GPU decode is slower than 2-GPU | performance | open, **narrowed (r115)**.  The dominant cause was HIP graph-capture churn under the `-sm tensor` Meta backend (the graph-cache key was the first node's *object* address, which the meta re-creates on every rebuild: 3954 keys / 1206 captures / 484 ms of `hipGraphInstantiate` per 300-token decode at 3 devices vs 67 keys / 9 ms with `-sm layer`).  r115 keys on the first node's *data* pointer: 144 keys / 15 ms, **+41 %** at 3 devices (+6 % at 2, 0 % at 1), identical text and acceptance, so **3 GPUs now decodes faster than 2** (`archive/work/graph-key-churn/`).  Still open for the residual per-device stall (#89), the `-sm layer` / AR-profile grid, and the MoE field-config arm.  Earlier (2026-10-22, dense 27B Q8_0, `wip/three-gpu-performance/FINDING-2026-10-22-dense-27b-and-mirrored-draft-subset.md`): width-dependent, not direction-dependent — +9.2 % at mean verify len 2.9, −14.4 % at mean len 29.2 with bit-identical acceptance, −8.5 % at depth 16384 |
+| **89** | residual ~70 ms per-device decode stall (first subgraph of a step) | performance | open (r115: ~3 per 2500 tokens, ~2-3 % of wall time, unchanged by `GGML_CUDA_DISABLE_GRAPHS=1`; every op in the window is inflated — `MUL_MAT` 51 ms, `UNARY` 6 ms — with the GPU dispatching nothing, and `hipFuncGetAttributes` costs ~1.5 ms/call, so the signature is lazy kernel module load per device, not scheduling).  Measure it with the r115 probe (`archive/work/graph-key-churn/tools/LLAMA_STEP_TRACE-probe.patch`), `CUDAGC_SLOW` |
 | **36** | genuine CPU/GPU overlap for the MoE misses | performance | open, scoping (`wip/moe-cpu-overlap/`) |
 
 Accepted limitations that are deliberately **not** fixed are listed at the end — do not re-report them.
@@ -112,11 +113,42 @@ Reopened 2026-10-16; measured.  Formerly closed at r55 (a fresh A/B then found 3
 residency** (so not an arena-sizing artifact).  3-GPU prefill is the fastest (1258 t/s).  Broader than MTP
 (the fresh arm is MTP; the matrix must cover plain and fully-resident too).
 
+**r115 (2026-10-22) removed the dominant cause and inverted the ranking again**: the stutter and the
+3-GPU deficit were HIP graph-capture churn under the Meta backend — the graph-cache key was the first
+node's *tensor object* address, which the meta re-creates on every rebuild, so the cache never warmed
+(3 GPU tensor: 3954 keys / 1206 captures / 484 ms `hipGraphInstantiate` per 300-token decode, vs 67
+keys / 9 ms with `-sm layer` on the same devices).  Keying on the first node's *data* pointer gives 144
+keys / 15 ms and **+41 %** at 3 devices (+6 % at 2, unchanged at 1), byte-identical text and identical
+MTP acceptance, so 3 GPUs now decodes **faster** than 2.  Record and probe:
+[`archive/work/graph-key-churn/`](archive/work/graph-key-churn/README.md).  Remaining: #89 (a residual
+~70 ms per-device stall), the `-sm layer` / AR-profile grid, and the MoE field-config arm.
+
 Working home [`wip/three-gpu-performance/`](wip/three-gpu-performance/README.md) (revived 2026-10-16 from the
 r55 `mtp-3gpu-decode` campaign; that campaign's r55 closure record moved with it and is kept beside the
 README as `RESOLUTION-2026-10-13-closed.md`).  Step 0: re-run the r55 harness on the current tree, then the full
 `{2,3}` x `{plain,MTP}` x `{partial,fully-resident}` x `{tensor,layer}` grid, then the all-reduce /
 identity-path / tensor-split-gather profile.
+
+## 89. residual ~70 ms per-device decode stall (first subgraph of a step) — PERFORMANCE
+
+
+Opened 2026-10-22 out of #51's diagnosis.  After the r115 graph-key fix, a decode still shows ~3 stalls
+of ~70 ms per 2500 tokens **per device**; the stall sits in the *first* subgraph of a step and inflates
+every op in that window (`MUL_MAT` 51 ms, `UNARY` 6 ms, `GET_ROWS` 5 ms) while the GPU dispatches
+nothing (verified with `rocprofv3 --kernel-trace`: the hole has no kernel, and the kernels bracketing it
+run at normal speed).  It is **unchanged** by `GGML_CUDA_DISABLE_GRAPHS=1`, by the graph key, by device
+count (1/2/3 GPUs all show ~3 per device) and by `-sm layer`; total ~2-3 % of wall time at 3 devices.
+
+Current best hypothesis: **lazy kernel module load**, not scheduling — the inflated ops are the first
+*use* of each op family on that device in the run, and `hipFuncGetAttributes` costs ~1.5 ms per call in
+the same runs (576 calls / 857 ms in one 17 s trace, i.e. code-object load on first query).  A cheaper
+instrument than stack sampling: `CUDAGC_SLOW` from
+[`archive/work/graph-key-churn/tools/LLAMA_STEP_TRACE-probe.patch`](archive/work/graph-key-churn/tools/LLAMA_STEP_TRACE-probe.patch)
+prints the per-call `pre`/`loop` split and the top-3 slow ops.
+
+Deliberately not chased further in r115: it is a warm-up transient, it is smaller than the user-visible
+threshold (~50 ms is where the maintainer stops seeing them), and a fix (eager module load / a warm-up
+pass that touches every op family per device) needs its own measurement.
 
 ## 36. Genuine CPU/GPU overlap for the MoE misses (Strata's pipeline shape) — PERFORMANCE (scoping)
 

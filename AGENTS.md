@@ -482,6 +482,17 @@ stub alive to serve them, and treat a `wip/` path in an old record as a historic
   decode replayed a graph whose KV `set_rows` source indices pointed into the released wide region and
   faulted with `HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION`; `GGML_CUDA_DISABLE_GRAPHS=1` hid it.  Every
   shrink path taken at a drop still needs this; add it wherever a new one is introduced.
+- **Under `-sm tensor` the HIP graph cache must be keyed on a *stable* identity — the Meta backend
+  re-creates its per-device simple tensors on every rebuild (r115, TODO #51).**  `ggml_cuda_graph_get_key()`
+  is `{ first node's `data` pointer, n_tokens }` and must stay that way (`GGML_CUDA_GRAPH_KEY_DATA=0`
+  restores the old object-address key, A/B only).  With the object address the cache never warmed: 3954
+  keys / 1206 captures / 484 ms of `hipGraphInstantiate` per 300-token decode at 3 devices vs 67 keys / 9 ms
+  with `-sm layer` — the user-visible 200-450 ms 3-GPU stutter, and the reason 3 GPUs decoded slower than 2.
+  Keyed on `data`: 144 keys / 15 ms and **+41 %** at 3 devices (+6 % at 2, unchanged at 1), identical text
+  and acceptance.  Any new *fingerprint* added to the key (an object address, a generation counter, a
+  per-allocation pointer) re-introduces the churn if it moves across a rebuild — the r25 PR #106-0002
+  data-fingerprint key that was dropped for the slab is the same trap from the other direction.
+  Record: `archive/work/graph-key-churn/`.
 - **The deepseek4/glm5-next `DSV4_HC_POST` arm is split-mode dependent (r97).**  `cparams.fused_dsv4_hc_post`
   is the fused **op** whenever a Meta (tensor-split) device is in play and the primitive
   `hc_combine_norm` chain on one device.  The chain is faster on one device (+0.9..+1.8 % prefill,

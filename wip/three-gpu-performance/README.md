@@ -12,6 +12,19 @@ maintainer's go-ahead (see the WIP and promotion rules in `AGENTS.md`).
 > length) or a regression landed between r54 and r73; **step 0 is to re-run the r55 harness on r73.**  The
 > closure record is kept as [`RESOLUTION-2026-10-13-closed.md`](RESOLUTION-2026-10-13-closed.md).
 
+> **r115 (2026-10-22): the dominant cause is found and fixed — graph-key churn under the Meta backend.**
+> The 3-GPU deficit *and* the user-visible stutter (200-450 ms pauses at a ~1 s period) were HIP
+> graph-capture churn: `ggml_cuda_graph_get_key()` keyed on the first node's *tensor object* address,
+> which the Meta backend re-creates on every subgraph rebuild, so the per-device graph cache never
+> warmed (3 GPU tensor: 3954 keys / 1206 captures / 484 ms `hipGraphInstantiate` per 300-token decode,
+> against 67 keys / 9 ms with `-sm layer` on the same three devices).  Keying on the first node's *data*
+> pointer: 144 keys / 15 ms, **+41 %** at 3 devices (+6 % at 2, unchanged at 1), byte-identical text and
+> bit-identical MTP acceptance; 3 GPUs now decodes **faster** than 2.  The all-reduce was never involved
+> (`GGML_CUDA_AR_PROFILE=1` max 2 ms/call).  Record + probe:
+> [`../../archive/work/graph-key-churn/`](../../archive/work/graph-key-churn/README.md).  This campaign
+> stays open for the residual ~70 ms per-device stall (TODO #89), the `-sm layer`/AR-profile grid and
+> the MoE field-config arm.
+>
 > **Dense datapoint (2026-10-22, r109).**  The deficit is **width**-dependent, not direction-dependent.
 > Qwen3.8-27B Q8_0, `-sm tensor`, four axes at `-n 3000`: 3 GPU is **+3.4 %** aggregate and **+9.2 %** on
 > the R axis (mean verify len 2.9), but **−14.4 %** on K (mean len 29.2) **with bit-identical acceptance,
