@@ -138,14 +138,23 @@ shipped one (`delta = n_accepted - depth`, `climb_budget(d) = 20 + 6*(d-1)`,
 **Contents.**  `common/speculative-adaptive.h` + `.cpp` and the CLI plumbing
 (`--spec-type draft-mtp-adaptive`, `--spec-draft-n-start`); the draft-depth clamp raised from 7 to 15
 (`LLAMA_SPEC_DRAFT_N_MAX_CLAMP=0` escapes it; purity is promised only to 7 — see
-`GREEDY-PURITY.md` §11); an opt-in MTP prompt-tail ingest and a last-row prompt copy; a `--fit` SIGSEGV
-fix with `draft-mtp-adaptive` (issue #38); `tests/test-speculative-adaptive.cpp` and
+`GREEDY-PURITY.md` §11); an opt-in MTP prompt-tail ingest and a last-row prompt copy (r52); the
+target-side half of that tail (r118, PR #206): `llama_set_embeddings_nextn_from()` in `src/llama-ext.h`
+plus a skip in `llama_context::decode` of the nextn readback and the end-of-ubatch readback wait for a
+prompt ubatch that lies entirely below the installed tail (the `embd_batch_idxs` bookkeeping is still
+appended, so `output_reorder()`'s nextn permutation stays aligned with the dense unmasked host rows);
+a `--fit` SIGSEGV fix with `draft-mtp-adaptive` (issue #38); `tests/test-speculative-adaptive.cpp` and
 `tests/test-recurrent-state-depth.cpp`; and the **embeddings-layer-input preset API**
 (`llama_model_set_embeddings_layer_inp_preset`) that the draft setup calls before the target context
 reserves its compute buffers (r94 moved it here, the block that calls it).
 
 **Knobs.**  `--spec-draft-n-max`, `--spec-draft-n-start`, `--spec-draft-p-min`,
-`LLAMA_SPEC_DRAFT_N_MAX_CLAMP`, `LLAMA_MTP_INGEST_TAIL`, `LLAMA_MTP_DRAFT_OP_OFFLOAD`.
+`LLAMA_SPEC_DRAFT_N_MAX_CLAMP`, `LLAMA_MTP_INGEST_TAIL`, `LLAMA_MTP_TAIL_READBACK` (r118: kill-switch
+for the readback skip, on by default; `0` restores the pre-r118 behaviour with the tail still set),
+`LLAMA_MTP_DRAFT_OP_OFFLOAD`.
+
+**Tail-readback purity (r118).**  Skipping the readback cannot change what the draft reads: an ingested row `p` reads `h(p - 1)`, and any ubatch holding a row at `pos >= ingest_from - 1` is never skipped, so that source row is always fresh.  A batch is skipped only when every row is below `ingest_from - 1`, which is why the threshold is `ingest_from - 1` and not `ingest_from`.  Vision rows are always read (M-RoPE jumps the text position after an image).  With the tail unset every threshold is `0`, so the skip cannot trigger and no existing path changes.  The gain has two halves: the MTP hook's early return, which stops `llama_get_embeddings_nextn()`'s `ctx->synchronize()` from draining both backends after every prompt ubatch (about +0.6 %), and the target's nextn readback skip (about +0.1 %); `LLAMA_MTP_TAIL_READBACK=0` disables both.  Verified: identical greedy text and identical draft counts (177/364, acc/pos 0.754/0.426/0.270) after a 31.5k prompt in every arm, prefill-logit gate mean KLD 0.000000 / same-top-p 100.000 %, and prefill 1488.6 -> 1509.8 t/s (+1.4 %, 95 % CI +0.9..+1.9) on 2x R9700.  Records: `archive/work/mtp-tail-readback/`,
+`benchmarks/2026-10-23-pr206-mtp-tail-readback-promotion.md`.
 
 **Gate.**  Judge any controller change on the four axes (reasoning / prose / code / recall) **and** the
 phase-switching prompt (`prompts/code-reasoning-mixed.txt`), at `-n 3000` (`-n 2000` floor),

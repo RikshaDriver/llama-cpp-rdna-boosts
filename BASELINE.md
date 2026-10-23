@@ -14,7 +14,7 @@ upstream moves.  It is not a changelog — the current release, tip/tree and per
 | fork point (upstream `ggml-org/llama.cpp` master) | **`release.json .base`** |
 | delivery | 14 blocks, `block 00` + `blocks 01-13` (`release.json .n_blocks`) |
 | canonical chain | `release.json .tip` / `.tree` |
-| release identity | `release.json .release` (`v12-<base>-r<N>`) |
+| release identity | `release.json .release` (`v<blocks>-<base>-r<N>`) |
 
 The fork point has been held since the V2.0 set was cut: every `rN` is a **block amendment** at the same
 base, never a re-base, so the block series and its recorded trees stay comparable.  A re-base is a

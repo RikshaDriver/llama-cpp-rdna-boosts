@@ -24,6 +24,18 @@ gamut; the **v1** record (curl + `/completion`) is preserved for history.
 > clean-apply build; depth-16384 3-GPU hybrid 38.71 t/s unpinned) and the
 > benchy depth-16384 protocol in `wip/HANDOFF.md`.
 
+## 2026-10-23 — PR #206 promotion: MTP prompt-tail readback skip (block 02, r118)
+
+**[2026-10-23-pr206-mtp-tail-readback-promotion.md](2026-10-23-pr206-mtp-tail-readback-promotion.md)** —
+with `LLAMA_MTP_INGEST_TAIL=4096`, a prompt ubatch entirely below the ingested tail no longer forces the
+MTP hook's `llama_get_embeddings_nextn()` (whose `ctx->synchronize()` drained both backends after every
+prompt batch) or the target's nextn readback.  31,476-token prompt, 2x R9700, Flash-Next IQ3_XXS + shared
+Q8_0 MTP head: prefill **1488.3 -> 1506.8 t/s (+1.24 %)**; the `LLAMA_MTP_TAIL_READBACK=0` arm lands at
+1490.0 (+0.1 %, i.e. r117).  Identical greedy text and identical draft counts (177/364) on every load,
+decode flat, prefill logits bit-identical, no change at all with the tail unset.  Also records the 2x2
+that splits the win (most of it is the drain the hook used to force, not the 21 MB copy) and the side
+finding that `decode()`'s per-ubatch `sync_readback` only runs when another ubatch follows.
+
 ## 2026-09-27 — block 06 tiny-CPU-graph heuristic vs CPU-offloaded FFN (issue #52, r13)
 
 **[2026-09-27-block-06-tiny-cpu-graph-issue52.md](2026-09-27-block-06-tiny-cpu-graph-issue52.md)** —

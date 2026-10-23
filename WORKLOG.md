@@ -1,5 +1,59 @@
 # WORKLOG - dated delivery records
 
+## 261023.003 (r118) -- PR #206: the MTP prompt tail no longer forces a whole-path `synchronize()` (or the target's nextn readback) after every prompt batch (block 02); +1.24 % prefill with `LLAMA_MTP_INGEST_TAIL`, nothing without it
+
+**Shipped:** `v14-097cf33d9-r118` (**block 02** amended; the deliverable changes are `common/speculative.cpp`,
+`src/llama-context.{h,cpp}` and `src/llama-ext.h`, and blocks 03-13 change only in the re-cut commit/parent
+lines of the two files block 02 already touches).  Records: `archive/work/mtp-tail-readback/` (decision +
+purity argument), `benchmarks/2026-10-23-pr206-mtp-tail-readback-promotion.md` (measurements).
+
+**1. What the tail was still paying for.**  `LLAMA_MTP_INGEST_TAIL` (block 02, #143) already made the MTP
+draft ingest only the last N prompt positions, but every prompt ubatch still cost two target-side things:
+the target copied its nextn hidden state to the host (`~21 MB` per 2048-row ubatch on Flash-Next, and
+`decode()` waited for it when another ubatch followed), and the MTP hook called
+`llama_get_embeddings_nextn()` after every prompt batch -- **and that C wrapper calls
+`ctx->synchronize()`**, so the host waited for both backends to go idle before it could build the next
+ubatch.  (That getter-side drain is the real cost; the per-ubatch `sync_readback` in `decode()` only runs
+when another ubatch follows, because `if (!mctx->next()) break;` comes before it -- recorded as a side
+finding because the block-00 comment reads as if that wait always applies.)
+
+**2. The change (PR #206, @briansp2020, plus two of ours).**  New staging API
+`llama_set_embeddings_nextn_from(ctx, seq, pos)` (default `0` = every row is needed, so no other caller
+changes).  The MTP impl sets it to `ingest_from - 1` and returns from `process()` before any getter for a
+prompt batch that lies entirely below it; `decode()` skips that ubatch's nextn `get_async`.  Why nothing
+the draft reads is skipped: an ingested row `p` reads `h(p - 1)`, and any ubatch holding a row at
+`pos >= ingest_from - 1` is never skipped, which is why the threshold is `ingest_from - 1` and not
+`ingest_from`.  Vision rows are always read (M-RoPE jumps the text position after an image).  Ours: the
+per-row scan is gated on `cparams.embeddings_nextn` (as submitted it ran on every decode of every model,
+over an all-zero array), and `LLAMA_MTP_TAIL_READBACK=0` disables **both halves**, i.e. restores the
+pre-r118 behaviour with the tail still set.
+
+**3. Measured (31,476-token prompt = prose x6, 2x R9700 gfx1201, Flash-Next GSQ-IQ3_XXS + shared Q8_0 MTP
+head, `-sm tensor -ncmoe 10 -c 32768 -b 2048 -ub 2048`, MTP n3, `ROCBLAS_USE_HIPBLASLT=0`, 2 alternating
+pairs, both arms from the same build directory):**
+
+| arm | prefill t/s | vs r117 |
+|---|---:|---:|
+| r117 | 1488.3 | - |
+| r118 | **1506.8** | **+1.24 %** |
+| r118, `LLAMA_MTP_TAIL_READBACK=0` | 1490.0 | +0.11 % (the switch restores r117) |
+
+An earlier 3-pair series measured +1.42 % (95 % CI +0.9..+1.9); the submitter's +1.9 % (CI +0.6..+3.2)
+sits inside it.  No tail: 1424.6 -> 1423.3 t/s (-0.1 %, i.e. noise; with every threshold 0 the skip cannot
+trigger).  The tail's own gain goes from +4.5 % to **+6.1 %**.  A 2x2 on a diagnostic build splits the win:
+the hook half (no `synchronize()`) is ~+0.6 % and the readback half ~+0.1 %, so it is the *drain*, not the
+21 MB copy, on this box.
+
+**4. Correctness.**  300 greedy tokens after the 31.5k prompt, tail 4096, 2 loads per arm: text
+`98c4f67d6ed9` and **177 accepted / 364 generated** with acc/pos (0.754, 0.426, 0.270) in *every* arm
+(base, r118, and the kill-switch arm) -- identical draft counts mean the draft saw exactly the same data.
+Decode flat (98.31 vs 98.22 / 98.13 t/s).  Mechanism wiring checked with per-ubatch debug logging on a
+15,738-token prompt: skip on -> 5 ubatches skipped / 10 read, `=0` -> 0 / 15 (the debug logging was not
+shipped).  Dense 4B coherence `ba301f021e66` unchanged; prefill-logit gate mean KLD **0.000000** /
+same-top-p **100.000 %** (no compute change).  No new env var on the default path; the tail itself stays
+opt-in (it is still a prefill/decode trade, this only improves its prefill side).
+EOF
+
 ## 261023.002 (r117) -- TODO #93: the expert cache prefers whole-table identity, so a marginal arena keeps the decode fast path (block 09); +27.6 % decode on the arm that exposed it
 
 **Shipped:** `v14-097cf33d9-r117` (**block 09** amended; the only content change in the set is +157 lines in

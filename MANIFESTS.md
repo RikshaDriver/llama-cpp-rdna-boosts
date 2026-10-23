@@ -103,6 +103,7 @@ on the tip.
 | 00 | `test-backend-ops -o FLASH_ATTN_EXT`; `test-logits-width-probe` W=1..8 | pass; one hash across the band |
 | 01 | same-seed coherence on 2 and 3 GPUs (`-sm tensor`), MTP `none == draft-mtp` | identical |
 | 02 | `tests/test-speculative-adaptive`, `tests/test-arg-parser`; `llama-server --spec-type draft-mtp-adaptive` smoke | pass |
+| 02 | **(r118) MTP prompt-tail readback skip**: `llama-server` with `LLAMA_MTP_INGEST_TAIL=4096` on a >4k prompt, greedy 300 tokens, `LLAMA_MTP_TAIL_READBACK` unset and `=0` | greedy text and draft counts identical to the pre-r118 build in every arm; prefill at the new rate with the switch on and back to the old rate with `=0`; with `LLAMA_MTP_INGEST_TAIL` unset, unchanged (the skip cannot trigger) — `archive/work/mtp-tail-readback/RESOLUTION.md` |
 | 03 | `test-backend-ops -o GATED_DELTA_NET`; `test-recurrent-state-depth`, `test-recurrent-state-rollback` | per-arm FAIL/PASS set unchanged from the recorded baseline (the counts differ per box — never gate on zero) |
 | 04 | `test-backend-ops` bf16-KV FA cases + a bf16-cache model run | pass; coherence identical to f16 |
 | 05 | `test-backend-ops -o FLASH_ATTN_EXT` (full matrix); width probe; prefill-logit gate | 6389/6389 on the r102 tree (gfx1100); probe PASS; KLD <= 0.005 for within-family changes, and the RDNA3_0 head-512 row set passes the absolute limit in `--family-switch` mode (0.001778 / 98.967 % at a base-PPL-2.65 point) — `GREEDY-PURITY.md` §46 |
