@@ -5,8 +5,8 @@ not reproduce: the field/MoE config measures **2 GPU 93.4 vs 3 GPU 131.2 t/s (+4
 speculative arm is at least as fast at 3 devices at 100 % arena residency, and what remains is *plain*
 decode (−2 % resident, −10 % partial, −10 % with `-sm layer`) with each mechanism named.  The dominant
 residual is the **identity cliff** (an arena one arena unit per table short of 100 % drops *every* table
-off the identity fast path: 46.7 vs 65.0 t/s), now `TODO.md` #93; no delivery code changed in this
-campaign.
+off the identity fast path: 46.7 vs 65.0 t/s), **fixed in r117** (block 09,
+`MOE_EXPERT_CACHE_IDENTITY_PREF`; +27.4 % on that arm).  No delivery code changed *inside* this campaign.
 
 This directory was `wip/three-gpu-performance/`; it was revived 2026-10-16 from `archive/work/mtp-3gpu-decode/`
 (the r55 closure).  Not part of the delivery; nothing here may be applied to the fork (see the WIP and

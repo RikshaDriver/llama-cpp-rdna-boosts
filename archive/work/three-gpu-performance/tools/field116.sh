@@ -23,7 +23,7 @@ set -u
 BUILD=${1:?usage: field116.sh <build_dir>}
 TAG=${TAG:-arm}
 M=${M:-/llm/models/Qwen3.8/Flash-Next/GSQ-IQ3_XXS/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00001-of-00002.gguf}
-D=${D:-/llm/models/Qwen3.8/Flash-Next/IQ4_NL/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf}
+D=${D-/llm/models/Qwen3.8/Flash-Next/IQ4_NL/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf}
 GPUS=${GPUS:-0,1}
 SM=${SM:-tensor}
 SPEC=${SPEC:-draft-mtp-adaptive}
@@ -50,7 +50,7 @@ export ROCBLAS_USE_HIPBLASLT=0
 DRAFT_ARGS=()
 SPEC_ARGS=(--spec-type "$SPEC")
 if [ "$SPEC" != none ]; then
-    DRAFT_ARGS=(--spec-draft-model "$D")
+    [ -n "${D:-}" ] && DRAFT_ARGS=(--spec-draft-model "$D")
     SPEC_ARGS+=(--spec-draft-n-max "$NMAX")
 fi
 

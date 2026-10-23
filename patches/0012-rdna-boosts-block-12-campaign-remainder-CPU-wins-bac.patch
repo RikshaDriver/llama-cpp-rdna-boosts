@@ -1,4 +1,4 @@
-From f35c08f0e9300599edc5d047ec079828c054d1b0 Mon Sep 17 00:00:00 2001
+From edbc0f49be1a5b67f3a69815bf3b29db15094f5b Mon Sep 17 00:00:00 2001
 From: Stew Forster <ci@rdna-boosts.invalid>
 Date: Wed, 21 Oct 2026 10:40:32 -0500
 Subject: [PATCH 12/13] rdna-boosts: block 12: campaign remainder (CPU wins,
@@ -1725,7 +1725,7 @@ index 8bd3ff5a7..1fa9e1c30 100644
  
  // backend reg
 diff --git a/ggml/src/ggml-cuda/moe-expert-cache.cu b/ggml/src/ggml-cuda/moe-expert-cache.cu
-index 9f7b02c05..1ff9919eb 100644
+index e336fa1d8..d8ea6bdcf 100644
 --- a/ggml/src/ggml-cuda/moe-expert-cache.cu
 +++ b/ggml/src/ggml-cuda/moe-expert-cache.cu
 @@ -17,15 +17,11 @@
@@ -2622,11 +2622,6 @@ index 9f7b02c05..1ff9919eb 100644
 -        for (int e = 0; e < p.n_experts; e++) {
 -            if (!seen[(size_t) e]) {
 -                rest.push_back(e);
--            }
--        }
--        std::sort(rest.begin(), rest.end(), [&](int32_t a, int32_t b) {
--            if (t.prefill_count[(size_t) a] != t.prefill_count[(size_t) b]) {
--                return t.prefill_count[(size_t) a] > t.prefill_count[(size_t) b];
 +// TODO #87: the ONE ranking that decides the host pool's content -- and therefore how much of the
 +// decode band is served from pinned RAM instead of the mapping/disk.  Order: the persisted long-horizon
 +// heat prior first (it is the only signal that has seen DECODE routing from previous sessions; a prefill
@@ -2655,6 +2650,16 @@ index 9f7b02c05..1ff9919eb 100644
 +            if (ha != hb) {
 +                return ha > hb;
              }
+         }
+-        std::sort(rest.begin(), rest.end(), [&](int32_t a, int32_t b) {
+-            if (t.prefill_count[(size_t) a] != t.prefill_count[(size_t) b]) {
+-                return t.prefill_count[(size_t) a] > t.prefill_count[(size_t) b];
++        if (have_tally) {
++            const int64_t ta = t.prefill_count[(size_t) a];
++            const int64_t tb = t.prefill_count[(size_t) b];
++            if (ta != tb) {
++                return ta > tb;
+             }
 -            return a < b;
 -        });
 -        for (int32_t e : rest) {
@@ -2664,13 +2669,8 @@ index 9f7b02c05..1ff9919eb 100644
 -        for (int e = 0; e < p.n_experts; e++) {
 -            if (!seen[(size_t) e]) {
 -                rank.push_back(e);
-+        if (have_tally) {
-+            const int64_t ta = t.prefill_count[(size_t) a];
-+            const int64_t tb = t.prefill_count[(size_t) b];
-+            if (ta != tb) {
-+                return ta > tb;
-             }
-         }
+-            }
+-        }
 -    }
 +        return a < b;
 +    });
@@ -2756,14 +2756,14 @@ index 9f7b02c05..1ff9919eb 100644
 +            continue;
          }
 -        rank.push_back(e);
--    }
--    if (rank.empty()) {
--        return;
 +        pool->expert_slot.erase(e);
 +        pool->slot_expert[(size_t) sl] = -1;
 +        pool->slot_state[(size_t) sl]  = 0;
 +        freed++;
      }
+-    if (rank.empty()) {
+-        return;
+-    }
 -    std::sort(rank.begin(), rank.end(), [&](int32_t a, int32_t b) {
 -        if (tally[(size_t) a] != tally[(size_t) b]) {
 -            return tally[(size_t) a] > tally[(size_t) b];
@@ -3613,7 +3613,7 @@ index 9f7b02c05..1ff9919eb 100644
      // Account the count ACTUALLY allocated (`slots`/`t.slots`), not the requested `arena_slots`: on a
      // shrunk table the two differ and the old `arena_slots` accounting over-reported the arena.
      g_arena_bytes += (int64_t) slots * t.expert_bytes;
-@@ -2969,7 +3442,8 @@ void alloc_all_locked() {
+@@ -3119,7 +3592,8 @@ void alloc_all_locked() {
              for (const auto & kv : by_layer) {
                  uint64_t s = 0;
                  for (int i : kv.second) {
@@ -3623,7 +3623,7 @@ index 9f7b02c05..1ff9919eb 100644
                          s += v;
                      }
                  }
-@@ -3267,10 +3741,18 @@ bool moe_cache_preflight(int device, size_t host_expert_bytes, size_t aux_reserv
+@@ -3424,10 +3898,18 @@ bool moe_cache_preflight(int device, size_t host_expert_bytes, size_t aux_reserv
          g_preflight_device_seen [device] = true;
      }
      // The pool's AUTO budget is a fraction of the MoE host expert bytes.  This runs once per host-expert
@@ -3645,7 +3645,7 @@ index 9f7b02c05..1ff9919eb 100644
      }
      if (!g_auto) {
          return true;   // an explicit MOE_EXPERT_CACHE_MIB is used verbatim; no early floor
-@@ -4112,7 +4594,8 @@ moe_cache_alias moe_cache_alias_get(int table, int expert) {
+@@ -4269,7 +4751,8 @@ moe_cache_alias moe_cache_alias_get(int table, int expert) {
      if (it != t.expert_slot.end()) {
          return { (char *) t.arena + (size_t) it->second * t.expert_bytes, true };
      }
@@ -3655,7 +3655,7 @@ index 9f7b02c05..1ff9919eb 100644
          return { (void *) ((const char *) t.host + (size_t) expert * t.host_bytes + t.src_off), false };
      }
      return { nullptr, false };
-@@ -4218,7 +4701,8 @@ static void moe_trace_emit(char band, int layer, const char * role, int n_tok, i
+@@ -4375,7 +4858,8 @@ static void moe_trace_emit(char band, int layer, const char * role, int n_tok, i
  // counts stay on the same scale as the exact tallies).
  static __global__ void moe_cache_heat_kernel(const int32_t * __restrict__ ids, int64_t nb0, int64_t nb1,
                                               int n_used, int n_tok, int n_experts, uint32_t w,
@@ -3665,7 +3665,7 @@ index 9f7b02c05..1ff9919eb 100644
      const int64_t n = (int64_t) n_used * (int64_t) n_tok;
      for (int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x; i < n;
           i += (int64_t) gridDim.x * blockDim.x) {
-@@ -4228,6 +4712,10 @@ static __global__ void moe_cache_heat_kernel(const int32_t * __restrict__ ids, i
+@@ -4385,6 +4869,10 @@ static __global__ void moe_cache_heat_kernel(const int32_t * __restrict__ ids, i
                                                (size_t) j * (size_t) nb0);
          if (e >= 0 && e < n_experts) {
              atomicAdd(&heat[e], w);
@@ -3676,7 +3676,7 @@ index 9f7b02c05..1ff9919eb 100644
          }
      }
  }
-@@ -4288,6 +4776,8 @@ void moe_cache_heat_observe(const ggml_tensor * op, const ggml_tensor * src0, co
+@@ -4445,6 +4933,8 @@ void moe_cache_heat_observe(const ggml_tensor * op, const ggml_tensor * src0, co
      if (!prefill_band && !t.identity) {
          return;   // the eager host path tallies this table exactly; never double count it
      }
@@ -3685,7 +3685,7 @@ index 9f7b02c05..1ff9919eb 100644
      g_heat_dirty = true;
      // The mirror is pre-allocated at sizing (alloc_table_locked).  Never allocate here on the decode
      // band: that path is a captured graph, where a `cudaMalloc` aborts the capture.
-@@ -4305,7 +4795,8 @@ void moe_cache_heat_observe(const ggml_tensor * op, const ggml_tensor * src0, co
+@@ -4462,7 +4952,8 @@ void moe_cache_heat_observe(const ggml_tensor * op, const ggml_tensor * src0, co
      }
      moe_cache_heat_kernel<<<(unsigned) nb, threads, 0, (cudaStream_t) stream>>>(
          (const int32_t *) ids->data, (int64_t) ids->nb[0], (int64_t) ids->nb[1],
@@ -3695,7 +3695,7 @@ index 9f7b02c05..1ff9919eb 100644
  }
  
  // Fold every table's device heat mirror into the host `heat` vector and zero the mirror.  Run at a
-@@ -4331,6 +4822,23 @@ static void heat_pull_locked() {
+@@ -4488,6 +4979,23 @@ static void heat_pull_locked() {
              const uint64_t s = (uint64_t) t.heat[(size_t) e] + (uint64_t) tmp[(size_t) e];
              t.heat[(size_t) e] = s > 0xffffffffull ? 0xffffffffu : (uint32_t) s;
          }
@@ -3719,7 +3719,7 @@ index 9f7b02c05..1ff9919eb 100644
      }
  }
  
-@@ -4400,6 +4908,120 @@ static bool moe_cache_slices_addr_ok(size_t host_bytes, size_t expert_bytes,
+@@ -4557,6 +5065,120 @@ static bool moe_cache_slices_addr_ok(size_t host_bytes, size_t expert_bytes,
      return total == expert_bytes;
  }
  
@@ -3840,7 +3840,7 @@ index 9f7b02c05..1ff9919eb 100644
  bool moe_cache_gather_host(const ggml_tensor * weight, const ggml_tensor * weight_cpy,
                             const ggml_tensor * ids, void * stream, int device,
                             size_t slice_off, int split_axis) {
-@@ -4536,19 +5158,25 @@ bool moe_cache_stage_table(int device, const void * host_src, size_t offset, siz
+@@ -4693,19 +5315,25 @@ bool moe_cache_stage_table(int device, const void * host_src, size_t offset, siz
      }
      static uint64_t ordered_seq[GGML_CUDA_MAX_DEVICES] = {};
      std::lock_guard<std::mutex> lock(g_mutex);
@@ -3872,7 +3872,7 @@ index 9f7b02c05..1ff9919eb 100644
          const bool do2d = t.split_axis == 0 && t.host_pitch != 0;
          int64_t rows = 0;
          int64_t row_bytes = 0;
-@@ -4572,6 +5200,140 @@ bool moe_cache_stage_table(int device, const void * host_src, size_t offset, siz
+@@ -4729,6 +5357,140 @@ bool moe_cache_stage_table(int device, const void * host_src, size_t offset, siz
  
          device_guard dg(device);
  
@@ -4013,7 +4013,7 @@ index 9f7b02c05..1ff9919eb 100644
          // Refresh the immutable snapshot when the cache wrote since we built it, or the arena moved.
          const uint64_t seq = g_write_seq.load();
          if (t.prs_dev == nullptr || t.prs_n != t.n_experts) {
-@@ -4637,7 +5399,7 @@ bool moe_cache_stage_table(int device, const void * host_src, size_t offset, siz
+@@ -4794,7 +5556,7 @@ bool moe_cache_stage_table(int device, const void * host_src, size_t offset, siz
          moe_cache_stage_kernel<<<t.n_experts, 256, 0, (cudaStream_t) copy_stream>>>(
              (char *) dst, (const char *) t.arena, (const char *) t.host_dev, t.prs_dev, t.slots,
              (int64_t) t.expert_bytes, (int64_t) t.host_bytes, (int64_t) t.src_off,
@@ -4022,7 +4022,7 @@ index 9f7b02c05..1ff9919eb 100644
          return cudaGetLastError() == cudaSuccess;
      }
      g_stage_decline_nomatch++;
-@@ -4773,11 +5535,13 @@ bool moe_cache_update_host(const ggml_tensor * weight, const ggml_tensor * weigh
+@@ -4930,11 +5692,13 @@ bool moe_cache_update_host(const ggml_tensor * weight, const ggml_tensor * weigh
      }
  
      // A pageable axis-0 slice (a `-sm tensor` `down_exps` split) has no device mapping and its only
@@ -4041,7 +4041,7 @@ index 9f7b02c05..1ff9919eb 100644
          g_decline_all++;
          return false;
      }
-@@ -4942,10 +5706,21 @@ bool moe_cache_update_host(const ggml_tensor * weight, const ggml_tensor * weigh
+@@ -5099,10 +5863,21 @@ bool moe_cache_update_host(const ggml_tensor * weight, const ggml_tensor * weigh
          if ((int) t.heat.size() != t.n_experts) {
              t.heat.assign((size_t) t.n_experts, 0);
          }

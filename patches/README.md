@@ -431,6 +431,19 @@ whatever VRAM is left.
   session's routed mass, the global-top-f static bound at the same slot count, and (already there)
   expert MiB/token.  `moe_cache_observe` (dead, superseded by `moe_cache_heat_observe`) is removed.  No
   numerics change: same-seed text is byte-identical.  `WORKLOG.md` 261022.005.
+* **Whole-table identity placement (r117, TODO #93).**  A table takes the decode band's identity fast
+  path only at its FULL slot count (`t.slots == t.n_experts`); one slot short is not "almost" — it takes
+  the remap path and pays the per-token routing readback like a table with no arena at all.  Each table's
+  arena is rounded up to the slab arena unit, so a budget that is "just enough" in aggregate lands one unit
+  per table short and **every** table drops off the path: measured on the field config (GSQ `-ncmoe 48
+  -sm tensor`, 3 devices, plain decode) `MOE_EXPERT_CACHE_MIB=13800` → arena 40845.1 of 40925.0 MiB,
+  0/432 identity, **46.7 t/s**, vs `15000` → 432/432, **65.0 t/s**.  `alloc_all_locked` now prefers
+  whole-table identity: when at least 96 % of the layers can hold their full slot count, those layers get
+  full residency and the coldest few are dropped to 0 slots (an existing, supported state: they run through
+  the scheduler's host copy) instead of spreading the shortfall.  The drop is capped at ~4 % of the layers
+  (a dropped layer is not free — 1 of 48 is +27.6 %, 6 of 48 is −30 %), placement never exceeds
+  `MOE_EXPERT_CACHE_MIB`, and it is bit-identical: same text and bit-identical MTP acceptance
+  (`MOE_EXPERT_CACHE_IDENTITY_PREF=0` restores the uniform placement).  `WORKLOG.md` 261023.002.
 * `ggml-cuda.cu`: the **op-offload H2D staging ring** (three invariants: prefill is never graph-captured,
   the width gate is floored at 64 tokens, the arena lives outside the compute-graph reserve), the pinned
   `ROCm_Host` master, the per-device host buffer types, and the base of the async graph-input ring.

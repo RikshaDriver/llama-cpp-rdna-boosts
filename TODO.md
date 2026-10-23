@@ -21,31 +21,12 @@ top of `WORKLOG.md` is the newest record.
 | **79** | RDNA3_0 verify-band fusions: no multi-device measurement, and gfx1101/gfx1102 untested | platform validation | open (shipped default-on in r95; needs a 2+ card gfx1100 box).  `ssh fingon` is single-RDNA3 (`ROCm0`; its second rocm-smi entry is an iGPU and is not a HIP device), so it does **not** cover the multi-device arm — it validates single-GPU gfx1100 only.  gfx1101/gfx1102 still have no hardware |
 | **70** | harden the expert-cache re-arm / wide-aux growth against a starved arena | robustness | open |
 | **59** | `ngram-mod` + `draft-mtp-adaptive` halves decode with host-resident experts | performance | open (`wip/ngram-mod-host-experts/`) |
-| **51** | 3-GPU decode is slower than 2-GPU | performance | **narrowed to PLAIN decode (2026-10-23, r116)**.  The field/MoE headline (2 GPU 84.4 vs 3 GPU 56.9 t/s, 2026-10-16) is **closed**: on r116 the same config measures **2 GPU 93.4 vs 3 GPU 131.2 t/s (+40.5 %)**, and in the 24-cell matrix every *speculative* arm is at least as fast at 3 devices with the arena fully resident (+14.0 %/+22.9 % `-sm tensor`, 0.0 %/−0.4 % `-sm layer`, `archive/work/three-gpu-performance/RESOLUTION.md`).  What is left is plain decode: **−2.0 %** resident (the 3-device internal all-reduce, 0.45 vs 0.26 ms/token = 1.2 % of decode), **−10.5 %** at 91 % residency (the non-identity per-op routing readback, paid per device) and **−10.2 %** with `-sm layer` (no intra-token parallelism; reproduced on dense 27B at depth, −6.1 %).  Accepted limitation + production rule: 3 GPUs for speculative decode, 2 GPUs for plain decode at partial residency, never `-sm layer` for decode.  The dominant residual *mechanism* is the identity cliff, `#93` |
+| **51** | 3-GPU decode is slower than 2-GPU | performance | **narrowed to PLAIN decode (2026-10-23, r116)**.  The field/MoE headline (2 GPU 84.4 vs 3 GPU 56.9 t/s, 2026-10-16) is **closed**: on r116 the same config measures **2 GPU 93.4 vs 3 GPU 131.2 t/s (+40.5 %)**, and in the 24-cell matrix every *speculative* arm is at least as fast at 3 devices with the arena fully resident (+14.0 %/+22.9 % `-sm tensor`, 0.0 %/−0.4 % `-sm layer`, `archive/work/three-gpu-performance/RESOLUTION.md`).  What is left is plain decode: **−2.0 %** resident (the 3-device internal all-reduce, 0.45 vs 0.26 ms/token = 1.2 % of decode), **−10.5 %** at 91 % residency (the non-identity per-op routing readback, paid per device) and **−10.2 %** with `-sm layer` (no intra-token parallelism; reproduced on dense 27B at depth, −6.1 %).  Accepted limitation + production rule: 3 GPUs for speculative decode, 2 GPUs for plain decode at partial residency, never `-sm layer` for decode.  The dominant residual *mechanism* was the identity cliff, **fixed in r117** for a marginal arena (`MOE_EXPERT_CACHE_IDENTITY_PREF`) |
 | **36** | genuine CPU/GPU overlap for the MoE misses | performance | open, scoping (`wip/moe-cpu-overlap/`) |
 
 Accepted limitations that are deliberately **not** fixed are listed at the end — do not re-report them.
 
 ---
-
-## 93. Expert-cache sizing lands one arena unit per table short of full residency — PERFORMANCE
-
-Opened 2026-10-23 with `archive/work/three-gpu-performance/RESOLUTION.md`.  `alloc_table_locked` puts a
-table on the **identity fast path** only at 100 % of its own slots ("the decode band reads the arena
-directly; no per-token routing readback"), and that path is worth **+40 %** decode on the field config
-(65.0 vs 46.7 t/s, and 66.4 vs 46.3 at 2 devices with `-c 204800`).  `alloc_all_locked()` holds back
-`rounding = dev_n_tables[d] * ggml_cuda_slab_arena_unit(d)` from the slab capacity, so a budget that is
-"just enough" in aggregate lands **one arena unit per table short**: measured at 3 devices,
-`MOE_EXPERT_CACHE_MIB=13800` → 40845.1 of 40925.0 MiB and **0 of 432** tables fully resident, while
-`15000` → 40925.0 and 432/432.  The auto path usually reaches it (at `-c 40000`; at `-c 204800` it does
-not on 2 devices), so this bites explicit budgets and large contexts.
-
-Candidate (needs its own A/B + the MTP/prefill gates, **not** smuggled into a campaign): when the
-shortfall is small, prefer whole-table identity — drop the coldest table(s) rather than spreading a
-one-slot deficit across every table — and/or report `identity fast path ON` / total in the cache summary
-so a mis-sized arena is visible without grepping.  Related, same item: warn (do not silently accept) when
-`--spec-draft-mtp-vocab N` violates the block-13 `N · n_devices < n_vocab` admission rule, which measures
-−1.9 % at 3 devices (2 GPU +0.8 %; text identical, `RESOLUTION.md` §7).
 
 ## 80. Meta split-state cache: 30+ lookups per node per re-allocation — PERFORMANCE (parked)
 
@@ -142,7 +123,8 @@ table's identity fast path, and (for the 2-GPU arm) the context no longer starvi
    noise.  `nccl` is 9 % *worse* at 3 ranks and not bit-identical; forcing `internal` for every size gains
    3.7 % but changes the prefill AR path (smoke only).  **No AR change is warranted**; suspect 1 is retired.
 2. `-sm tensor`, 91 % residency: **−10.5 %** (51.5 → 46.1 t/s).  A non-identity table pays a per-token
-   routing readback, and at 3 devices it is paid per device.  Fixing the residency removes it (see #93).
+   routing readback, and at 3 devices it is paid per device.  (A *marginal* arena is fixed in r117 — the cache
+  now prefers whole-table identity — but an arena that is 8 % short cannot reach it without dropping layers.)
 3. `-sm layer`, any residency: **−0.4…−10.2 %**.  A single-token decode has no intra-token parallelism to
    gain, so the 3rd device only adds a pipeline stage — reproduced on dense 27B Q8_0 at depth 15746
    (−6.1 %, text identical at both counts).  Property of the split, not a defect; `-sm layer` is not the
@@ -223,7 +205,8 @@ fraction at 43 % residency; if it is <20 %, park it.  Design space and gates:
 - **3-GPU plain (non-speculative) decode is a few percent slower than 2-GPU — accepted** (2026-10-23,
   r116; `TODO #51`, `archive/work/three-gpu-performance/RESOLUTION.md`).  −2.0 % with a fully-resident
   arena (the 3-device internal all-reduce is 1.2 % of decode and no backend/size knob beats it), −10.5 % at
-  91 % residency (the non-identity per-token routing readback, paid per device — see `#93`), −10.2 % with
+  91 % residency (the non-identity per-token routing readback, paid per device; the *marginal*-arena case is
+  fixed in r117, an 8 %-short one is not), −10.2 % with
   `-sm layer` (no intra-token parallelism; a property of layer splitting, reproduced on dense 27B).
   Speculative decode does **not** lose: +14…+23 % at 3 devices when resident.  Production rule: 3 GPUs for
   speculative/MTP workloads, 2 GPUs for plain decode at partial residency, never `-sm layer` for decode.

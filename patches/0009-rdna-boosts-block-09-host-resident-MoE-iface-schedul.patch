@@ -1,4 +1,4 @@
-From b6ea7f1bc44e1cf1b26b6490764d894240c065d1 Mon Sep 17 00:00:00 2001
+From 1cfa2900972c799a02f6aa5127c58803de6c9058 Mon Sep 17 00:00:00 2001
 From: Stew Forster <ci@rdna-boosts.invalid>
 Date: Wed, 21 Oct 2026 10:40:32 -0500
 Subject: [PATCH 09/13] rdna-boosts: block 09: host-resident MoE (iface,
@@ -146,7 +146,7 @@ the heap containers (A/B only).
  ggml/include/ggml-backend.h                   |  107 +
  ggml/src/ggml-alloc.c                         |   85 +-
  ggml/src/ggml-backend-impl.h                  |  213 +
- ggml/src/ggml-backend-meta.cpp                | 1367 ++++-
+ ggml/src/ggml-backend-meta.cpp                | 1367 +++-
  ggml/src/ggml-backend.cpp                     | 1199 +++-
  ggml/src/ggml-blas/ggml-blas.cpp              |    7 +
  ggml/src/ggml-cann/ggml-cann.cpp              |    7 +
@@ -160,7 +160,7 @@ the heap containers (A/B only).
  ggml/src/ggml-cuda/ggml-cuda.cu               | 2511 +++++++-
  ggml/src/ggml-cuda/mmvq.cu                    |  275 +-
  ggml/src/ggml-cuda/mmvq.cuh                   |   12 +
- ggml/src/ggml-cuda/moe-expert-cache.cu        | 5377 +++++++++++++++++
+ ggml/src/ggml-cuda/moe-expert-cache.cu        | 5534 +++++++++++++++++
  ggml/src/ggml-cuda/moe-expert-cache.h         |  323 +
  ggml/src/ggml-cuda/norm.cu                    |   35 +
  ggml/src/ggml-cuda/norm.cuh                   |    1 +
@@ -195,7 +195,7 @@ the heap containers (A/B only).
  src/llama.cpp                                 |   16 +-
  tools/cli/cli.cpp                             |    6 +
  tools/llama-bench/llama-bench.cpp             |   65 +-
- 65 files changed, 14508 insertions(+), 529 deletions(-)
+ 65 files changed, 14665 insertions(+), 529 deletions(-)
  create mode 100644 common/draft-reserve.cpp
  create mode 100644 common/draft-reserve.h
  create mode 100644 ggml/src/ggml-cuda/cpy-batch.cu
@@ -9890,10 +9890,10 @@ index 4140f681a..35f625eaa 100644
 \ No newline at end of file
 diff --git a/ggml/src/ggml-cuda/moe-expert-cache.cu b/ggml/src/ggml-cuda/moe-expert-cache.cu
 new file mode 100644
-index 000000000..b38853bfa
+index 000000000..04c9bc1d6
 --- /dev/null
 +++ b/ggml/src/ggml-cuda/moe-expert-cache.cu
-@@ -0,0 +1,5377 @@
+@@ -0,0 +1,5534 @@
 +// wip/moe-expert-cache — Phase 1a foundation.  See moe-expert-cache.h for the contract.
 +
 +#include "moe-expert-cache.h"
@@ -12547,6 +12547,16 @@ index 000000000..b38853bfa
 +// the effective (all-roles) hit rate is set by the shared slot count, not by the smallest table.
 +// `total_expert_bytes` is known once the first decode pass has registered every table; that first
 +// pass runs uncached (the scheduler copies the full experts), the second sizes and starts filling.
++// r117 (TODO #93): prefer whole-table identity placement -- see the pre-pass in `alloc_all_locked`.
++// Default ON; `MOE_EXPERT_CACHE_IDENTITY_PREF=0` restores the pre-r117 uniform placement (A/B only).
++static bool moe_cache_identity_pref() {
++    static const bool on = [] {
++        const char * e = getenv("MOE_EXPERT_CACHE_IDENTITY_PREF");
++        return e == nullptr || atoi(e) != 0;
++    }();
++    return on;
++}
++
 +void alloc_all_locked() {
 +    g_write_seq++;
 +    if (g_sized) {
@@ -12637,6 +12647,12 @@ index 000000000..b38853bfa
 +    }
 +
 +    const size_t reserve = (size_t) g_reserve_mib * 1024 * 1024;
++    // the post-clamp budget each device settled on (the identity pre-pass spends it exactly, rounding
++    // included, instead of holding back one arena unit per table)
++    size_t budget_d[GGML_CUDA_MAX_DEVICES];
++    for (int d = 0; d < GGML_CUDA_MAX_DEVICES; d++) {
++        budget_d[d] = 0;
++    }
 +    int slots_d[GGML_CUDA_MAX_DEVICES];
 +    for (int d = 0; d < GGML_CUDA_MAX_DEVICES; d++) {
 +        slots_d[d] = 0;
@@ -12688,6 +12704,7 @@ index 000000000..b38853bfa
 +            slots = (int) dev_max_experts[d];
 +        }
 +        slots_d[d] = slots;
++        budget_d[d] = budget;
 +    }
 +
 +    // Auto floor: below this total arena the fixed per-op cost outweighs the CPU bytes it saves, so
@@ -12754,6 +12771,139 @@ index 000000000..b38853bfa
 +        const int s = slots_d[t.device];
 +        if (layer_slots[t.layer] < 0 || s < layer_slots[t.layer]) {
 +            layer_slots[t.layer] = s;
++        }
++    }
++
++    // r117 (TODO #93): prefer WHOLE-TABLE identity over a uniform shortfall.
++    //
++    // A table is on the identity fast path only at its FULL slot count (`t.slots == t.n_experts`): the
++    // decode band then reads the arena directly.  One slot short is not "almost": the table takes the
++    // remap path and pays the per-token routing readback exactly like a table with no arena at all, so a
++    // uniform 511/512 costs the fast path for EVERY table.  Measured on the field config (GSQ
++    // `-ncmoe 48 -sm tensor`, 3 devices, plain decode): arena 40845.1 of 40925.0 MiB and 0/432 identity ->
++    // **46.7 t/s**, vs 40925.0 and 432/432 -> **65.0 t/s** (+39 %); the same cliff cost the 2-GPU arm
++    // 46.3 vs 66.4 t/s at `-c 204800`.  The shortfall is REAL memory (each table's arena is rounded up to
++    // the slab arena unit), so the fix is placement, not accounting: when at least 2/3 of the LAYERS can
++    // have their full slot count, give those layers full residency and drop the coldest layers entirely
++    // to 0 slots (an existing, supported state -- a layer that cannot be uniform above 0 already runs
++    // uncached).  The dropped layers pay one host copy per op; the kept ones stop paying the readback.
++    //
++    // `MOE_EXPERT_CACHE_IDENTITY_PREF=0` restores the pre-r117 uniform placement.
++    bool identity_mode = false;
++    int  layer_full[512];
++    for (int i = 0; i < 512; i++) {
++        layer_full[i] = -1;
++    }
++    if (moe_cache_identity_pref() && max_dev >= 0) {
++        for (const table_t & t : g_tables) {
++            if (t.allocated || t.layer < 0 || t.layer >= 512 || t.device < 0) {
++                continue;
++            }
++            const int full = (int) t.n_experts;
++            if (layer_full[t.layer] < 0 || full < layer_full[t.layer]) {
++                layer_full[t.layer] = full;
++            }
++        }
++        bool any_short = false;
++        int  n_layers  = 0;
++        for (int i = 0; i < 512; i++) {
++            if (layer_full[i] < 0) {
++                continue;
++            }
++            n_layers++;
++            if (layer_slots[i] < layer_full[i]) {
++                any_short = true;
++            }
++        }
++        if (any_short && n_layers > 0) {
++            // heat order, same ranking the allocation below uses (allocation order IS the eviction
++            // policy), so the layers dropped here are the coldest ones
++            std::map<int, uint64_t> layer_heat;
++            for (int i = 0; i < 512; i++) {
++                if (layer_full[i] < 0) {
++                    continue;
++                }
++                uint64_t s = 0;
++                for (const table_t & t : g_tables) {
++                    if (!t.allocated && t.layer == i) {
++                        for (uint32_t v : heat_rank_vec(t)) {
++                            s += v;
++                        }
++                    }
++                }
++                layer_heat[i] = s;
++            }
++            std::vector<int> order;
++            order.reserve((size_t) n_layers);
++            for (int i = 0; i < 512; i++) {
++                if (layer_full[i] >= 0) {
++                    order.push_back(i);
++                }
++            }
++            if (g_heat_on) {
++                std::stable_sort(order.begin(), order.end(), [&](int a, int b) {
++                    const uint64_t ha = layer_heat[a];
++                    const uint64_t hb = layer_heat[b];
++                    if (ha != hb) {
++                        return ha > hb;
++                    }
++                    return a < b;
++                });
++            }
++            size_t remain[GGML_CUDA_MAX_DEVICES];
++            for (int d = 0; d <= max_dev; d++) {
++                remain[d] = budget_d[d];
++            }
++            int layer_slots_prev[512];
++            memcpy(layer_slots_prev, layer_slots, sizeof(layer_slots));
++            int n_full = 0;
++            for (int layer : order) {
++                const int full = layer_full[layer];
++                size_t need[GGML_CUDA_MAX_DEVICES] = {0};
++                bool   ok = full > 0;
++                for (const table_t & t : g_tables) {
++                    if (t.allocated || t.layer != layer || t.device < 0 || t.device > max_dev) {
++                        continue;
++                    }
++                    size_t b = (size_t) full * (size_t) t.expert_bytes;
++                    if (ggml_cuda_slab_enabled()) {
++                        const size_t unit = (size_t) ggml_cuda_slab_arena_unit(t.device);
++                        if (unit > 1) {
++                            b = ((b + unit - 1) / unit) * unit;
++                        }
++                    }
++                    need[t.device] += b;
++                }
++                for (int d = 0; d <= max_dev; d++) {
++                    if (need[d] > remain[d]) {
++                        ok = false;
++                    }
++                }
++                if (ok) {
++                    layer_slots[layer] = full;
++                    for (int d = 0; d <= max_dev; d++) {
++                        remain[d] -= need[d];
++                    }
++                    n_full++;
++                } else {
++                    layer_slots[layer] = 0;
++                }
++            }
++            // Only accept it when the drop is SMALL.  A dropped layer is not free: it serves every expert
++            // through the scheduler's host copy, per op, whereas a 511/512 table still serves 511/512 of
++            // them from VRAM and pays only the readback.  Measured: 1 dropped layer of 48 is +27.6 %
++            // (46.7 -> 59.6 t/s, 3 devices, `MOE_EXPERT_CACHE_MIB=13800`), while 6 of 48 is -30 %
++            // (65.7 vs 93.4 t/s, 2 devices, `-c 204800`) -- so cap the drop at ~4 % of the layers.
++            const int max_drop = std::max(1, n_layers / 24);
++            if (n_full * 3 >= n_layers * 2 && n_layers - n_full <= max_drop) {
++                identity_mode = true;
++                GGML_LOG_WARN("%s: identity-aware placement: %d of %d layers at their FULL slot count, "
++                              "%d dropped to 0 (a uniform shortfall would leave every table off the identity "
++                              "fast path).  MOE_EXPERT_CACHE_IDENTITY_PREF=0 restores the uniform placement\n",
++                              __func__, n_full, n_layers, n_layers - n_full);
++            } else {
++                memcpy(layer_slots, layer_slots_prev, sizeof(layer_slots));
++            }
 +        }
 +    }
 +    // WIP item 1 (TODO #42): allocate each LAYER as a unit.  gate/up/down of a layer MUST expose the
@@ -12827,6 +12977,13 @@ index 000000000..b38853bfa
 +                }
 +                if (mn == target) {
 +                    break;   // uniform
++                }
++                if (identity_mode && requested > 0) {
++                    // this layer was placed at its FULL slot count: if the full count does not fit, run the
++                    // layer uncached (0 slots) and leave every other layer at identity -- do NOT spread a
++                    // smaller uniform count, which costs the identity fast path for all of them
++                    target = 0;
++                    break;
 +                }
 +                if (mn <= 0) {
 +                    if (target <= 1) {

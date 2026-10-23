@@ -96,9 +96,13 @@ Mechanism: `alloc_all_locked()` (`ggml/src/ggml-cuda/moe-expert-cache.cu`) holds
 `rounding = dev_n_tables[d] * ggml_cuda_slab_arena_unit(d)` from the slab capacity, so a budget that is
 "just enough" in aggregate lands one arena unit per table short of full residency.  That is the whole
 difference between the −10.5 % and the +22.9 % columns in §2 at 3 devices, and between 46.3 and 66.4 t/s at
-2 devices with a large context.  **Filed as `TODO #93`** (a sizing policy: prefer whole-table identity
-when the shortfall is small, instead of spreading a one-slot deficit across every table).  Nothing was
-changed in this campaign — it is a block-09 sizing change and needs its own A/B and gates.
+2 devices with a large context.  **Filed as `TODO #93` and resolved in r117** as a block-09 amendment with its
+own A/B and gates (not inside the measurement campaign): `alloc_all_locked` now prefers whole-table
+identity — 47 of 48 layers full and the coldest dropped to 0 slots on the `MOE_EXPERT_CACHE_MIB=13800` arm,
+**46.7 → 59.5 t/s**, identical text and bit-identical MTP acceptance, `MOE_EXPERT_CACHE_IDENTITY_PREF=0` as
+the kill switch.  An arena that is *percentages* short (the 91 % class, and 2 devices with a draft at
+`-c 204800`) is deliberately not changed: the drop is capped at ~4 % of the layers, because a dropped layer
+serves every expert through the host copy (6 of 48 dropped = 65.7 t/s vs 93.4 uniform).
 
 ## 4. Suspect 1 (all-reduce) — retired for throughput, with numbers
 
@@ -206,7 +210,8 @@ Deliberately **not** measured, and why:
 3. **Plain decode (no speculation) is the only arm where 3 GPUs is slower**: −2 % with an identity arena
    (the 3-device internal AR, 1.2 % of decode, plus noise), −10 % at partial residency (the routing
    readback, paid per device), never on a tensor split when resident.  If a workload runs plain decode at
-   partial residency, run it on 2 GPUs.
+   partial residency, run it on 2 GPUs — or size the arena so the cache can take the identity fast path
+   (r117 makes that automatic for a *marginal* arena).
 4. **Do not use `-sm layer` for decode.**  It is 25-45 % slower than a tensor split in every cell
    (49.0/44.0 vs 66.4/65.1 t/s for plain decode), and it loses 6-10 % going from 2 to 3 devices.
 5. `--spec-draft-mtp-vocab` stays off at 3 devices (the `N · n_devices < n_vocab` rule).
@@ -215,9 +220,10 @@ Deliberately **not** measured, and why:
 
 * `TODO.md` #51 updated: narrowed to the plain-decode/layer-split residuals, with the mechanisms and the
   recommendation above (the field/MoE headline is closed).
-* `TODO.md` **#93** filed: "expert-cache sizing lands one arena unit per table short of full residency,
-  which drops *every* table off the identity fast path" (+ sizing-policy and trim-admission-guard
-  candidates).
+* `TODO.md` **#93** was filed here and **closed in r117** (block 09, `MOE_EXPERT_CACHE_IDENTITY_PREF`):
+  whole-table identity placement, 46.7 → 59.5 t/s on the marginal-arena arm, bit-identical text and
+  acceptance, `WORKLOG.md` 261023.002.  The trim-admission *warning* was not shipped — the rule is
+  documented in `AGENTS.md` / `patches/README.md` block 13 and enforced by the operator.
 * `AGENTS.md`: new invariant in "Critical facts" — the identity cliff, and the cross-device-count text
   caveat.
 * `WORKLOG.md` 261023.001 (r116) — the campaign record and the numbers.

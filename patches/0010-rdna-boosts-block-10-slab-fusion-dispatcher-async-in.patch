@@ -1,4 +1,4 @@
-From 5f4998e0a6983d0d95400d50051a001769130754 Mon Sep 17 00:00:00 2001
+From 2d13dc4ec32cd08beaf558fe9076a7818b1001a5 Mon Sep 17 00:00:00 2001
 From: Stew Forster <ci@rdna-boosts.invalid>
 Date: Thu, 22 Oct 2026 07:24:38 -0500
 Subject: [PATCH 10/13] rdna-boosts: block 10: slab, fusion dispatcher, async
@@ -16845,7 +16845,7 @@ index 35f625eaa..10b689844 100644
  void ggml_cuda_glu_q8_1_mark(ggml_backend_cuda_context & ctx, const ggml_cgraph * cgraph, int i);
 \ No newline at end of file
 diff --git a/ggml/src/ggml-cuda/moe-expert-cache.cu b/ggml/src/ggml-cuda/moe-expert-cache.cu
-index b38853bfa..9f7b02c05 100644
+index 04c9bc1d6..e336fa1d8 100644
 --- a/ggml/src/ggml-cuda/moe-expert-cache.cu
 +++ b/ggml/src/ggml-cuda/moe-expert-cache.cu
 @@ -59,6 +59,11 @@ struct table_t {
@@ -17021,7 +17021,7 @@ index b38853bfa..9f7b02c05 100644
  }
  
  // Deferred, budget-adaptive, UNIFORM sizing.  Every table gets the same slot count
-@@ -3937,7 +4016,8 @@ void moe_cache_set_host_source(const void * tensor_data, const char * path, size
+@@ -4094,7 +4173,8 @@ void moe_cache_set_host_source(const void * tensor_data, const char * path, size
  
  int moe_cache_table(const void * src0, int layer, const char * role, int n_experts, size_t expert_bytes,
                      size_t host_bytes, size_t src_off, size_t host_pitch, int split_axis,
@@ -17031,7 +17031,7 @@ index b38853bfa..9f7b02c05 100644
      if (!g_enabled) {
          return -1;
      }
-@@ -3955,6 +4035,13 @@ int moe_cache_table(const void * src0, int layer, const char * role, int n_exper
+@@ -4112,6 +4192,13 @@ int moe_cache_table(const void * src0, int layer, const char * role, int n_exper
          cold_safe = host_bytes > 0 && host_bytes % host_pitch == 0 &&
                      expert_bytes > 0 && expert_bytes % (host_bytes / host_pitch) == 0;
      }
@@ -17045,7 +17045,7 @@ index b38853bfa..9f7b02c05 100644
  
      const std::pair<const void*, int> key = { src0, device };
      const auto it = g_key_to_id.find(key);
-@@ -3984,6 +4071,11 @@ int moe_cache_table(const void * src0, int layer, const char * role, int n_exper
+@@ -4141,6 +4228,11 @@ int moe_cache_table(const void * src0, int layer, const char * role, int n_exper
      t.host_pitch   = host_pitch;
      t.split_axis   = split_axis;
      t.cold_safe    = cold_safe;
@@ -17057,7 +17057,7 @@ index b38853bfa..9f7b02c05 100644
      // TEMP diagnostic (wip/moe-verify-fusions): print the per-table split geometry, to compare the
      // residency-sensitive qwen4exp tables against the residency-insensitive qwen35moe ones.
      if (ggml_cuda_cache_geom_debug()) {
-@@ -4020,7 +4112,7 @@ moe_cache_alias moe_cache_alias_get(int table, int expert) {
+@@ -4177,7 +4269,7 @@ moe_cache_alias moe_cache_alias_get(int table, int expert) {
      if (it != t.expert_slot.end()) {
          return { (char *) t.arena + (size_t) it->second * t.expert_bytes, true };
      }
@@ -17066,7 +17066,7 @@ index b38853bfa..9f7b02c05 100644
          return { (void *) ((const char *) t.host + (size_t) expert * t.host_bytes + t.src_off), false };
      }
      return { nullptr, false };
-@@ -4287,6 +4379,27 @@ static bool moe_cache_slice_addr_ok(size_t host_bytes, size_t expert_bytes, size
+@@ -4444,6 +4536,27 @@ static bool moe_cache_slice_addr_ok(size_t host_bytes, size_t expert_bytes, size
      return span <= host_bytes - src_off;
  }
  
@@ -17094,7 +17094,7 @@ index b38853bfa..9f7b02c05 100644
  bool moe_cache_gather_host(const ggml_tensor * weight, const ggml_tensor * weight_cpy,
                             const ggml_tensor * ids, void * stream, int device,
                             size_t slice_off, int split_axis) {
-@@ -4534,7 +4647,8 @@ bool moe_cache_stage_table(int device, const void * host_src, size_t offset, siz
+@@ -4691,7 +4804,8 @@ bool moe_cache_stage_table(int device, const void * host_src, size_t offset, siz
  bool moe_cache_update_host(const ggml_tensor * weight, const ggml_tensor * weight_cpy,
                             const int32_t * ids, int64_t n_used, int64_t n_tok,
                             size_t ids_nb0, size_t ids_nb1, void * stream,
@@ -17104,7 +17104,7 @@ index b38853bfa..9f7b02c05 100644
      g_write_seq++;
      if (!g_enabled || weight == nullptr || ids == nullptr || weight->ne[2] < 1) {
          return false;
-@@ -4577,7 +4691,24 @@ bool moe_cache_update_host(const ggml_tensor * weight, const ggml_tensor * weigh
+@@ -4734,7 +4848,24 @@ bool moe_cache_update_host(const ggml_tensor * weight, const ggml_tensor * weigh
              host_pitch = weight->nb[1];   // a strided axis-0 slice needs a 2-D fill
          }
      }
@@ -17130,7 +17130,7 @@ index b38853bfa..9f7b02c05 100644
          static bool warned = false;
          if (!warned) {
              warned = true;
-@@ -4594,7 +4725,8 @@ bool moe_cache_update_host(const ggml_tensor * weight, const ggml_tensor * weigh
+@@ -4751,7 +4882,8 @@ bool moe_cache_update_host(const ggml_tensor * weight, const ggml_tensor * weigh
          return false;
      }
      const int table = moe_cache_table(weight, layer, name_role(weight).c_str(), n_experts, expert_bytes,
@@ -17140,7 +17140,7 @@ index b38853bfa..9f7b02c05 100644
      if (table < 0) {
          return false;
      }
-@@ -4645,7 +4777,7 @@ bool moe_cache_update_host(const ggml_tensor * weight, const ggml_tensor * weigh
+@@ -4802,7 +4934,7 @@ bool moe_cache_update_host(const ggml_tensor * weight, const ggml_tensor * weigh
      // (issue #116's copy-side twin).  Decline the partial-residency case so the scheduler's
      // pageable-safe host path serves the op.  An identity (whole-resident) table needs no fill and is
      // left alone.
@@ -17149,7 +17149,7 @@ index b38853bfa..9f7b02c05 100644
          g_decline_all++;
          return false;
      }
-@@ -4887,7 +5019,7 @@ bool moe_cache_get_cold(const void * arena, void ** cold_base, int64_t * n_res,
+@@ -5044,7 +5176,7 @@ bool moe_cache_get_cold(const void * arena, void ** cold_base, int64_t * n_res,
      }
      std::lock_guard<std::mutex> lock(g_mutex);
      for (const table_t & t : g_tables) {

@@ -20,5 +20,9 @@ reads the arena directly; no per-token routing readback)`), which is worth **+40
 
 Sizing code: `ggml/src/ggml-cuda/moe-expert-cache.cu` `alloc_all_locked()` holds back
 `rounding = dev_n_tables[d] * ggml_cuda_slab_arena_unit(d)` from the slab capacity, so a budget within one
-arena unit per table of the host set lands just below 100 %.  `TODO.md` #93 (new) is the sizing-policy
-candidate; nothing was shipped from this campaign.
+arena unit per table of the host set lands just below 100 %.  **Resolved in r117** (block 09): the cache now prefers whole-table identity — 47 of 48 layers full and the
+coldest one dropped to 0 slots on the `13800` arm above, still bit-identical text, **46.7 → 59.5 t/s**
+(`MOE_EXPERT_CACHE_IDENTITY_PREF=0` restores the uniform placement).  An arena that is *percentages* short
+(e.g. 8 %) is not fixed and still pays the readback: the drop is capped at ~4 % of the layers, because a
+dropped layer serves every expert through the host copy (measured: 6 of 48 dropped = 65.7 t/s vs 93.4
+uniform).

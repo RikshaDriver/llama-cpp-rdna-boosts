@@ -1,5 +1,73 @@
 # WORKLOG - dated delivery records
 
+## 261023.002 (r117) -- TODO #93: the expert cache prefers whole-table identity, so a marginal arena keeps the decode fast path (block 09); +27.6 % decode on the arm that exposed it
+
+**Shipped:** `v14-097cf33d9-r117` (**block 09** amended; the only content change in the set is +157 lines in
+`ggml/src/ggml-cuda/moe-expert-cache.cu`, plus the `@@` line numbers of the later blocks' hunks in that one
+file — blocks 00-08 and 10-13 apply to byte-identical files).  `scripts/validate-set.sh`: green
+(fresh-tarball strict apply → tree `8cb64b69`).
+
+**1. The cliff.**  A cache table is on the decode band's **identity fast path** only at its FULL slot count
+(`t.slots == t.n_experts`); one slot short is not "almost" — it takes the remap path and pays the per-token
+routing readback exactly like a table with no arena at all.  Each table's arena is rounded up to the slab
+arena unit, so a budget that is "just enough" in aggregate lands **one unit per table short** and *every*
+table drops off the path.  Measured (`archive/work/three-gpu-performance/`, GSQ-IQ3_XXS, `-ncmoe 48
+-sm tensor`, mix30k 32358 tok, plain decode, `-n 300`, `ROCBLAS_USE_HIPBLASLT=0`):
+
+| 3 devices, plain decode | arena | identity tables | decode t/s |
+|---|---:|---:|---:|
+| `MOE_EXPERT_CACHE_MIB=13800` (pre-r117) | 40845.1 of 40925.0 MiB | 0 / 432 | 46.7 |
+| `MOE_EXPERT_CACHE_MIB=15000` | 40925.0 | 432 / 432 | 65.0 |
+| auto, `-c 40000` | 40925.0 | 432 / 432 | 65.1 |
+
+The same cliff cost the **2-device** field arm 46.3 vs 66.4 t/s at `-c 204800` (92.4 % residency, 0 identity).
+
+**2. The fix.**  `alloc_all_locked` now prefers **whole-table identity**: when at least 96 % of the layers
+can hold their full slot count, those layers get full residency and the coldest few are dropped to **0
+slots** — an existing, supported state (a layer that cannot be uniform above 0 already runs through the
+scheduler's host copy) — instead of spreading the shortfall over every layer.  Selection is in the same
+heat order the allocation uses (allocation order IS the eviction policy), the cost estimate accounts for the
+per-table arena rounding exactly, and the placement never exceeds `MOE_EXPERT_CACHE_MIB` (so it cannot
+surprise a user's VRAM budget).  **The drop is capped at ~4 % of the layers**, because a dropped layer is
+not free: 1 of 48 dropped is **+27.6 %**, 6 of 48 dropped is **−30 %** (that case — 2 devices, auto,
+`-c 204800` with the draft — therefore reverts to the uniform plan unchanged, 93.1 t/s vs 93.4 before).
+`MOE_EXPERT_CACHE_IDENTITY_PREF=0` restores the pre-r117 uniform placement (A/B and bisect only).
+
+**3. Measured (one binary, `ROCBLAS_USE_HIPBLASLT=0`, `-t 8`, same-seed greedy).**
+
+| arm | pre-r117 | r117 | Δ |
+|---|---:|---:|---:|
+| 3 dev, `-ncmoe 48 -sm tensor`, cache 13800, plain, `-c 40000` | 46.7 | **59.5** | **+27.4 %** |
+| 3 dev, same + `draft-mtp-adaptive`, `-n 1000` | 103.2 | **107.0** | +3.7 % |
+| 3 dev, same + `draft-mtp-adaptive`, `-n 3000` | 101.8 | **106.8** | +4.9 % |
+| 2 dev, auto, `-c 204800`, plain | 66.4 (`-c 40000`) | 66.4 | unchanged |
+| 2 dev, auto, `-c 204800` + draft (6-layer drop, capped out) | 93.4 | 93.1 | unchanged (±0.3 % noise) |
+| 3 dev, auto, `-c 40000`, plain | 65.1 | 65.0 | unchanged |
+
+The arms where the change is inert (the arena already reaches identity, or the drop would exceed the cap)
+are unchanged within run-to-run noise (≤0.3 %).
+
+**4. Gates.**
+* **Coherence (same-seed greedy text identity, within each device count):** dense 27B Q8_0 at depth 15746
+  `-sm tensor` = `d56f08cfbcf8` at **both** 2 and 3 GPUs (identical to r116); Flash-Next GSQ `-ncmoe 48`
+  `-sm tensor` plain = `40d493bbb5ac` (2 dev) / `ecf8a32bae77` (3 dev) — identical to r116.
+* **Adaptive-MTP gate at `-n 3000`** on the arm the change touches (GSQ `-ncmoe 48`, 3 dev, cache 13800,
+  `draft-mtp-adaptive,ngram-mod`): acceptance **0.74517 (193 accepted / 259 generated), mean len 4.06** —
+  **bit-identical** with `MOE_EXPERT_CACHE_IDENTITY_PREF` 1 and 0, and the same text hash.  The dense 27B
+  four-axis gate is inert for this change (a dense model registers no host-expert tables, so the sizing path
+  never runs); it was smoke-run on the patched binary at both device counts (8 arms, sane acceptance,
+  no faults) but is not a discriminator here.
+* `scripts/check-gpu-faults.sh --since "60 min ago"` over the run logs and the kernel journal: **clean**.
+* No prefill kernel is touched (`scripts/gate-prefill-logits.sh` not applicable), and the change cannot move
+  a value: it only chooses which tables are resident (the dropped layer is served the same bytes through the
+  scheduler's copy) — confirmed by the identical text/acceptance above.
+
+**5. Docs.**  `ENVIRONMENT.md` (`MOE_EXPERT_CACHE_IDENTITY_PREF`), `patches/README.md` block 09,
+`AGENTS.md` (the identity-cliff invariant now records the fix, the 4 % cap and the kill switch),
+`TODO.md` #93 **closed** (the trim-admission *warning* was not shipped — the block-13
+`N · n_devices < n_vocab` rule stays a documented operator rule), and the campaign record
+(`archive/work/three-gpu-performance/RESOLUTION.md` §3/§11, `evidence/identity-cliff.md`).
+
 ## 261023.001 (r116) -- TODO #51 closed for the field/MoE arm: 3 GPUs now decodes **+40.5 %** faster than 2 on the arm the headline came from; the residual is the expert cache's *identity cliff*, not the device count (no delivery change)
 
 **No delivery change.**  This is the closure of the `three-gpu-performance` campaign

@@ -219,19 +219,20 @@ stub alive to serve them, and treat a `wip/` path in an old record as a historic
   (`MOE_EXPERT_HEATMAP_DECODE_SAMPLE`, default 64, 0 off) and weighted by the period.  The heat mirror
   is pre-allocated at sizing: the decode band is a captured graph and a `cudaMalloc` there aborts the
   capture (`operation failed due to a previous error during capture`).
-- **The expert cache's *identity fast path* is an all-or-nothing cliff, and it is worth ~40 % of decode
-  (r116, `TODO #93`, `archive/work/three-gpu-performance/RESOLUTION.md`).**  A table is identity only at
-  **100 % of its own slots** ("the decode band reads the arena directly; no per-token routing readback");
-  one slot short and it — and with a marginal arena, *every* table — drops to the remap path.  Measured on
-  the field config (GSQ `-ncmoe 48 -sm tensor`, plain decode): 3 devices with `MOE_EXPERT_CACHE_MIB=13800`
-  → arena 40845.1 of 40925.0 MiB, **0/432** identity, 46.7 t/s; `15000` → 40925.0, 432/432, **65.0 t/s**;
-  and at 2 devices `-c 204800` → 37808 MiB (92.4 %), 0 identity, 46.3 t/s vs `-c 40000` → 40925, 294
-  identity, 66.4 t/s.  Why: `alloc_all_locked()` subtracts `dev_n_tables[d] * slab_arena_unit` as
-  "rounding", so a budget within one arena unit per table of the host set lands just below 100 %.
-  **Any 2-vs-3-device (or any decode) comparison must record the arena, the residency % and the count of
-  `identity fast path ON` lines** — a 2-vs-3 "deficit" that is really "no table is identity" is what the
-  `three-gpu-performance` campaign spent two months on, and it cost the 2-GPU arm 29 % in one sweep here.
-  `auto` reaches identity at sane context sizes; an explicit budget must be oversized by a few hundred MiB.
+- **The expert cache's *identity fast path* is an all-or-nothing cliff worth ~40 % of decode; r117 makes the
+  cache prefer whole-table identity (block 09, TODO #93 closed).**  A table is identity only at **100 % of
+  its own slots** ("the decode band reads the arena directly; no per-token routing readback"); one slot short
+  and it takes the remap path and pays the readback exactly like a table with no arena.  Each table's arena is
+  rounded up to the slab arena unit, so a budget "just enough" in aggregate landed one unit per table short
+  and **every** table dropped off: measured (GSQ `-ncmoe 48 -sm tensor`, plain decode) 3 devices
+  `MOE_EXPERT_CACHE_MIB=13800` → arena 40845.1 of 40925.0 MiB, 0/432 identity, **46.7 t/s** vs `15000` →
+  432/432, **65.0 t/s**; the same cliff cost the 2-GPU arm 46.3 vs 66.4 t/s at `-c 204800`.  **r117:** when
+  ≥ 96 % of the layers can hold their full slot count, those get full residency and the coldest ≤ 4 % are
+  dropped to 0 slots (they run through the scheduler's host copy) — +27.6 % on the arm above, bit-identical
+  text/acceptance, `MOE_EXPERT_CACHE_IDENTITY_PREF=0` restores the uniform placement, and the placement never
+  exceeds `MOE_EXPERT_CACHE_MIB`.  The cap matters: a dropped layer is not free (1 of 48 = +27.6 %, 6 of 48 =
+  −30 %), so an arena that is *percentages* short still pays the readback.  **Any 2-vs-3-device (or decode)
+  comparison must still record the arena, the residency % and the count of `identity fast path ON` lines.**
 - **Greedy text is a per-device-count reference on the MoE tensor split (r116).**  2 vs 3 GPUs on
   `-ncmoe` + `-sm tensor` produce different text (`PPL 10.8452` vs `10.8623`, 0.16 %, the tensor split's
   own rounding class, `GREEDY-PURITY.md` §45) — it is **not** the AR's BF16 wire (`GGML_CUDA_AR_BF16_THRESHOLD=0`
