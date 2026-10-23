@@ -65736,7 +65736,7 @@ index 3c4b52008..0d1967d5c 100644
                      } else {
                          ss << ".";
 diff --git a/src/llama-context.cpp b/src/llama-context.cpp
-index 23170d8a3..21fe9e1a6 100644
+index 23170d8a3..a8db2f113 100644
 --- a/src/llama-context.cpp
 +++ b/src/llama-context.cpp
 @@ -1,6 +1,10 @@
@@ -67437,14 +67437,14 @@ index 23170d8a3..21fe9e1a6 100644
 +// of a recurrent model is ~75 small tensors (one sequence's cells), split over the devices under -sm tensor, and each
 +// synchronous read costs a device sync plus a bounce through the shared pinned chunk.  Instead, queue them all
 +// as async copies into one reused pinned staging area, synchronize each backend once, and copy to the caller's
-+// buffer on the host.  (The restore direction keeps the synchronous path: it must stage the bytes into pinned memory
-+// anyway, and measured no faster batched.)  States above LLAMA_STATE_ASYNC_MAX_MIB (default 256) keep the old path,
-+// so a whole slot save never pins gigabytes.
++// buffer on the host.  Restores are batched the same way through the same stage (llama_io_read_host, below;
++// LLAMA_STATE_ASYNC_READ=0 keeps their per-tensor synchronous sets).  States above LLAMA_STATE_ASYNC_MAX_MIB (default
++// 256) keep the old path in both directions, so a whole slot save or load never pins gigabytes.
 +//
 +// Fold (r96, PR #189): the staging buffer (`state_stage`) is kept by the context across saves and rounded up to
 +// 16 MiB, so a context holds the checkpoint size (never more than LLAMA_STATE_ASYNC_MAX_MIB) in pinned host memory
-+// for its lifetime.  It is ONE buffer per context, so state saves on the same context must not run concurrently;
-+// the llama state API is not documented as thread-safe, and this makes that concrete.
++// for its lifetime.  It is ONE buffer per context, so state saves and restores on the same context must not run
++// concurrently; the llama state API is not documented as thread-safe, and this makes that concrete.
 +static bool llama_state_async_enabled(size_t total) {
 +    static const bool on = [] { const char * e = getenv("LLAMA_STATE_ASYNC"); return e == nullptr || atoi(e) != 0; }();
 +    static const size_t max_bytes = [] {
@@ -67564,7 +67564,7 @@ index 23170d8a3..21fe9e1a6 100644
          }
      }
  
-@@ -2945,6 +4039,8 @@ private:
+@@ -2945,13 +4039,59 @@ private:
          size_t offset;
      };
      std::vector<write_info> winfos;
@@ -67573,7 +67573,67 @@ index 23170d8a3..21fe9e1a6 100644
  };
  
  class llama_io_read_host : public llama_io_read_i {
-@@ -3360,6 +4456,43 @@ private:
+ public:
+-    llama_io_read_host(const uint8_t * p, size_t len) : ptr(p), buf_size(len) {}
++    llama_io_read_host(const uint8_t * p, size_t len, llama_context * lctx = nullptr) : ptr(p), buf_size(len), lctx(lctx) {}
++
++    // Batched restore (LLAMA_STATE_ASYNC_READ, default on; 0 = the per-tensor synchronous sets below).  Each
++    // synchronous set bounces through a pinned chunk and synchronizes its device, once per tensor and device (a
++    // hybrid model's checkpoint is ~75 tensors).  Instead pack the pieces into the context's pinned state stage,
++    // queue every tensor as an async copy from it and synchronize each backend once.  Same bytes, same tensors.
++    bool flush_async() {
++        static const bool on = [] { const char * e = getenv("LLAMA_STATE_ASYNC_READ"); return e == nullptr || atoi(e) != 0; }();
++        if (!on || lctx == nullptr || rinfos.empty()) {
++            return false;
++        }
++        size_t total = 0;
++        for (const auto & r : rinfos) {
++            total += r.size;
++        }
++        if (!llama_state_async_enabled(total)) {
++            return false;
++        }
++        std::vector<ggml_backend_t> bks(rinfos.size());
++        for (size_t i = 0; i < rinfos.size(); ++i) {
++            if ((bks[i] = lctx->state_backend(rinfos[i].tensor)) == nullptr) {
++                return false;
++            }
++        }
++        uint8_t * stage = lctx->state_stage(total);
++        if (stage == nullptr) {
++            return false;
++        }
++        // the pieces sit between small metadata fields in the caller's buffer, so pack them one by one
++        size_t off = 0;
++        for (const auto & r : rinfos) {
++            memcpy(stage + off, r.ptr, r.size);
++            off += r.size;
++        }
++        off = 0;
++        for (size_t i = 0; i < rinfos.size(); ++i) {
++            ggml_backend_tensor_set_async(bks[i], rinfos[i].tensor, stage + off, rinfos[i].offset, rinfos[i].size);
++            off += rinfos[i].size;
++        }
++        llama_state_sync_all(bks);   // the stage is reused by the next state copy on this context
++        return true;
++    }
+ 
+     ~llama_io_read_host() {
++        if (flush_async()) {
++            return;
++        }
+         // flush the reads
+         for (const auto & rinfo : rinfos) {
+             ggml_backend_tensor_set(rinfo.tensor, rinfo.ptr, rinfo.offset, rinfo.size);
+@@ -2991,6 +4131,7 @@ public:
+ 
+ private:
+     const uint8_t * ptr;
++    llama_context * lctx = nullptr;
+     size_t buf_size = 0;
+     size_t size_read = 0;
+ 
+@@ -3360,6 +4501,43 @@ private:
      const llama_memory_buffers & mbufs;
  };
  
@@ -67617,7 +67677,7 @@ index 23170d8a3..21fe9e1a6 100644
  size_t llama_context::state_get_size() {
      llama_io_write_dummy io(false);
      try {
-@@ -3371,7 +4504,7 @@ size_t llama_context::state_get_size() {
+@@ -3371,7 +4549,7 @@ size_t llama_context::state_get_size() {
  }
  
  size_t llama_context::state_get_data(uint8_t * dst, size_t size) {
@@ -67626,7 +67686,16 @@ index 23170d8a3..21fe9e1a6 100644
      try {
          return state_write_data(io);
      } catch (const std::exception & err) {
-@@ -3411,7 +4544,7 @@ size_t llama_context::state_seq_get_data(llama_seq_id seq_id, uint8_t * dst, siz
+@@ -3381,7 +4559,7 @@ size_t llama_context::state_get_data(uint8_t * dst, size_t size) {
+ }
+ 
+ size_t llama_context::state_set_data(const uint8_t * src, size_t size) {
+-    llama_io_read_host io(src, size);
++    llama_io_read_host io(src, size, this);
+     try {
+         return state_read_data(io);
+     } catch (const std::exception & err) {
+@@ -3411,7 +4589,7 @@ size_t llama_context::state_seq_get_data(llama_seq_id seq_id, uint8_t * dst, siz
      if (flags & LLAMA_STATE_SEQ_FLAGS_ON_DEVICE) {
          io = std::make_unique<llama_io_write_device>(dst, size, mem_storage[seq_id]);
      } else {
@@ -67635,7 +67704,25 @@ index 23170d8a3..21fe9e1a6 100644
      }
  
      try {
-@@ -3691,6 +4824,52 @@ void llama_context::perf_reset() {
+@@ -3429,7 +4607,7 @@ size_t llama_context::state_seq_set_data(llama_seq_id seq_id, const uint8_t * sr
+     std::unique_ptr<llama_io_read_i> io;
+     if (flags & LLAMA_STATE_SEQ_FLAGS_ON_DEVICE) {
+         // create a temporary io to read the magic and the src seq_id
+-        io = std::make_unique<llama_io_read_host>(src, size);
++        io = std::make_unique<llama_io_read_host>(src, size, this);
+ 
+         uint32_t magic_read;
+         io->read(&magic_read, sizeof(magic_read));
+@@ -3444,7 +4622,7 @@ size_t llama_context::state_seq_set_data(llama_seq_id seq_id, const uint8_t * sr
+ 
+         io = std::make_unique<llama_io_read_device>(src, size, mem_storage[seq_id_read]);
+     } else {
+-        io = std::make_unique<llama_io_read_host>(src, size);
++        io = std::make_unique<llama_io_read_host>(src, size, this);
+     }
+ 
+     try {
+@@ -3691,6 +4869,52 @@ void llama_context::perf_reset() {
      // note: the reallocation counters are not reset - they track the lifetime totals for this context
  }
  
@@ -67688,7 +67775,7 @@ index 23170d8a3..21fe9e1a6 100644
  llama_memory_breakdown llama_context::memory_breakdown() const {
      std::map<ggml_backend_buffer_type_t, llama_memory_breakdown_data> ret;
      for (const auto & [buft, size] : model.memory_breakdown()) {
-@@ -3701,22 +4880,38 @@ llama_memory_breakdown llama_context::memory_breakdown() const {
+@@ -3701,22 +4925,38 @@ llama_memory_breakdown llama_context::memory_breakdown() const {
              ret[buft].context += size;
          }
      }
@@ -67729,7 +67816,7 @@ index 23170d8a3..21fe9e1a6 100644
          }
      }
      return ret;
-@@ -3742,12 +4937,12 @@ static void llama_set_param(struct ggml_tensor * tensor, llama_opt_param_filter
+@@ -3742,12 +4982,12 @@ static void llama_set_param(struct ggml_tensor * tensor, llama_opt_param_filter
      ggml_set_param(tensor);
  }
  
@@ -67746,7 +67833,7 @@ index 23170d8a3..21fe9e1a6 100644
      GGML_ASSERT(n_batch                    % n_ubatch == 0);
  
      if (cparams.flash_attn) {
-@@ -3777,22 +4972,22 @@ void llama_context::opt_init(struct llama_model * model, struct llama_opt_params
+@@ -3777,22 +5017,22 @@ void llama_context::opt_init(struct llama_model * model, struct llama_opt_params
      void * param_filter_ud              = lopt_params.param_filter_ud;
  
    //llama_set_param(model->tok_embd,        param_filter, param_filter_ud); // FIXME
@@ -67785,7 +67872,7 @@ index 23170d8a3..21fe9e1a6 100644
          for (size_t i = 0; i < sizeof(layer)/sizeof(struct ggml_tensor *); ++i) {
              llama_set_param(reinterpret_cast<struct ggml_tensor **>(&layer)[i], param_filter, param_filter_ud);
          }
-@@ -3873,6 +5068,7 @@ void llama_context::opt_epoch_iter(
+@@ -3873,6 +5113,7 @@ void llama_context::opt_epoch_iter(
  
              // the optimizer graph is allocated outside sched, so the next decode must rebuild
              gf_res_prev_active = nullptr;
@@ -67793,7 +67880,7 @@ index 23170d8a3..21fe9e1a6 100644
              res->reset();
  
              auto * gf = model.build_graph(gparams);
-@@ -3903,7 +5099,6 @@ void llama_context::opt_epoch_iter(
+@@ -3903,7 +5144,6 @@ void llama_context::opt_epoch_iter(
                      ggml_backend_tensor_set(labels, &onef, (pos_ubatch*labels->ne[0] + labels_sparse[ilabel])*sizeof(float), sizeof(float));
                  }
              }
@@ -67801,7 +67888,7 @@ index 23170d8a3..21fe9e1a6 100644
              ggml_opt_eval(opt_ctx, result);
              if (callback) {
                  callback(train, opt_ctx, dataset, result, idata_in_loop + (pos_ctx + pos_batch)/n_ubatch + 1, ndata_in_loop, t_loop_start);
-@@ -3974,10 +5169,12 @@ llama_context_params llama_context_default_params() {
+@@ -3974,10 +5214,12 @@ llama_context_params llama_context_default_params() {
          /*.n_ubatch                    =*/ 512,
          /*.n_seq_max                   =*/ 1,
          /*.n_rs_seq                    =*/ 0,
@@ -67814,7 +67901,7 @@ index 23170d8a3..21fe9e1a6 100644
          /*.ctx_type                    =*/ LLAMA_CONTEXT_TYPE_DEFAULT,
          /*.rope_scaling_type           =*/ LLAMA_ROPE_SCALING_TYPE_UNSPECIFIED,
          /*.pooling_type                =*/ LLAMA_POOLING_TYPE_UNSPECIFIED,
-@@ -4004,6 +5201,7 @@ llama_context_params llama_context_default_params() {
+@@ -4004,6 +5246,7 @@ llama_context_params llama_context_default_params() {
          /*.op_offload                  =*/ true,
          /*.swa_full                    =*/ true,
          /*.kv_unified                  =*/ false,
@@ -67822,7 +67909,7 @@ index 23170d8a3..21fe9e1a6 100644
          /*.sampler                     =*/ nullptr,
          /*.n_sampler                   =*/ 0,
          /*.ctx_other                   =*/ nullptr,
-@@ -4012,6 +5210,26 @@ llama_context_params llama_context_default_params() {
+@@ -4012,6 +5255,26 @@ llama_context_params llama_context_default_params() {
      return result;
  }
  
@@ -67849,7 +67936,7 @@ index 23170d8a3..21fe9e1a6 100644
  llama_context * llama_init_from_model(
                   llama_model * model,
          llama_context_params   params) {
-@@ -4047,10 +5265,49 @@ llama_context * llama_init_from_model(
+@@ -4047,10 +5310,49 @@ llama_context * llama_init_from_model(
          if (model->get_split_state_ud.n_devices == 1) {
              LLAMA_LOG_WARN("%s: SPLIT_MODE_TENSOR being used for a single device is not recommended\n", __func__);
          }
@@ -67901,7 +67988,7 @@ index 23170d8a3..21fe9e1a6 100644
          return nullptr;
      }
  
-@@ -4113,7 +5370,16 @@ llama_context * llama_init_from_model(
+@@ -4113,7 +5415,16 @@ llama_context * llama_init_from_model(
  
          return ctx;
      } catch (const std::exception & err) {
@@ -67919,7 +68006,7 @@ index 23170d8a3..21fe9e1a6 100644
      }
  
      return nullptr;
-@@ -4247,6 +5513,10 @@ float * llama_get_embeddings_seq(llama_context * ctx, llama_seq_id seq_id) {
+@@ -4247,6 +5558,10 @@ float * llama_get_embeddings_seq(llama_context * ctx, llama_seq_id seq_id) {
      return ctx->get_embeddings_seq(seq_id);
  }
  
@@ -67930,7 +68017,7 @@ index 23170d8a3..21fe9e1a6 100644
  void llama_set_embeddings_nextn(llama_context * ctx, bool value, bool masked) {
      ctx->set_embeddings_nextn(value, masked);
  }
-@@ -4279,6 +5549,26 @@ float * llama_get_embeddings_nextn_ith(llama_context * ctx, int32_t i) {
+@@ -4279,6 +5594,26 @@ float * llama_get_embeddings_nextn_ith(llama_context * ctx, int32_t i) {
      return ctx->get_embeddings_nextn_ith(i);
  }
  

@@ -1,4 +1,4 @@
-From bf3b110942c66c7cc746e5b482951fe3a4575aa9 Mon Sep 17 00:00:00 2001
+From 346e9f9b6871748cdfc74ef85d933c1a3f32789b Mon Sep 17 00:00:00 2001
 From: Stew Forster <ci@rdna-boosts.invalid>
 Date: Wed, 21 Oct 2026 10:40:32 -0500
 Subject: [PATCH 12/13] rdna-boosts: block 12: campaign remainder (CPU wins,
@@ -28,7 +28,7 @@ tensor ranges and under `-sm tensor` each was one synchronous read per device, s
 ~150 device syncs before every prompt chunk of a follow-up turn (Flash-Next + MTP: -55 ms / -59 ms
 TTFT on the short follow-up turns, same-binary A/B against `LLAMA_STATE_ASYNC=0`).  States above
 `LLAMA_STATE_ASYNC_MAX_MIB` (default 256 MiB) and `LLAMA_STATE_ASYNC=0` keep the synchronous path; so
-does any state with a tensor no context backend owns.  Restores are unchanged.  The staging buffer is
+does any state with a tensor no context backend owns.  The restore direction is folded in r119 (PR #209), below.  The staging buffer is
 retained by the context (16 MiB granular, bounded by the cap) and is one buffer per context, so state
 saves on one context must not run concurrently.  `src/llama-context.cpp` also gains `#include
 <algorithm>` for `std::find` (the patch as submitted does not compile without it).
@@ -41,6 +41,20 @@ aborting; the r54 clean rejection is removed.  The same fold gives a tensor-spli
 region out of the slab's arena when the unmapped VA spare is too small (narrow-2): a 1280 MiB draft compute
 buffer against the estimator's 512 MiB tier is what exposed it, and any DFlash drafter under `-sm tensor`
 now also takes the host path for the F1 device layer-input copy (a pre-existing crash on a Meta buffer).
+
+Fold (r119, PR #209, briansp2020): batch the device writes of a context state restore.  The restore side
+of the r96 fold wrote the ~75 pieces with one synchronous `ggml_backend_tensor_set` per tensor, and under
+`-sm tensor` each of those bounced through a pinned chunk and synchronized every device.  `llama_io_read_host`
+now takes the context, packs the deferred pieces into the same pinned `state_stage` that the save side keeps,
+queues each with `ggml_backend_tensor_set_async` on the backend that owns it, and synchronizes each backend
+once.  It falls back to the per-tensor path when there is no context, a tensor's backend cannot be resolved,
+the state exceeds `LLAMA_STATE_ASYNC_MAX_MIB`, or with `LLAMA_STATE_ASYNC_READ=0` (or `LLAMA_STATE_ASYNC=0`).
+Measured on r118 (2x R9700 gfx1201, `-sm tensor`, q8_0 KV, 1571-token checkpoint): 35B-A3B restore 49 -> 40
+ms and Flash-Next GSQ 89 -> 75 ms, with the DFlash2 draft 68 -> 57 ms; one GPU is ~2-6 ms slower because
+the extra host copy has no multi-device sync to save.  The restored 48 greedy tokens equal a fresh run
+(35B-A3B plain and DFlash2, Flash-Next), the four-axis MTP text/acceptance and the prefill-logit KLD are
+unchanged, and `test-save-load-state` / `test-state-restore-fragmented` pass.  The stage is one buffer per
+context, so saves and restores on one context must not run concurrently.
 ---
  common/arg.cpp                                |    5 +-
  common/sampling.cpp                           |  224 ++-
@@ -67,7 +81,7 @@ now also takes the host path for the F1 device layer-input copy (a pre-existing 
  ggml/src/ggml-rpc/ggml-rpc.cpp                |    3 +
  ggml/src/ggml.c                               |   23 +-
  include/llama.h                               |    7 +-
- src/llama-context.cpp                         |  363 +++-
+ src/llama-context.cpp                         |  416 +++-
  src/llama-context.h                           |   13 +
  src/llama-model-loader.cpp                    |   41 +-
  src/llama-model-loader.h                      |   12 +-
@@ -75,7 +89,7 @@ now also takes the host path for the F1 device layer-input copy (a pre-existing 
  src/llama-model.h                             |   13 +-
  src/llama.cpp                                 |    4 +
  src/models/dflash.cpp                         |   89 +-
- 33 files changed, 2909 insertions(+), 675 deletions(-)
+ 33 files changed, 2958 insertions(+), 679 deletions(-)
 
 diff --git a/common/arg.cpp b/common/arg.cpp
 index c7606ca31..fac39ec0d 100644
@@ -4231,7 +4245,7 @@ index 0c99fa0d5..8ba97b8ab 100644
  
      enum llama_context_type {
 diff --git a/src/llama-context.cpp b/src/llama-context.cpp
-index 3bb23494a..b59f5c970 100644
+index 3bb23494a..0f5c13fe2 100644
 --- a/src/llama-context.cpp
 +++ b/src/llama-context.cpp
 @@ -1,3 +1,6 @@
@@ -4484,14 +4498,14 @@ index 3bb23494a..b59f5c970 100644
 +// of a recurrent model is ~75 small tensors (one sequence's cells), split over the devices under -sm tensor, and each
 +// synchronous read costs a device sync plus a bounce through the shared pinned chunk.  Instead, queue them all
 +// as async copies into one reused pinned staging area, synchronize each backend once, and copy to the caller's
-+// buffer on the host.  (The restore direction keeps the synchronous path: it must stage the bytes into pinned memory
-+// anyway, and measured no faster batched.)  States above LLAMA_STATE_ASYNC_MAX_MIB (default 256) keep the old path,
-+// so a whole slot save never pins gigabytes.
++// buffer on the host.  Restores are batched the same way through the same stage (llama_io_read_host, below;
++// LLAMA_STATE_ASYNC_READ=0 keeps their per-tensor synchronous sets).  States above LLAMA_STATE_ASYNC_MAX_MIB (default
++// 256) keep the old path in both directions, so a whole slot save or load never pins gigabytes.
 +//
 +// Fold (r96, PR #189): the staging buffer (`state_stage`) is kept by the context across saves and rounded up to
 +// 16 MiB, so a context holds the checkpoint size (never more than LLAMA_STATE_ASYNC_MAX_MIB) in pinned host memory
-+// for its lifetime.  It is ONE buffer per context, so state saves on the same context must not run concurrently;
-+// the llama state API is not documented as thread-safe, and this makes that concrete.
++// for its lifetime.  It is ONE buffer per context, so state saves and restores on the same context must not run
++// concurrently; the llama state API is not documented as thread-safe, and this makes that concrete.
 +static bool llama_state_async_enabled(size_t total) {
 +    static const bool on = [] { const char * e = getenv("LLAMA_STATE_ASYNC"); return e == nullptr || atoi(e) != 0; }();
 +    static const size_t max_bytes = [] {
@@ -4611,7 +4625,7 @@ index 3bb23494a..b59f5c970 100644
          }
      }
  
-@@ -3721,6 +4022,8 @@ private:
+@@ -3721,13 +4022,59 @@ private:
          size_t offset;
      };
      std::vector<write_info> winfos;
@@ -4620,7 +4634,67 @@ index 3bb23494a..b59f5c970 100644
  };
  
  class llama_io_read_host : public llama_io_read_i {
-@@ -4136,6 +4439,43 @@ private:
+ public:
+-    llama_io_read_host(const uint8_t * p, size_t len) : ptr(p), buf_size(len) {}
++    llama_io_read_host(const uint8_t * p, size_t len, llama_context * lctx = nullptr) : ptr(p), buf_size(len), lctx(lctx) {}
++
++    // Batched restore (LLAMA_STATE_ASYNC_READ, default on; 0 = the per-tensor synchronous sets below).  Each
++    // synchronous set bounces through a pinned chunk and synchronizes its device, once per tensor and device (a
++    // hybrid model's checkpoint is ~75 tensors).  Instead pack the pieces into the context's pinned state stage,
++    // queue every tensor as an async copy from it and synchronize each backend once.  Same bytes, same tensors.
++    bool flush_async() {
++        static const bool on = [] { const char * e = getenv("LLAMA_STATE_ASYNC_READ"); return e == nullptr || atoi(e) != 0; }();
++        if (!on || lctx == nullptr || rinfos.empty()) {
++            return false;
++        }
++        size_t total = 0;
++        for (const auto & r : rinfos) {
++            total += r.size;
++        }
++        if (!llama_state_async_enabled(total)) {
++            return false;
++        }
++        std::vector<ggml_backend_t> bks(rinfos.size());
++        for (size_t i = 0; i < rinfos.size(); ++i) {
++            if ((bks[i] = lctx->state_backend(rinfos[i].tensor)) == nullptr) {
++                return false;
++            }
++        }
++        uint8_t * stage = lctx->state_stage(total);
++        if (stage == nullptr) {
++            return false;
++        }
++        // the pieces sit between small metadata fields in the caller's buffer, so pack them one by one
++        size_t off = 0;
++        for (const auto & r : rinfos) {
++            memcpy(stage + off, r.ptr, r.size);
++            off += r.size;
++        }
++        off = 0;
++        for (size_t i = 0; i < rinfos.size(); ++i) {
++            ggml_backend_tensor_set_async(bks[i], rinfos[i].tensor, stage + off, rinfos[i].offset, rinfos[i].size);
++            off += rinfos[i].size;
++        }
++        llama_state_sync_all(bks);   // the stage is reused by the next state copy on this context
++        return true;
++    }
+ 
+     ~llama_io_read_host() {
++        if (flush_async()) {
++            return;
++        }
+         // flush the reads
+         for (const auto & rinfo : rinfos) {
+             ggml_backend_tensor_set(rinfo.tensor, rinfo.ptr, rinfo.offset, rinfo.size);
+@@ -3767,6 +4114,7 @@ public:
+ 
+ private:
+     const uint8_t * ptr;
++    llama_context * lctx = nullptr;
+     size_t buf_size = 0;
+     size_t size_read = 0;
+ 
+@@ -4136,6 +4484,43 @@ private:
      const llama_memory_buffers & mbufs;
  };
  
@@ -4664,7 +4738,7 @@ index 3bb23494a..b59f5c970 100644
  size_t llama_context::state_get_size() {
      llama_io_write_dummy io(false);
      try {
-@@ -4147,7 +4487,7 @@ size_t llama_context::state_get_size() {
+@@ -4147,7 +4532,7 @@ size_t llama_context::state_get_size() {
  }
  
  size_t llama_context::state_get_data(uint8_t * dst, size_t size) {
@@ -4673,7 +4747,16 @@ index 3bb23494a..b59f5c970 100644
      try {
          return state_write_data(io);
      } catch (const std::exception & err) {
-@@ -4187,7 +4527,7 @@ size_t llama_context::state_seq_get_data(llama_seq_id seq_id, uint8_t * dst, siz
+@@ -4157,7 +4542,7 @@ size_t llama_context::state_get_data(uint8_t * dst, size_t size) {
+ }
+ 
+ size_t llama_context::state_set_data(const uint8_t * src, size_t size) {
+-    llama_io_read_host io(src, size);
++    llama_io_read_host io(src, size, this);
+     try {
+         return state_read_data(io);
+     } catch (const std::exception & err) {
+@@ -4187,7 +4572,7 @@ size_t llama_context::state_seq_get_data(llama_seq_id seq_id, uint8_t * dst, siz
      if (flags & LLAMA_STATE_SEQ_FLAGS_ON_DEVICE) {
          io = std::make_unique<llama_io_write_device>(dst, size, mem_storage[seq_id]);
      } else {
@@ -4682,7 +4765,25 @@ index 3bb23494a..b59f5c970 100644
      }
  
      try {
-@@ -5012,7 +5352,16 @@ llama_context * llama_init_from_model(
+@@ -4205,7 +4590,7 @@ size_t llama_context::state_seq_set_data(llama_seq_id seq_id, const uint8_t * sr
+     std::unique_ptr<llama_io_read_i> io;
+     if (flags & LLAMA_STATE_SEQ_FLAGS_ON_DEVICE) {
+         // create a temporary io to read the magic and the src seq_id
+-        io = std::make_unique<llama_io_read_host>(src, size);
++        io = std::make_unique<llama_io_read_host>(src, size, this);
+ 
+         uint32_t magic_read;
+         io->read(&magic_read, sizeof(magic_read));
+@@ -4220,7 +4605,7 @@ size_t llama_context::state_seq_set_data(llama_seq_id seq_id, const uint8_t * sr
+ 
+         io = std::make_unique<llama_io_read_device>(src, size, mem_storage[seq_id_read]);
+     } else {
+-        io = std::make_unique<llama_io_read_host>(src, size);
++        io = std::make_unique<llama_io_read_host>(src, size, this);
+     }
+ 
+     try {
+@@ -5012,7 +5397,16 @@ llama_context * llama_init_from_model(
  
          return ctx;
      } catch (const std::exception & err) {
