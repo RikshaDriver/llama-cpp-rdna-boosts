@@ -1,8 +1,9 @@
 # `qwen4exp-dflash2` — DFlash2 drafting on Qwen3.8-Flash-Next: the target must export **HC-averaged** layer inputs
 
 **Status: OPEN (seeded 2026-10-23, r120).  Scoping + one known shape blocker, nothing attempted in code yet.**
-Tracked as **TODO #94**.  **Nothing here is part of the delivery**: this campaign is a plan plus the evidence
-gathered while answering "is there a DFlash2 head for Flash-Next?".
+Tracked as **TODO #94** and [issue #211](https://github.com/stew675/llama-cpp-rdna-boosts/issues/211).
+**Nothing here is part of the delivery**: this campaign is a plan plus the evidence gathered while answering
+"is there a DFlash2 head for Flash-Next?".
 
 One line: a DFlash2 head for Flash-Next exists, converts cleanly and its shapes line up, but the qwen4exp
 graph exports the **wide hyper-connection residual** (`hc * n_embd` = 10240) as its DFlash layer input while

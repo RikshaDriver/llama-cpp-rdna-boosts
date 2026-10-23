@@ -190,7 +190,8 @@ fraction at 43 % residency; if it is <20 %, park it.  Design space and gates:
 
 ## 94. DFlash2 drafting on Qwen3.8-Flash-Next (qwen4exp): the target must export HC-averaged layer inputs — SPECULATIVE DECODING (open)
 
-**Status: open, scoping + one known shape blocker.**  Campaign: [`wip/qwen4exp-dflash2/`](wip/qwen4exp-dflash2/README.md).
+**Status: open, scoping + one known shape blocker.**  Campaign:
+[`wip/qwen4exp-dflash2/`](wip/qwen4exp-dflash2/README.md); issue #211.
 
 A DFlash2 head for Flash-Next exists (`incoai/Qwen3.8-Flash-Next-DFlash2`, plus GGUF conversions: Q4_K_M
 362 MB), it is a real DFlash2 head (`selector_top_k 16`, `block_size 8`, `target_layers
