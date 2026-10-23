@@ -42,10 +42,10 @@ only as a rough shape.
 | 06 | `0006-…-block-06-MMB-quantized-prefill-GEMM` | MMB quantized prefill GEMM | +2618 / −3 | 5 |
 | 07 | `0007-…-block-07-k-quant-boosts-mmvq-VDR-Q6_K-MM` | k-quant boosts (VDR, Q6_K MMQ, Q1_0, grid pad) | +884 / −140 | 9 |
 | 08 | `0008-…-block-08-fused-kernels-old-08-fusions-ol` | fused kernels + fused MoE | +5369 / −445 | 36 |
-| 09 | `0009-…-block-09-host-resident-MoE-iface-schedul` | host-resident MoE: iface, scheduler, cache, slab hooks | +14175 / −535 | 65 |
+| 09 | `0009-…-block-09-host-resident-MoE-iface-schedul` | host-resident MoE: iface, scheduler, cache, slab hooks (+ r120: the second draft scheduler's slot is per arch, DFlash2 fix) | +14702 / −534 | 65 |
 | 10 | `0010-…-block-10-slab-fusion-dispatcher-async-in` | slab + fusion dispatcher + async input ring (infrastructure) | +11794 / −4753 | 75 |
 | 11 | `0011-…-block-11-qwen4exp-model-hyper-connection` | qwen4exp model/QSA/HC/lazy reader/indexer cache | +11775 / −419 | 46 |
-| 12 | `0012-…-block-12-campaign-remainder-CPU-wins-bac` | campaign remainder (+ r106: Meta `ALL_GATHER`, DFlash2 `-sm tensor`, slab narrow-2; + r111/r112: `--host-experts pool` drops the pinned master; FRAC 80 + O_DIRECT defaults; + r119: batched state restore) | +2958 / −679 | 33 |
+| 12 | `0012-…-block-12-campaign-remainder-CPU-wins-bac` | campaign remainder (+ r106: Meta `ALL_GATHER`, DFlash2 `-sm tensor`, slab narrow-2; + r111/r112: `--host-experts pool` drops the pinned master; FRAC 80 + O_DIRECT defaults; + r119: batched state restore) | +2959 / −680 | 33 |
 | 13 | `0013-…-block-13-MTP-draft-vocabulary-subset-spe` | MTP draft vocabulary subset (`--spec-draft-mtp-vocab N`, opt-in) | +569 / −6 | 19 |
 
 Block 05's file count is `template-instances/*.cu` (the FA kernel instantiations); block 10 is the
@@ -540,6 +540,24 @@ whatever VRAM is left.
 * Host-side: mmap reclaim (`LLAMA_LOAD_RELEASE_MMAP`), rear-fill host layers
   (`LLAMA_HOST_EXPERTS_FROM_END`), `--host-experts pool` (`MOE_HOST_POOL_MIB`), a second draft scheduler
   (`LLAMA_DRAFT_SCHED2`), compute-buffer drop/re-reserve, and the CPU MoE-offload thread cap.
+* **The second draft scheduler's slot is per arch: `n_outputs` for MTP, the batch kind for DFlash**
+  (r120, issue #208).  `sched_alt_select(n_outputs > 0)` fits MTP (a no-output ingest graph and a
+  draft step with an output) but **not** a DFlash2 draft block, which also has no outputs -- its lattice
+  is read from the nextn embeddings, not from logits (`output = !is_dflash2`).  The KV injection and the
+  noise-block draft step then shared one scheduler **and** one `gf_res_prev` slot, so they overwrote each
+  other's graph and the draft context rebuilt and re-allocated both on every verify step: measured **0 of
+  362** draft ubatches reused, 0.27-0.30 ms of build + allocate per draft decode.  `sched_alt_for()`
+  (`src/llama-context.cpp`) now returns, for `LLM_ARCH_DFLASH`, "the batch carries no target features"
+  (`ubatch.embd == nullptr && !cparams.lf_dev_inject`) so the *draft step* takes the second scheduler and
+  the injection (host feature rows or the F1 device injection) stays on the main one; every other arch
+  keeps `n_outputs`, where the batch kind would merge MTP's ingest and step graphs instead of separating
+  them.  `get_gf_res_prev()` takes the same decision, so the scheduler and the graph-reuse slot cannot
+  disagree.  Measured (gfx1201): reuse 0 -> **97.8 %** (dense 27B UD-Q4_K_XL 2 GPU tensor) / **97.9 %**
+  (35B-A3B Q4_K_M `-ncmoe 40`), decode **+1.4 %** / **+1.8 %** (27B 3 GPU) / **+4.0 %** (35B-A3B host
+  experts) / +1.3 % (host injection) / +0.5 % (`-sm layer`) / +0.2 % (1 GPU) / +1.0-1.9 % (2-slot
+  unified server, two concurrent requests), byte-identical text and acceptance everywhere, dense 4B
+  coherence hash unchanged, adaptive-MTP four-axis gate identical, `LLAMA_DRAFT_SCHED2=0` reproduces the
+  old behaviour.  Record: `archive/work/dflash2-draft-sched2/`.
 * **The batched f32 CPY run** (`cpy-batch.cu` / `.cuh`, r95): a run of up to 16 consecutive same-layout
   f32 `GGML_OP_CPY` nodes (the per-position DeltaNet conv-state snapshots of a speculative verify batch
   are the motivating shape) as **one launch**, element copies in `ggml_cpy`'s flat order, so

@@ -1,4 +1,4 @@
-From cf6264ec811770863d477048c59f9d004a607e19 Mon Sep 17 00:00:00 2001
+From 1f535cdaa5f824124f9be0e1590b59818d49d7a8 Mon Sep 17 00:00:00 2001
 From: Stew Forster <ci@rdna-boosts.invalid>
 Date: Wed, 21 Oct 2026 10:40:32 -0500
 Subject: [PATCH 09/13] rdna-boosts: block 09: host-resident MoE (iface,
@@ -129,6 +129,35 @@ per-thread monotonic_buffer_resource (1 MiB, released per walk); only the outerm
 resource is never re-entered, the walk visits the same tensors in the same order and computes the same
 states, and an exhausted arena falls back to the upstream allocator.  GGML_META_SS_SCRATCH=0 restores
 the heap containers (A/B only).
+
+Second-scheduler slot for DFlash/DFlash2 drafts (issue #208): the draft context's second scheduler
+(LLAMA_DRAFT_SCHED2) was selected with `n_outputs > 0`.  That fits MTP (a no-output ingest graph and a
+draft step with an output) but not a DFlash2 draft block, which has no outputs either: its lattice is
+read from the nextn embeddings, not from logits (`output = !is_dflash2`).  The KV injection and the
+noise-block draft step therefore shared one scheduler AND one `gf_res_prev` slot, so they overwrote
+each other's graph every cycle and the draft context rebuilt and re-allocated both of them on every
+verify step (measured 0 of 362 draft ubatches reused).
+
+`sched_alt_for()` now selects the slot from the batch kind for LLM_ARCH_DFLASH -- the injection is the
+batch that carries the target features (host embd rows, or the F1 device injection whose token ids are
+target rows), the draft step is the token batch -- and keeps `n_outputs` for every other arch, where
+the batch kind would merge MTP's ingest and step graphs instead of separating them.  `get_gf_res_prev()`
+takes the same decision, so the scheduler and the graph-reuse slot cannot disagree.
+
+Measured (gfx1201, 512 greedy tokens, `prompts/prose-rdna-boosts.txt`): draft graph reuse 0 -> 97.8 %
+(dense 27B UD-Q4_K_XL 2 GPU tensor) and 97.9 % (35B-A3B Q4_K_M `-ncmoe 40`); decode +1.4 % (27B 2 GPU),
++1.8 % (27B 3 GPU), +4.0 % (35B-A3B host experts), +1.3 % (host injection, GGML_LF_DFLASH_DEV=0),
++0.5 % (27B `-sm layer`), +0.2 % (27B 1 GPU); a 2-slot unified server with two concurrent requests is
+identical per slot (text, acceptance 0.66894 / 0.73801) at +1.0 / +1.9 %.  Generated text is
+byte-identical in every arm, the dense 4B coherence hash is unchanged, and the adaptive-MTP four-axis
+gate (27B, `-n 3000`, reasoning pinned per axis) is identical to the pre-fix build on all four axes
+(t/s, acceptance and text).  `LLAMA_DRAFT_SCHED2=0` reproduces the old behaviour exactly.
+
+Per-block build (blocks own their code): the identity-preference layer-drop ranking (r117) called
+`heat_rank_vec()`, which block 12 introduces with the band-split heat prior (r114), so block 09 alone
+did not compile (`use of undeclared identifier 'heat_rank_vec'`) since r117.  This block now ranks by
+`t.heat`, which is byte-identical in this tree (there is no decode counter yet), and block 12 switches
+this site over along with the two it already owns.  `gate-per-block-build.sh` selects block 09 again.
 ---
  common/CMakeLists.txt                         |    2 +
  common/arg.cpp                                |   21 +-
@@ -180,8 +209,8 @@ the heap containers (A/B only).
  ggml/src/ggml-zdnn/ggml-zdnn.cpp              |    7 +
  ggml/src/ggml-zendnn/ggml-zendnn.cpp          |    7 +
  include/llama.h                               |   58 +
- src/llama-context.cpp                         |  421 +-
- src/llama-context.h                           |   42 +-
+ src/llama-context.cpp                         |  455 +-
+ src/llama-context.h                           |   50 +-
  src/llama-cparams.h                           |   11 +
  src/llama-ext.h                               |   11 +
  src/llama-kv-cache.cpp                        |    7 +-
@@ -195,7 +224,7 @@ the heap containers (A/B only).
  src/llama.cpp                                 |   16 +-
  tools/cli/cli.cpp                             |    6 +
  tools/llama-bench/llama-bench.cpp             |   65 +-
- 65 files changed, 14665 insertions(+), 529 deletions(-)
+ 65 files changed, 14702 insertions(+), 534 deletions(-)
  create mode 100644 common/draft-reserve.cpp
  create mode 100644 common/draft-reserve.h
  create mode 100644 ggml/src/ggml-cuda/cpy-batch.cu
@@ -9890,7 +9919,7 @@ index 4140f681a..35f625eaa 100644
 \ No newline at end of file
 diff --git a/ggml/src/ggml-cuda/moe-expert-cache.cu b/ggml/src/ggml-cuda/moe-expert-cache.cu
 new file mode 100644
-index 000000000..04c9bc1d6
+index 000000000..500c9c797
 --- /dev/null
 +++ b/ggml/src/ggml-cuda/moe-expert-cache.cu
 @@ -0,0 +1,5534 @@
@@ -12826,7 +12855,7 @@ index 000000000..04c9bc1d6
 +                uint64_t s = 0;
 +                for (const table_t & t : g_tables) {
 +                    if (!t.allocated && t.layer == i) {
-+                        for (uint32_t v : heat_rank_vec(t)) {
++                        for (uint32_t v : t.heat) {
 +                            s += v;
 +                        }
 +                    }
@@ -16365,7 +16394,7 @@ index 0eab7fec5..0c99fa0d5 100644
  
      LLAMA_API int32_t llama_model_n_ctx_train  (const struct llama_model * model);
 diff --git a/src/llama-context.cpp b/src/llama-context.cpp
-index f5d25416d..5cf73a24f 100644
+index f5d25416d..2eb604fd2 100644
 --- a/src/llama-context.cpp
 +++ b/src/llama-context.cpp
 @@ -462,9 +462,10 @@ llama_context::llama_context(
@@ -16382,7 +16411,7 @@ index f5d25416d..5cf73a24f 100644
  
      // initialized later
      cparams.pipeline_parallel = false;
-@@ -881,6 +882,22 @@ void llama_context::sched_new(size_t max_nodes, bool parallel) {
+@@ -881,6 +882,51 @@ void llama_context::sched_new(size_t max_nodes, bool parallel) {
      ggml_backend_sched_set_realloc_callback(sched.get(), sched_graph_realloc, this);
  }
  
@@ -16402,10 +16431,39 @@ index f5d25416d..5cf73a24f 100644
 +    ggml_backend_meta_set_view_slot(alt ? 1 : 0);
 +}
 +
++bool llama_context::sched_alt_for(const llama_ubatch & ubatch) const {
++    if (cparams.ctx_other == nullptr) {
++        return false;
++    }
++
++    // read once: this runs for every ubatch; getenv() is expensive on Windows
++    static const bool draft_sched2 = [] {
++        const char * e = getenv("LLAMA_DRAFT_SCHED2");
++        return e == nullptr || atoi(e) != 0;
++    }();
++    if (!draft_sched2) {
++        return false;
++    }
++
++    if (model.arch == LLM_ARCH_DFLASH) {
++        // A DFlash/DFlash2 draft context alternates two graphs and NEITHER marks outputs: the KV injection
++        // (host feature rows, or the F1 device injection whose token ids are target rows), and the noise-block
++        // draft step, whose result is read from h_nextn (the selector lattice) instead of the logits.  So
++        // `n_outputs` cannot tell them apart -- the batch kind can: the injection is the one that carries the
++        // target features.  Without this split both graphs share one scheduler and one `gf_res_prev` slot, the
++        // draft context rebuilds and re-allocates both of them on every verify step and never reuses a graph
++        // (issue #208).  MTP keeps `n_outputs`: its ingest is a token batch without outputs and its step graph
++        // is the one with outputs, so the batch kind would merge the two graphs instead of separating them.
++        return ubatch.embd == nullptr && !cparams.lf_dev_inject;
++    }
++
++    return n_outputs > 0;
++}
++
  bool llama_context::kq_mask_packed_reachable() const {
      if (model.hparams.n_pos_per_embd() > 1) {
          return true;
-@@ -923,6 +940,10 @@ void llama_context::sched_reserve() {
+@@ -923,6 +969,10 @@ void llama_context::sched_reserve() {
      gf_res_reserve.reset(new llm_graph_result(max_nodes));
      gf_res_prev_active = nullptr;
  
@@ -16416,7 +16474,7 @@ index f5d25416d..5cf73a24f 100644
      sched_new(max_nodes, cparams.pipeline_parallel);
  
      llama_memory_context_ptr mctx;
-@@ -1052,6 +1073,22 @@ void llama_context::sched_reserve() {
+@@ -1052,6 +1102,22 @@ void llama_context::sched_reserve() {
              __func__, (t_end_us - t_start_us_l)/1000.0, ggml_backend_sched_get_n_copies(sched.get()));
  }
  
@@ -16439,7 +16497,7 @@ index f5d25416d..5cf73a24f 100644
  void llama_context::synchronize() {
      if (!sched) {
          return;
-@@ -1163,6 +1200,7 @@ bool llama_context::memory_update(bool optimize) {
+@@ -1163,6 +1229,7 @@ bool llama_context::memory_update(bool optimize) {
              }
          }
          gf_res_prev_active = nullptr;
@@ -16447,7 +16505,7 @@ index f5d25416d..5cf73a24f 100644
  
          if (!mctx->apply()) {
              LLAMA_LOG_ERROR("%s: failed to apply memory update\n", __func__);
-@@ -1692,6 +1730,13 @@ bool llama_context::set_adapter_cvec(
+@@ -1692,6 +1759,13 @@ bool llama_context::set_adapter_cvec(
      return res;
  }
  
@@ -16461,10 +16519,11 @@ index f5d25416d..5cf73a24f 100644
  llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, llm_graph_type gtype, llama_memory_context_i * mctx, ggml_status & ret) {
      if (mctx && !mctx->apply()) {
          LLAMA_LOG_ERROR("%s: failed to apply memory context\n", __func__);
-@@ -1699,6 +1744,197 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
+@@ -1699,7 +1773,193 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
          return nullptr;
      }
  
+-    auto * res = get_gf_res_prev();
 +    // TODO #42 (OPEN 1): release the wide-prefill compute layout at the prefill -> decode transition so
 +    // the MoE expert-cache arena can be sized large.  ON by default for every tool now that the
 +    // movable-boundary slab can reclaim a wide layout later (the boundary move evicts only the arena
@@ -16648,18 +16707,14 @@ index f5d25416d..5cf73a24f 100644
 +        }
 +    }
 +
-+    static const bool draft_sched2 = [] {
-+        const char * e = getenv("LLAMA_DRAFT_SCHED2");
-+        return e == nullptr || atoi(e) != 0;
-+    }();
-+    if (draft_sched2 && cparams.ctx_other != nullptr) {
-+        sched_alt_select(n_outputs > 0);
-+    }
++    const bool alt = sched_alt_for(ubatch);
++    sched_alt_select(alt);
 +
-     auto * res = get_gf_res_prev();
++    auto * res = get_gf_res_prev(alt);
      auto * gf  = res->get_gf();
  
-@@ -1768,6 +2004,12 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
+     // the new graph parameters
+@@ -1768,6 +2028,12 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
  }
  
  int llama_context::encode(const llama_batch_ext & batch_inp) {
@@ -16672,7 +16727,7 @@ index f5d25416d..5cf73a24f 100644
      if (batch_inp.tokens.empty()) {
          LLAMA_LOG_ERROR("%s: n_tokens == 0\n", __func__);
          return -1;
-@@ -2007,6 +2249,12 @@ static bool needs_raw_logits(const llama_ubatch & ubatch, const std::map<llama_s
+@@ -2007,6 +2273,12 @@ static bool needs_raw_logits(const llama_ubatch & ubatch, const std::map<llama_s
  }
  
  int llama_context::decode(const llama_batch_ext & batch_inp) {
@@ -16685,7 +16740,7 @@ index f5d25416d..5cf73a24f 100644
      if (!memory) {
          LLAMA_LOG_DEBUG("%s: cannot decode batches with this context (calling encode() instead)\n", __func__);
          return encode(batch_inp);
-@@ -2575,6 +2823,15 @@ uint32_t llama_context::output_reserve(int32_t n_outputs_l) {
+@@ -2575,6 +2847,15 @@ uint32_t llama_context::output_reserve(int32_t n_outputs_l) {
          // try to use the host buffer of the device where the output tensor is allocated for faster transfer to system memory
          auto * output_dev = model.dev_output();
          auto * output_dev_host_buft = output_dev ? ggml_backend_dev_host_buffer_type(output_dev) : nullptr;
@@ -16701,7 +16756,18 @@ index f5d25416d..5cf73a24f 100644
          if (output_dev_host_buft) {
              buft = output_dev_host_buft;
          }
-@@ -2907,6 +3164,7 @@ ggml_cgraph * llama_context::graph_reserve(
+@@ -2822,8 +3103,8 @@ llm_graph_result * llama_context::get_gf_res_reserve() const {
+     return static_cast<llm_graph_result *>(gf_res_reserve.get());
+ }
+ 
+-llm_graph_result * llama_context::get_gf_res_prev() {
+-    auto & res = gf_res_prev[n_outputs > 0];
++llm_graph_result * llama_context::get_gf_res_prev(bool alt) {
++    auto & res = gf_res_prev[alt];
+     if (!res) {
+         res.reset(new llm_graph_result(gf_res_reserve->get_max_nodes()));
+     }
+@@ -2907,6 +3188,7 @@ ggml_cgraph * llama_context::graph_reserve(
          }
      }
      gf_res_prev_active = nullptr;
@@ -16709,7 +16775,7 @@ index f5d25416d..5cf73a24f 100644
  
      // store the n_outputs as it is, and restore it afterwards
      // TODO: not sure if needed, might simplify in the future by removing this
-@@ -3032,8 +3290,6 @@ ggml_status llama_context::graph_compute(
+@@ -3032,8 +3314,6 @@ ggml_status llama_context::graph_compute(
          set_n_threads_fn.second(set_n_threads_fn.first, n_threads);
      }
  
@@ -16718,7 +16784,7 @@ index f5d25416d..5cf73a24f 100644
      auto status = ggml_backend_sched_graph_compute_async(sched.get(), gf);
      if (status != GGML_STATUS_SUCCESS) {
          LLAMA_LOG_ERROR("%s: ggml_backend_sched_graph_compute_async failed with error %d\n", __func__, status);
-@@ -3047,85 +3303,13 @@ ggml_status llama_context::graph_compute(
+@@ -3047,85 +3327,13 @@ ggml_status llama_context::graph_compute(
  bool llama_context::sched_copy_experts(ggml_backend_t backend, const ggml_tensor * src, ggml_tensor * dst, ggml_cgraph * graph, void * user_data) {
      auto * lctx = static_cast<llama_context *>(user_data);
  
@@ -16811,7 +16877,7 @@ index f5d25416d..5cf73a24f 100644
  }
  
  llm_graph_cb llama_context::graph_get_cb() const {
-@@ -3982,6 +4166,52 @@ void llama_context::perf_reset() {
+@@ -3982,6 +4190,52 @@ void llama_context::perf_reset() {
      // note: the reallocation counters are not reset - they track the lifetime totals for this context
  }
  
@@ -16864,7 +16930,7 @@ index f5d25416d..5cf73a24f 100644
  llama_memory_breakdown llama_context::memory_breakdown() const {
      std::map<ggml_backend_buffer_type_t, llama_memory_breakdown_data> ret;
      for (const auto & [buft, size] : model.memory_breakdown()) {
-@@ -3992,22 +4222,38 @@ llama_memory_breakdown llama_context::memory_breakdown() const {
+@@ -3992,22 +4246,38 @@ llama_memory_breakdown llama_context::memory_breakdown() const {
              ret[buft].context += size;
          }
      }
@@ -16905,7 +16971,16 @@ index f5d25416d..5cf73a24f 100644
          }
      }
      return ret;
-@@ -4164,6 +4410,7 @@ void llama_context::opt_epoch_iter(
+@@ -4158,12 +4428,15 @@ void llama_context::opt_epoch_iter(
+                 break;
+             }
+ 
+-            auto * res = get_gf_res_prev();
++            // the trainer has no draft context and therefore no second scheduler: keep the slot the
++            // output count selects, as before
++            auto * res = get_gf_res_prev(n_outputs > 0);
+ 
+             const auto gparams = graph_params(res, ubatch, mctx.get(), ctx_type_to_graph_type(cparams.ctx_type));
  
              // the optimizer graph is allocated outside sched, so the next decode must rebuild
              gf_res_prev_active = nullptr;
@@ -16913,7 +16988,7 @@ index f5d25416d..5cf73a24f 100644
              res->reset();
  
              auto * gf = model.build_graph(gparams);
-@@ -4194,7 +4441,6 @@ void llama_context::opt_epoch_iter(
+@@ -4194,7 +4467,6 @@ void llama_context::opt_epoch_iter(
                      ggml_backend_tensor_set(labels, &onef, (pos_ubatch*labels->ne[0] + labels_sparse[ilabel])*sizeof(float), sizeof(float));
                  }
              }
@@ -16921,7 +16996,7 @@ index f5d25416d..5cf73a24f 100644
              ggml_opt_eval(opt_ctx, result);
              if (callback) {
                  callback(train, opt_ctx, dataset, result, idata_in_loop + (pos_ctx + pos_batch)/n_ubatch + 1, ndata_in_loop, t_loop_start);
-@@ -4296,6 +4542,7 @@ llama_context_params llama_context_default_params() {
+@@ -4296,6 +4568,7 @@ llama_context_params llama_context_default_params() {
          /*.op_offload                  =*/ true,
          /*.swa_full                    =*/ true,
          /*.kv_unified                  =*/ false,
@@ -16930,7 +17005,7 @@ index f5d25416d..5cf73a24f 100644
          /*.n_sampler                   =*/ 0,
          /*.ctx_other                   =*/ nullptr,
 diff --git a/src/llama-context.h b/src/llama-context.h
-index 80f98ad01..914176a16 100644
+index 80f98ad01..f5d32260f 100644
 --- a/src/llama-context.h
 +++ b/src/llama-context.h
 @@ -58,6 +58,11 @@ struct llama_context {
@@ -16945,17 +17020,30 @@ index 80f98ad01..914176a16 100644
      void synchronize();
  
      const llama_model   & get_model()   const;
-@@ -286,6 +291,9 @@ private:
+@@ -273,7 +278,7 @@ public:
+     bool set_sampler(llama_seq_id seq_id, llama_sampler * sampler);
+ 
+ private:
+-    llm_graph_result * get_gf_res_prev();
++    llm_graph_result * get_gf_res_prev(bool alt);
+ 
+     llm_graph_params graph_params(
+                         llm_graph_result * res,
+@@ -286,6 +291,13 @@ private:
      // create a new backend scheduler for a graph of the specified size and register the callbacks below
      void sched_new(size_t max_nodes, bool parallel);
  
 +    // swap the second scheduler (and its graph-reuse state) in or out of `sched`, creating it on first use
 +    void sched_alt_select(bool alt);
 +
++    // whether this ubatch is the draft context's second graph (the draft step) rather than its ingest /
++    // KV-injection graph; the batch kind, not `n_outputs`, is the discriminator for DFlash/DFlash2
++    bool sched_alt_for(const llama_ubatch & ubatch) const;
++
      // ggml_backend_sched copy callback, copies only the experts used by MUL_MAT_ID and updates the MoE cache
      static bool sched_copy_experts(ggml_backend_t backend, const ggml_tensor * src, ggml_tensor * dst, ggml_cgraph * graph, void * user_data);
  
-@@ -366,6 +374,10 @@ private:
+@@ -366,6 +378,10 @@ private:
      uint32_t n_input_tensors = 0; // number of tensors marked as input during the last graph reserve
      uint32_t n_outputs = 0; // number of actually-used outputs in the current ubatch or last logical batch
  
@@ -16966,12 +17054,20 @@ index 80f98ad01..914176a16 100644
      std::vector<int32_t> output_ids; // map batch token positions to ids of the logits and embd buffers
  
      struct swap_info {
-@@ -377,22 +389,14 @@ private:
+@@ -377,22 +393,16 @@ private:
  
      ggml_backend_sched_ptr sched;
  
 -    bool sched_need_reserve = true;
--
++    // The MTP draft context alternates a no-output ingest graph and a 1-token draft-step graph every cycle; with
++    // one scheduler each switch re-splits and re-allocates the graph.  The graphs with outputs run on a second
++    // scheduler, so both stay allocated and are reused.  It is swapped into `sched` only while a decode or encode
++    // runs (LLAMA_DRAFT_SCHED2=0: off).  A DFlash/DFlash2 draft alternates unlike graphs that BOTH have no
++    // outputs (a KV injection and a noise block whose lattice comes from h_nextn), so there the batch kind picks
++    // the slot - see `sched_alt_for()`.
++    ggml_backend_sched_ptr sched_alt;
++    bool                   sched_alt_in_use = false;
+ 
 -    // state of sched_copy_experts, reset before each graph compute
 -    struct copy_experts_info {
 -        const ggml_tensor *  ids = nullptr;
@@ -16984,19 +17080,13 @@ index 80f98ad01..914176a16 100644
 -            used.clear();
 -        }
 -    };
-+    // The MTP draft context alternates a no-output ingest graph and a 1-token draft-step graph every cycle; with
-+    // one scheduler each switch re-splits and re-allocates the graph.  The graphs with outputs run on a second
-+    // scheduler, so both stay allocated and are reused.  It is swapped into `sched` only while a decode or encode
-+    // runs (LLAMA_DRAFT_SCHED2=0: off).
-+    ggml_backend_sched_ptr sched_alt;
-+    bool                   sched_alt_in_use = false;
- 
+-
 -    copy_experts_info copy_experts;
 +    bool sched_need_reserve = true;
  
      // graph reallocations during inference where the backend assignments did not change, split by whether the
      // graph size is the same as the previously scheduled one (unexpected) or different
-@@ -423,6 +427,7 @@ private:
+@@ -423,6 +433,7 @@ private:
      llm_graph_result_ptr gf_res_reserve;
  
      llm_graph_result * gf_res_prev_active = nullptr;
@@ -17004,7 +17094,7 @@ index 80f98ad01..914176a16 100644
  
      // host buffer for the model output (logits and embeddings)
      ggml_backend_buffer_ptr buf_output;
-@@ -432,6 +437,13 @@ private:
+@@ -432,6 +443,13 @@ private:
  
      bool has_evaluated_once = false;
  

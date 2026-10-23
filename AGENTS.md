@@ -203,6 +203,16 @@ stub alive to serve them, and treat a `wip/` path in an old record as a historic
   the draft's compute buffer exceeds the unmapped VA spare (a tensor-split drafter's is 1280 MiB against the
   estimator's 512 MiB tier; without it `-sm tensor` + draft + `-ncmoe` aborts in `graph_reserve`).  Rule:
   `patches/README.md` (block 12, "Facts that span blocks").
+- **The draft context's second scheduler is selected per arch (`sched_alt_for`): `n_outputs` for MTP, the
+  batch kind for DFlash/DFlash2 (r120, issue #208).**  MTP's two graphs differ by outputs; a DFlash2
+  draft's do not (the lattice is read from `h_nextn`, so `output = !is_dflash2`), so selecting on
+  `n_outputs` put the KV injection and the draft step on one scheduler *and* one `gf_res_prev` slot: 0 %
+  graph reuse, a rebuild + re-allocate on every verify step (r65-r119).  DFLASH now sends the token batch
+  (no `embd`, no `lf_dev_inject`) to the second scheduler and keeps the injection on the main one; every
+  other arch keeps `n_outputs`, where the batch kind would *merge* MTP's ingest and step graphs.  Nothing
+  else may pick a draft graph slot independently: `get_gf_res_prev()` shares the decision.  Reuse
+  0 -> 97.8 %, decode +1.4 % (27B 2 GPU tensor) to +4.0 % (35B-A3B `-ncmoe 40`), text and acceptance
+  identical.  Record: `archive/work/dflash2-draft-sched2/`.
 - **The expert cache's routing trace is opt-in and is the policy instrument (r110, TODO #61 P1).**
   `MOE_EXPERT_TRACE=<path>` writes every `mul_mat_id`'s raw routing (`scripts/moe-trace-replay.py` scores
   policies against it offline: the shipped F-LRU, static top-f, per-layer quota, window/prefix

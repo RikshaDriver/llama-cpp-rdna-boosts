@@ -1,5 +1,93 @@
 # WORKLOG - dated delivery records
 
+## 261023.005 (r120) -- issue #208: a DFlash2 draft block never reached the second draft scheduler (block 09); reuse 0 -> 97.8 %, decode +1.5 % (27B 2 GPU) to +3.7 % (35B-A3B host experts)
+
+**Shipped:** `v14-097cf33d9-r120` (**block 09** amended; **block 12** amended only to move one call site's
+ownership so block 09 builds on its own -- the merged tree is unchanged).  `release.json` tip
+`aa67b58ab`, tree `0fd9827d7`.  `scripts/validate-set.sh` green (fresh tarball, strict 14/14 `git am`,
+applied tree == recorded tree); `gate-per-block-build.sh --changed-from 5efc1e9f1` **3/3**;
+`check-gpu-faults.sh` clean.  Record and harnesses:
+[`archive/work/dflash2-draft-sched2/`](archive/work/dflash2-draft-sched2/).
+
+**1. The report.**  [issue #208](https://github.com/stew675/llama-cpp-rdna-boosts/issues/208)
+(`@overdoingism`, r112, 1x gfx1201): the second draft scheduler (r65, `LLAMA_DRAFT_SCHED2`) is selected
+with `sched_alt_select(n_outputs > 0)` and the graph result with `gf_res_prev[n_outputs > 0]`.  That fits
+MTP -- a no-output ingest graph and a 1-token draft step with an output -- but a DFlash2 draft block has
+**no outputs either**: `common_speculative_impl_draft_dflash::draft()` adds the noise-block tokens with
+`output = !is_dflash2`, because the selector lattice is read from the nextn embeddings, not from logits.
+So both of a DFlash2 draft's graphs had `n_outputs == 0`, shared one scheduler **and** one `gf_res_prev`
+slot, overwrote each other's graph every cycle, and the draft context rebuilt and re-allocated both on
+every verify step.  r84's #183 fix (the allocator layout fingerprint) is unrelated and does not help;
+the reporter also confirmed `LLAMA_DRAFT_SCHED2=0` made no difference for DFlash2, which is exactly the
+symptom.
+
+**2. Reproduction.**  Pre-fix r119 tree, temporary env-gated trace in `process_ubatch`
+(`LLAMA_DRAFT_GRAPH_DEBUG`, not delivered): **0 of 362** draft ubatches reused, the injection
+(`n_tokens=6 embd=1`) and the draft step (`n_tokens=6 embd=0`) both on `slot_alt=0`, matching the
+reporter's "reused 0 of 100 graphs" and 0.27-0.30 ms of build + allocate per draft decode.
+
+**3. The fix (block 09, `src/llama-context.{cpp,h}`).**  The decision moves into a new
+`llama_context::sched_alt_for(const llama_ubatch &)`, and `get_gf_res_prev(bool alt)` takes it as a
+parameter so the scheduler and the graph slot cannot disagree:
+
+* `LLM_ARCH_DFLASH`: the **batch kind** decides -- the injection is the batch that carries the target
+  features (host `embd` rows, or the F1 device injection with `cparams.lf_dev_inject`), so the draft step
+  is `ubatch.embd == nullptr && !cparams.lf_dev_inject`.  The partition is total and exclusive for a
+  DFlash draft context and behaviour-preserving for a DFlash (non-2) / DSpark draft, whose step graph has
+  outputs and already took the second scheduler.
+* everything else: `n_outputs > 0`, unchanged.  The batch kind must **not** be used for MTP: its ingest is
+  also a token batch, so the two MTP graphs would be *merged* instead of separated (the reporter's own
+  caveat, and why their experiment was not a fix as written).
+* No new environment variable: the r65 `LLAMA_DRAFT_SCHED2=0` kill switch covers this path and now
+  reproduces the pre-fix behaviour exactly (measured 94.25 vs 94.20 t/s).  Default stays on.
+
+**4. Measurements** (gfx1201, 3x R9700, ROCm 10.1.0; 27B UD-Q4_K_XL + DFlash2-Q4_K_M or 35B-A3B
+UD-Q4_K_M + DFlash2-Q8_0, `--spec-type draft-dflash --spec-draft-n-max 5`, `-c 16384 -ub 2048 -b 2048
+-fa on -ctk q8_0 -ctv q8_0 -t 8`, `prompts/prose-rdna-boosts.txt`, 512 greedy tokens, seed 42; clean base
+vs clean fix build, only `libllama.so` differs, arms interleaved):
+
+| arm | base | fix | delta |
+|---|---:|---:|---:|
+| 27B, 2 GPU `-sm tensor` | 94.07 | 95.50 | **+1.5 %** |
+| 27B, 3 GPU `-sm tensor` | 110.20 | 112.13 | **+1.8 %** |
+| 27B, 1 GPU | 66.05 | 66.15 | +0.2 % |
+| 27B, 2 GPU `-sm layer` | 60.35 | 60.70 | +0.6 % |
+| 27B, host injection (`GGML_LF_DFLASH_DEV=0`) | 94.30 | 95.75 | +1.5 % |
+| 35B-A3B `-ncmoe 40`, 2 GPU | 203.23 | 210.83 | **+3.7 %** |
+| 27B, 2 GPU `-np 2` | 94.20 | 95.60 | +1.5 % |
+| 2-slot unified server, 2 concurrent requests | 52.50 / 97.21 | 53.05 / 99.05 | +1.0 / +1.9 % |
+
+Draft graph reuse over the last 400 draft ubatches: 0 % -> **97.8 %** (27B 2 GPU: 177 injection + 177
+draft-step of 362) and 0 % -> **97.9 %** (35B-A3B); the 2-slot server goes 29.9 % -> 86.4 / 95.0 %.  The
+win is a per-verify-step host cost, so it scales with target decode speed (largest on the MoE host-expert
+arm, smallest on one GPU).
+
+**5. Gates.**  Generated text byte-identical base vs fix in every arm; dense `Qwen3.5-4B Q8_0` 3-GPU
+coherence hash `1c5d32ac537d` unchanged; the **adaptive-MTP four-axis gate** (27B embedded MTP head,
+`-n 3000`, reasoning pinned per axis) identical on all four axes -- 59.3/59.4, 75.2/75.3, 81.1/81.1,
+87.5/87.6 t/s, acceptance 0.57070 / 0.82903 / 0.90119 / 0.99200 and text `89b8dc5d4c70` /
+`65b3ea19d90f` / `6536aa147f62` / `a87c4318b649` in both arms (MTP still takes the `n_outputs` branch, so
+this is the regression check for the shared path); the **two-slot #183 shape** is identical per slot
+(text and acceptance 0.66894 / 0.73801), so the extra split does not reintroduce that aliasing class.
+`gate-prefill-logits.sh` not run: no prefill kernel, no approximate path and no numerics changed (host-side
+scheduler selection only, byte-identical generated text) -- the same reasoning as r84.
+
+**6. Per-block build: a pre-existing gap found and closed.**  The first `gate-per-block-build.sh` run
+failed on block 09 with `use of undeclared identifier 'heat_rank_vec'`: the r117 identity-preference
+layer-drop ranking (block 09) called a helper that block 12 introduces with the r114 band-split heat
+prior, so block 09 had not built on its own since r117 (recent releases ran the gate with
+`--changed-from` and never selected it).  Per the "blocks own their code" rule, block 09 now ranks that
+site by `t.heat` (identical in block 09's tree, which has no decode counter) and block 12 owns the
+switch-over; the merged tree is byte-identical, so no measurement above changed.  Gate: **3/3** (blocks
+09, 12 and the tip).
+
+**7. Docs.**  `ENVIRONMENT.md` `LLAMA_DRAFT_SCHED2` row (the slot is per arch now), `patches/README.md`
+block 09, an `AGENTS.md` critical fact (nothing may pick a draft graph slot independently of
+`sched_alt_for`), and the campaign record.
+
+**Not pushed by this entry:** the fork `rdna-boosts` branch refresh and the container images are part of
+publishing the tag (below).
+
 ## 261023.004 (r119) -- PR #209: the state restore batches its device writes through the save path's pinned stage (block 12); ~15-18 % faster on 2 GPU tensor, ~2 ms slower on one GPU
 
 **Shipped:** `v14-097cf33d9-r119` (**block 12** amended; the only delivery content change is
