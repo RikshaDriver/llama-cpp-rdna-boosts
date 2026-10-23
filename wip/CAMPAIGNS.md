@@ -24,15 +24,17 @@ is the signature of a stub, not of a campaign.
 | [`moe-cpu-overlap/`](moe-cpu-overlap/README.md) | genuine CPU/GPU overlap for the expert misses (the Strata shape) | OPEN / scoping (TODO #36) — **work in flight**: the note refutes the earlier "cannot be done" verdict for the interleaved shape and sets out the pipeline to try |
 | [`ngram-mod-host-experts/`](ngram-mod-host-experts/README.md) | `ngram-mod` + `draft-mtp-adaptive` roughly halves decode when the MoE experts are host-resident (`-ncmoe`/`-cmoe`, expert cache active); plain `draft-mtp-adaptive` restores the expected rate | **OPEN (seeded 2026-10-14), scoping + measurement** |
 
-**Closed (2026-10-23, r116, no delivery change).**  `three-gpu-performance/` left `wip/` for
+**Closed (2026-10-23, r116/r117).**  `three-gpu-performance/` left `wip/` for
 [`archive/work/three-gpu-performance/`](../archive/work/three-gpu-performance/RESOLUTION.md) with a
-`RESOLUTION.md`, and **`TODO #51` is narrowed to plain decode**: the 2026-10-16 field/MoE headline (2 GPU
+`RESOLUTION.md`, and **`TODO #51` is retired** (its remaining plain-decode residual is an accepted
+limitation in `TODO.md`): the 2026-10-16 field/MoE headline (2 GPU
 84.4 vs 3 GPU 56.9 t/s) does not reproduce — the same config measures **2 GPU 93.4 vs 3 GPU 131.2 t/s
 (+40.5 %)** on r116, and every speculative arm of the 24-cell `{2,3} x {none,mtp,adaptive} x
 {partial,resident} x {tensor,layer}` matrix is at least as fast at 3 devices once the expert arena is
 100 % resident (+14 % / +23 % tensor, flat `-sm layer`).  The dominant residual is the **identity cliff**:
 an arena one arena unit per table short of 100 % drops *every* table off the identity fast path
-(40845 vs 40925 MiB = 46.7 vs 65.0 t/s), filed as `TODO #93`; the all-reduce is retired for throughput
+(40845 vs 40925 MiB = 46.7 vs 65.0 t/s), **fixed in r117** (block 09, `MOE_EXPERT_CACHE_IDENTITY_PREF`,
+`TODO #93` closed: 46.7 -> 59.5 t/s, shipped in **r117**); the all-reduce is retired for throughput
 (2.9 % of decode at 3 devices, `nccl` is 9 % worse); the remaining `-sm layer` loss is a pipeline-stage
 property (reproduced on dense 27B at depth, −6.1 %).  Cross-device-count greedy text is **not** a valid
 purity gate on the MoE tensor split (PPL is 0.16 % apart; dense and `-sm layer` are text-identical).  See

@@ -21,7 +21,6 @@ top of `WORKLOG.md` is the newest record.
 | **79** | RDNA3_0 verify-band fusions: no multi-device measurement, and gfx1101/gfx1102 untested | platform validation | open (shipped default-on in r95; needs a 2+ card gfx1100 box).  `ssh fingon` is single-RDNA3 (`ROCm0`; its second rocm-smi entry is an iGPU and is not a HIP device), so it does **not** cover the multi-device arm — it validates single-GPU gfx1100 only.  gfx1101/gfx1102 still have no hardware |
 | **70** | harden the expert-cache re-arm / wide-aux growth against a starved arena | robustness | open |
 | **59** | `ngram-mod` + `draft-mtp-adaptive` halves decode with host-resident experts | performance | open (`wip/ngram-mod-host-experts/`) |
-| **51** | 3-GPU decode is slower than 2-GPU | performance | **narrowed to PLAIN decode (2026-10-23, r116)**.  The field/MoE headline (2 GPU 84.4 vs 3 GPU 56.9 t/s, 2026-10-16) is **closed**: on r116 the same config measures **2 GPU 93.4 vs 3 GPU 131.2 t/s (+40.5 %)**, and in the 24-cell matrix every *speculative* arm is at least as fast at 3 devices with the arena fully resident (+14.0 %/+22.9 % `-sm tensor`, 0.0 %/−0.4 % `-sm layer`, `archive/work/three-gpu-performance/RESOLUTION.md`).  What is left is plain decode: **−2.0 %** resident (the 3-device internal all-reduce, 0.45 vs 0.26 ms/token = 1.2 % of decode), **−10.5 %** at 91 % residency (the non-identity per-op routing readback, paid per device) and **−10.2 %** with `-sm layer` (no intra-token parallelism; reproduced on dense 27B at depth, −6.1 %).  Accepted limitation + production rule: 3 GPUs for speculative decode, 2 GPUs for plain decode at partial residency, never `-sm layer` for decode.  The dominant residual *mechanism* was the identity cliff, **fixed in r117** for a marginal arena (`MOE_EXPERT_CACHE_IDENTITY_PREF`) |
 | **36** | genuine CPU/GPU overlap for the MoE misses | performance | open, scoping (`wip/moe-cpu-overlap/`) |
 
 Accepted limitations that are deliberately **not** fixed are listed at the end — do not re-report them.
@@ -103,38 +102,6 @@ in the README "Recommended configuration" section.  Working home
 per-op host-expert upload, the MoE cache band and verify graph recapture, the staging-ring width; bisect
 plan in that README).
 
-## 51. 3-GPU decode is slower than 2-GPU — NARROWED to PLAIN decode (closed for the field/MoE arm)
-
-**Measured to a verdict 2026-10-23 on r116** (`archive/work/three-gpu-performance/RESOLUTION.md`, 24-cell
-matrix + controls, one binary, `ROCBLAS_USE_HIPBLASLT=0`).  Campaign history: revived 2026-10-16 from the
-r55 `mtp-3gpu-decode` closure; r115 (`archive/work/graph-key-churn/`) fixed the graph-key churn; #89 closed
-(one-time HIP code-object load, 0 % of decode).
-
-**Closed half — the field/MoE arm.**  The 2026-10-16 r73 table (2 GPU 84.4 vs 3 GPU 56.9 t/s,
-GSQ-IQ3_XXS, `-ncmoe 48 -sm tensor`, adaptive MTP) does **not** reproduce: r116 measures **2 GPU 93.4 vs
-3 GPU 131.2 t/s (+40.5 %)** on the same config, and with a 100 %-resident arena every speculative cell of
-the matrix is at least as fast at 3 devices (`draft-mtp` +14.0 %, adaptive +22.9 % tensor; 0.0 % / −0.4 %
-`-sm layer`; prefill +2.9…+4.0 %).  Three mechanisms did it: r115's graph key, the arena reaching every
-table's identity fast path, and (for the 2-GPU arm) the context no longer starving it of arena.
-
-**Open half — plain (non-speculative) decode.**  3 GPUs loses, for three separate reasons:
-1. `-sm tensor`, arena fully resident: **−2.0 %** (66.4 → 65.1 t/s).  The 3-device internal all-reduce is
-   0.45 ms/token vs 0.26 (2.9 % vs 1.7 % of decode) — i.e. 1.2 % of the gap; the rest is launch/schedule
-   noise.  `nccl` is 9 % *worse* at 3 ranks and not bit-identical; forcing `internal` for every size gains
-   3.7 % but changes the prefill AR path (smoke only).  **No AR change is warranted**; suspect 1 is retired.
-2. `-sm tensor`, 91 % residency: **−10.5 %** (51.5 → 46.1 t/s).  A non-identity table pays a per-token
-   routing readback, and at 3 devices it is paid per device.  (A *marginal* arena is fixed in r117 — the cache
-  now prefers whole-table identity — but an arena that is 8 % short cannot reach it without dropping layers.)
-3. `-sm layer`, any residency: **−0.4…−10.2 %**.  A single-token decode has no intra-token parallelism to
-   gain, so the 3rd device only adds a pipeline stage — reproduced on dense 27B Q8_0 at depth 15746
-   (−6.1 %, text identical at both counts).  Property of the split, not a defect; `-sm layer` is not the
-   decode recommendation (it is also 25-45 % slower than tensor split overall).
-
-**Purity note for anyone re-measuring this:** cross-device-count greedy text is **not** a valid gate on
-the MoE tensor-split path (2 GPU `40d493bbb5ac` vs 3 GPU `ecf8a32bae77`, PPL 10.8452 vs 10.8623 = 0.16 %,
-the §45 split rounding); dense tensor split and every `-sm layer` arm are text-identical across counts.
-Compare builds *within* a device count.
-
 ## 36. Genuine CPU/GPU overlap for the MoE misses (Strata's pipeline shape) — PERFORMANCE (scoping)
 
 
@@ -202,8 +169,8 @@ fraction at 43 % residency; if it is <20 %, park it.  Design space and gates:
   is in [`archive/work/fix-gemma-4/ISWA-WRITE-FUSION.md`](archive/work/fix-gemma-4/ISWA-WRITE-FUSION.md) §5.6.
   (The iSWA builder order that made the 256-wide half of this fusion live is r101, `WORKLOG.md` 261021.003;
   `GREEDY-PURITY.md` §45 records the split-state rule that came with it.)
-- **3-GPU plain (non-speculative) decode is a few percent slower than 2-GPU — accepted** (2026-10-23,
-  r116; `TODO #51`, `archive/work/three-gpu-performance/RESOLUTION.md`).  −2.0 % with a fully-resident
+- **3-GPU plain (non-speculative) decode is a few percent slower than 2-GPU — accepted (this closes
+  `TODO #51`; 2026-10-23, `archive/work/three-gpu-performance/RESOLUTION.md`).**  −2.0 % with a fully-resident
   arena (the 3-device internal all-reduce is 1.2 % of decode and no backend/size knob beats it), −10.5 % at
   91 % residency (the non-identity per-token routing readback, paid per device; the *marginal*-arena case is
   fixed in r117, an 8 %-short one is not), −10.2 % with
