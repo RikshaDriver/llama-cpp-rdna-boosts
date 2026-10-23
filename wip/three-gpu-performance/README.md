@@ -231,6 +231,15 @@ and large tensors to RCCL:
 
 Work them in order; each has an A/B and a cheap first measurement.
 
+> **Status after r115/r116 (2026-10-22).**  Suspect **3** (per-op graph capture re-firing) was the
+> dominant cause and is **fixed** in r115: the graph key is the first node's `data` pointer, and the
+> 3-GPU stutter + deficit inverted to **+41 %** (`../../archive/work/graph-key-churn/`).  Suspect **1**'s
+> *stutter* role is retired with it — `GGML_CUDA_AR_PROFILE=1` shows max 2 ms/call — but the **per-call
+> p50/p90 and spin-split comparison of 2 vs 3 devices was still never run**, so it stays listed for the
+> *throughput* arm.  Suspect **5** is unchanged.  Suspects **2** and **4** remain unmeasured.  The
+> residual per-device stall that was suspect-3-adjacent is **closed as a one-time code-object load**
+> (`../../archive/work/decode-warmup-stall/`), so it is no longer part of this campaign.
+
 1. **Internal all-reduce on 3 devices (highest prior).** Profile with `GGML_CUDA_AR_PROFILE=1` and compare
    the per-call p50/p90 and the spin split between 2 and 3 GPUs. A/B
    `GGML_CUDA_ALLREDUCE=internal`, `=hybrid`, `=nccl`; sweep `GGML_CUDA_AR_SMALL_BLOCKS=1,2,4,8` and
