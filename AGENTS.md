@@ -493,6 +493,24 @@ stub alive to serve them, and treat a `wip/` path in an old record as a historic
   per-allocation pointer) re-introduces the churn if it moves across a rebuild — the r25 PR #106-0002
   data-fingerprint key that was dropped for the slab is the same trap from the other direction.
   Record: `archive/work/graph-key-churn/`.
+- **There is NO periodic per-device decode stall left after r115 (TODO #89 closed, 2026-10-22).  Do not
+  re-chase it.**  The ~300 ms that `CUDAGC_SLOW` still reports at 3 devices is a **one-time lazy HIP
+  code-object load per (module, device)** (~55 ms of it is the `mul_mat_q` object, which holds mmq *and*
+  mmvq), paid inside `common_init_from_params`'s existing 2-token warm-up for the decode families and
+  inside the first real prefill for the prefill-only ones.  The count is identical at 300, 1000 and 1500
+  generated tokens — it does not scale with tokens, only with device count, and `--no-warmup` moves the
+  same cost onto the user's first step (which is what the warm-up exists to prevent).  A first use
+  inflates the whole window (`RMS_NORM` 4.7 ms right after the FA load) because further enqueues block
+  behind the load; `GGML_CUDA_DISABLE_GRAPHS=1` changes nothing.  `CUDAGC_SLOW`'s 5 ms threshold is per
+  child-graph launch and is **not** device-count normalised, so on 1 GPU ordinary 4 000-node steps are
+  reported — judge per node (~1-2 us) or by `FIRSTUSE`.  Also measured there: `hipFuncGetAttributes` in
+  these runs is **librccl** (NCCL init), not ours.  Tooling (probe extension + an `LD_PRELOAD` HIP
+  call-site interposer): `archive/work/decode-warmup-stall/`.
+- **A `-sm tensor` model load uploads tensors through a pinned staging buffer, one alloc/free per
+  tensor** (`ggml_backend_cuda_buffer_set_tensor_2d`, 678 pairs = 2.2 s + 1.1 s of a ~10.7 s load on a 27B
+  Q8_0 at 3 devices).  This is *load* time, not decode.  A grow-only per-device staging buffer takes it
+  to ~5 allocations and 12.7 s -> 9.5 s; the patch is prepared and **not applied** (TODO #90, awaiting the
+  maintainer's go/no-go).
 - **The deepseek4/glm5-next `DSV4_HC_POST` arm is split-mode dependent (r97).**  `cparams.fused_dsv4_hc_post`
   is the fused **op** whenever a Meta (tensor-split) device is in play and the primitive
   `hc_combine_norm` chain on one device.  The chain is faster on one device (+0.9..+1.8 % prefill,

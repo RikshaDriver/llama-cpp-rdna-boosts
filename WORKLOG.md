@@ -1,5 +1,55 @@
 # WORKLOG - dated delivery records
 
+## 261022.011 (docs) -- TODO #89 closed: the "residual per-device decode stall" is a one-time lazy code-object load (0 % of decode); the load-path pinned churn is staged as #90
+
+**Nothing in `patches/` changed; no release.**  Record:
+[`archive/work/decode-warmup-stall/`](archive/work/decode-warmup-stall/README.md) (probe patch, the HIP
+call-site interposer, the numbers, reproducer).  `wip/decode-warmup-stall/` is deleted (no stub) and the
+`TODO` item is retired.
+
+**1. The premise did not survive measurement.**  `#89` was opened as a *periodic* ~70 ms per-device
+decode stall, ~300 ms of a ~3050 ms decode (10 % of the wall clock), with the strong suspicion of lazy
+kernel module loading.  The lazy-loading half is right and the "periodic / 10 % of decode" half is not:
+with the r115 probe extended by a per-`(device, op)` first-use counter (the instrument the handover asked
+for), a 300-token decode on 27B Q8_0 at 3 devices shows **12** `CUDAGC_SLOW` entries summing 311 ms, all
+of them inside **four launches**: the main context's 2-token warm-up (i=0: `MUL_MAT` 57/56/55 ms,
+`GET_ROWS` 5, `CONCAT` 1.7, fused `UNARY` 6 per device; i=6: `FLASH_ATTN_EXT` 5.2), the MTP draft's
+warm-up (`ADD` 13/12/12) and the first decode-width subgraph (`MUL_MAT` 7.3/6.5/6.4).  Every single one
+coincides with a `FIRSTUSE` of that op family on that device.  **The identical 12 entries (same totals to
+3 %: 301 ms) appear in a `-n 1500` run** — 5x the tokens, zero extra stalls — and the only later first-uses are
+3-8 us (`ROPE`).  The 300 ms is spent *before* the prompt prefill, i.e. it is cold start, not decode:
+`--no-warmup` moves the same ~320 ms onto the user's first steps, which is proof that the existing
+`common_init_from_params` warm-up is what keeps it off the request path today.
+
+**2. Mechanism, pinned.**  The time is inside a single `hipLaunchKernel` (`rocprofv3 --hip-trace`: longest
+launches 117-122 ms under the profiler; the audit kernel trace shows the GPU dispatching nothing), the
+first `MUL_MAT` costs the same 55 ms on a Q8_0 dense 27B and an IQ3_XXS MoE (`mul_mat_q` is one code
+object holding mmq *and* mmvq — which is also why the first prefill `MUL_MAT` after a decode-only warm-up
+is cheap), and ops that are *not* first uses are inflated in the same window (`RMS_NORM` 4.7-5.1 ms right
+after the FA load) because further enqueues block behind a load.  `GGML_CUDA_DISABLE_GRAPHS=1` reproduces
+the same 12 entries with the same totals, so the graph path is irrelevant; 1 GPU shows one 81 ms warm-up
+stall instead of three ~110 ms ones, so it is per device.
+
+**3. Both old leads resolved, one of them to a real win.**  An `LD_PRELOAD` interposer that attributes a
+HIP call to its caller shows **every** `hipFuncGetAttributes` in the run coming from **librccl** (288
+calls / 878 ms — NCCL module loads at init), not from this tree, so that lead was never about ggml.  The
+`hipHostMalloc`/`hipHostFree` churn (678 pairs, 2.2 s + 1.1 s) is
+`ggml_backend_cuda_buffer_set_tensor_2d`'s **per-tensor** pinned staging during **model load**.  A
+grow-only per-device staging buffer (<= 64 MiB retained, `GGML_CUDA_STAGE_PIN=0` kill switch) takes a 27B
+Q8_0 3-GPU **load from 12.7 s to 9.5 s** (678 -> 5 pinned allocations) with byte-identical greedy text
+under `ROCBLAS_USE_HIPBLASLT=0` on 27B 3 GPU (MTP+ngram, 200 tokens), 27B 2 GPU and Flash-Next GSQ
+`-ncmoe 48` + MTP 3 GPU.  It is **prepared, measured and deliberately not applied** — `TODO #90`, awaiting
+the maintainer's go/no-go.
+
+**4. What was declined.**  A warm-up that covers more cannot help (the prefill-only code objects are
+shape/depth dependent: at depth 16 K the 3rd prefill ubatch loads a new FA prefill variant mid-prefill,
+65 ms on one device, once).  Running the warm-up per device from separate host threads would overlap the
+three ~110 ms loads and save ~200 ms of a ~10 s startup — declined unmeasured as a Meta-scheduler change
+for a cold-start number below the maintenance threshold; re-open only if cold start becomes a product
+requirement.  Also noted for the next reader: `CUDAGC_SLOW`'s threshold is an absolute 5 ms per
+child-graph launch, so on 1 GPU ordinary 4 000-node steps report 5-8 ms and the counter reads "stallier"
+the fewer devices there are — normalise per node or by `FIRSTUSE`.
+
 ## 261022.010 (r115) -- TODO #51: the 3-GPU stutter is HIP graph-capture churn under the `-sm tensor` Meta backend (graph key is a data pointer now)
 
 **Shipped:** `v14-097cf33d9-r115` (**block 09** amended; blocks 00-08 and 13 byte-identical, 10-12 differ

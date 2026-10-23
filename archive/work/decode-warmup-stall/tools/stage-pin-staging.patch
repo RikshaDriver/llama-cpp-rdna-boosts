@@ -1,0 +1,79 @@
+
+diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
+index e00b13f6a..473e0e966 100644
+--- a/ggml/src/ggml-cuda/ggml-cuda.cu
++++ b/ggml/src/ggml-cuda/ggml-cuda.cu
+@@ -1887,6 +1887,41 @@ static void ggml_backend_cuda_buffer_get_tensor(ggml_backend_buffer_t buffer, co
+     CUDA_CHECK(cudaStreamSynchronize(cudaStreamPerThread));
+ }
+ 
++// Load-path 2-D staging: a grow-only pinned buffer per device, reused across the tensors of a model
++// load instead of one `cudaMallocHost`+`cudaFreeHost` pair per tensor.  The loader uploads a `-sm
++// tensor` model one tensor at a time through `set_tensor_2d`; each call used to allocate ~30 MB of
++// pinned memory, copy, sync and free it, and a 27B Q8_0 at 3 devices does that 678 times (measured
++// `hipHostMalloc` 2.2 s + `hipHostFree` 1.1 s of a ~10 s load on gfx1201).  Grow-only with a cap so
++// the retained pinned footprint stays bounded; above the cap the copy falls back to the one-shot
++// allocation.  `GGML_CUDA_STAGE_PIN=0` restores the per-call allocation.
++static constexpr size_t ggml_cuda_stage_pin_max = 64ull << 20;
++static const bool ggml_cuda_stage_pin_on = [] {
++    const char * e = getenv("GGML_CUDA_STAGE_PIN");
++    return e == nullptr || atoi(e) != 0;
++}();
++
++static char * ggml_cuda_stage_pin(int device, size_t need, std::unique_lock<std::mutex> & lock) {
++    static std::mutex mutex[GGML_CUDA_MAX_DEVICES];
++    static void *     buf[GGML_CUDA_MAX_DEVICES] = {};
++    static size_t     cap[GGML_CUDA_MAX_DEVICES] = {};
++    lock = std::unique_lock<std::mutex>(mutex[device]);
++    if (cap[device] >= need) {
++        return (char *) buf[device];
++    }
++    if (buf[device] != nullptr) {
++        (void) cudaFreeHost(buf[device]);
++        buf[device] = nullptr;
++        cap[device] = 0;
++    }
++    if (cudaMallocHost(&buf[device], need) != cudaSuccess) {
++        (void) cudaGetLastError();
++        buf[device] = nullptr;
++        return nullptr;
++    }
++    cap[device] = need;
++    return (char *) buf[device];
++}
++
+ static void ggml_backend_cuda_buffer_set_tensor_2d(ggml_backend_buffer_t buffer, struct ggml_tensor * tensor, const void * data,
+         size_t offset, size_t size, size_t n_copies, size_t stride_tensor, size_t stride_data) {
+     ggml_backend_cuda_buffer_context * ctx = (ggml_backend_cuda_buffer_context *) buffer->context;
+
+diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
+index e00b13f6a..473e0e966 100644
+--- a/ggml/src/ggml-cuda/ggml-cuda.cu
++++ b/ggml/src/ggml-cuda/ggml-cuda.cu
+@@ -1898,14 +1933,23 @@ static void ggml_backend_cuda_buffer_set_tensor_2d(ggml_backend_buffer_t buffer,
+     // It crashed the `-sm tensor` + host-expert load, whose master is the pageable `CPU_REPACK`
+     // buffer (unlike `-sm layer`'s pinned `ROCm_Host`, or the mmap path).  Gather the source rows
+     // into a pinned staging buffer and copy from there -- the same pattern the per-ubatch splice
+-    // (`ggml_backend_cuda_set_tensor_2d_async`) already uses.  Load-path only, so a per-call pinned
+-    // staging buffer is fine (no ring needed).
++    // (`ggml_backend_cuda_set_tensor_2d_async`) already uses.
+     if (n_copies > 1) {
+         const size_t full    = (n_copies - 1) * stride_data   + size;
+         const size_t compact = (n_copies - 1) * stride_tensor + size;
+         const size_t need    = (stride_tensor == size) ? compact : full;
+         void * pin = nullptr;
+-        CUDA_CHECK(cudaMallocHost(&pin, need));
++        // Reuse the per-device staging buffer for the repeated same-size uploads a model load makes
++        // (see ggml_cuda_stage_pin); a one-shot allocation is the fallback and the path for a size
++        // beyond the retention cap.
++        std::unique_lock<std::mutex> lock;
++        if (ggml_cuda_stage_pin_on && need <= ggml_cuda_stage_pin_max) {
++            pin = ggml_cuda_stage_pin(ctx->device, need, lock);
++        }
++        const bool one_shot = pin == nullptr;
++        if (one_shot) {
++            CUDA_CHECK(cudaMallocHost(&pin, need));
++        }
+         if (stride_tensor == size) {
+             for (size_t e = 0; e < n_copies; ++e) {
+                 memcpy((char *) pin + e * size, (const char *) data + e * stride_data, size);

@@ -1,0 +1,775 @@
+
+diff --git a/ggml/src/ggml-backend-meta.cpp b/ggml/src/ggml-backend-meta.cpp
+index e76fb184a..3c2048343 100644
+--- a/ggml/src/ggml-backend-meta.cpp
++++ b/ggml/src/ggml-backend-meta.cpp
+@@ -8,6 +8,8 @@
+ 
+ #include <algorithm>
+ #include <cassert>
++#include <cstdio>
++#include <cstdlib>
+ #include <cmath>
+ #include <cstddef>
+ #include <cstdint>
+
+diff --git a/ggml/src/ggml-backend-meta.cpp b/ggml/src/ggml-backend-meta.cpp
+index e76fb184a..3c2048343 100644
+--- a/ggml/src/ggml-backend-meta.cpp
++++ b/ggml/src/ggml-backend-meta.cpp
+@@ -3207,6 +3209,10 @@ static enum ggml_status ggml_backend_meta_graph_compute(ggml_backend_t backend,
+     const size_t n_backends = ggml_backend_meta_n_backends(backend);
+     ggml_backend_meta_context * backend_ctx = (ggml_backend_meta_context *) backend->context;
+ 
++    // WIP (3-GPU stutter probe; NOT for the delivery): phase timing.
++    static const bool st_on = [] { const char * e = getenv("LLAMA_STEP_TRACE"); return e != nullptr && atoi(e) != 0; }();
++    const int64_t mt0 = st_on ? ggml_time_us() : 0;
++
+     // If the previous cgraph had a defined UID it can be used to skip rebuilding the subgraphs per simple backend.
+     const bool needs_rebuild = (cgraph->uid == 0) || (cgraph->uid != backend_ctx->uid);
+ 
+
+diff --git a/ggml/src/ggml-backend-meta.cpp b/ggml/src/ggml-backend-meta.cpp
+index e76fb184a..3c2048343 100644
+--- a/ggml/src/ggml-backend-meta.cpp
++++ b/ggml/src/ggml-backend-meta.cpp
+@@ -3627,6 +3633,14 @@ static enum ggml_status ggml_backend_meta_graph_compute(ggml_backend_t backend,
+         }
+     }
+ 
++    if (st_on) {
++        const int64_t mt1 = ggml_time_us();
++        if (mt1 - mt0 > 2000) {
++            fprintf(stderr, "META rebuild=%lld total_nodes=%d n_subgraphs=%zu rebuild_done=%d\n",
++                    (long long)(mt1-mt0), cgraph->n_nodes, backend_ctx->n_subgraphs, (int) needs_rebuild);
++        }
++    }
++
+     size_t iga = 0; // i graph aux
+     size_t ina = 0; // i node aux
+ 
+
+diff --git a/ggml/src/ggml-backend-meta.cpp b/ggml/src/ggml-backend-meta.cpp
+index e76fb184a..3c2048343 100644
+--- a/ggml/src/ggml-backend-meta.cpp
++++ b/ggml/src/ggml-backend-meta.cpp
+@@ -3872,13 +3886,28 @@ static enum ggml_status ggml_backend_meta_graph_compute(ggml_backend_t backend,
+     };
+ 
+     for (size_t i = 0; i < backend_ctx->n_subgraphs; i++) {
++        const int64_t lt0 = st_on ? ggml_time_us() : 0;
+         for (size_t j = 0; j < n_backends; j++) {
+             auto & bcj = backend_ctx->backend_configs[j];
++            const int64_t lj0 = st_on ? ggml_time_us() : 0;
+             const ggml_status status = ggml_backend_graph_compute_async(bcj.backend, bcj.cgraphs[i].cgraph_main);
++            if (st_on) {
++                const int64_t lj1 = ggml_time_us();
++                if (lj1 - lj0 > 2000) {
++                    fprintf(stderr, "META launch i=%zu j=%zu nodes=%d launch=%lld\n",
++                            i, j, bcj.cgraphs[i].cgraph_main->n_nodes, (long long)(lj1-lj0));
++                }
++            }
+             if (status != GGML_STATUS_SUCCESS) {
+                 return status;
+             }
+         }
++        if (st_on) {
++            const int64_t lt1 = ggml_time_us();
++            if (lt1 - lt0 > 2000) {
++                fprintf(stderr, "META flaunch i=%zu nbe=%zu launches=%lld\n", i, n_backends, (long long)(lt1-lt0));
++            }
++        }
+ 
+         if (i < backend_ctx->n_subgraphs - 1 && i < backend_ctx->gather_nodes.size() && backend_ctx->gather_nodes[i] >= 0) {
+             const ggml_status status = all_gather(backend_ctx->gather_nodes[i]);
+
+diff --git a/ggml/src/ggml-backend-meta.cpp b/ggml/src/ggml-backend-meta.cpp
+index e76fb184a..3c2048343 100644
+--- a/ggml/src/ggml-backend-meta.cpp
++++ b/ggml/src/ggml-backend-meta.cpp
+@@ -3898,7 +3927,15 @@ static enum ggml_status ggml_backend_meta_graph_compute(ggml_backend_t backend,
+                     ggml_cgraph * cgraph_ij = bcj.cgraphs[i].cgraph_main;
+                     nodes.push_back(cgraph_ij->nodes[cgraph_ij->n_nodes-1]);
+                 }
++                const int64_t ar0 = st_on ? ggml_time_us() : 0;
+                 backend_allreduce_success = backend_ctx->comm_allreduce(backend_ctx->comm_ctx, nodes.data());
++                if (st_on) {
++                    const int64_t ar1 = ggml_time_us();
++                    if (ar1 - ar0 > 2000) {
++                        fprintf(stderr, "META ar i=%zu ar=%lld ne=%lld ok=%d\n",
++                                i, (long long)(ar1-ar0), (long long) ggml_nelements(nodes[0]), (int) backend_allreduce_success);
++                    }
++                }
+             }
+ 
+             if (!backend_allreduce_success) {
+
+diff --git a/ggml/src/ggml-backend.cpp b/ggml/src/ggml-backend.cpp
+index 928f09651..c0a919108 100644
+--- a/ggml/src/ggml-backend.cpp
++++ b/ggml/src/ggml-backend.cpp
+@@ -10,6 +10,8 @@
+ 
+ #include "ggml-backend.h"
+ #include "ggml-backend-impl.h"
++#include <sys/time.h>
++#include <cstdio>
+ #include "ggml-alloc.h"
+ #include "ggml-impl.h"
+ 
+
+diff --git a/ggml/src/ggml-backend.cpp b/ggml/src/ggml-backend.cpp
+index 928f09651..c0a919108 100644
+--- a/ggml/src/ggml-backend.cpp
++++ b/ggml/src/ggml-backend.cpp
+@@ -3031,12 +3033,16 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
+     int prev_backend_id = -1;
+     ggml_backend_sched_copy_state st;
+ 
++    // WIP (3-GPU stutter probe; NOT for the delivery): per-split phase timing.
++    static const bool st_on = [] { const char * e = getenv("LLAMA_STEP_TRACE"); return e != nullptr && atoi(e) != 0; }();
+     for (int split_id = 0; split_id < sched->n_splits; split_id++) {
+         struct ggml_backend_sched_split * split = &splits[split_id];
+         int split_backend_id = split->backend_id;
+         ggml_backend_t split_backend = sched->backends[split_backend_id];
++        const int64_t st_a = st_on ? ggml_time_us() : 0;
+ 
+         sched_stage_issue(sched, split);
++        const int64_t st_b = st_on ? ggml_time_us() : 0;
+ 
+         // ensure the previous split's async work has completed before we start
+         // this split, the allocator may have reused buffer regions across splits
+
+diff --git a/ggml/src/ggml-backend.cpp b/ggml/src/ggml-backend.cpp
+index 928f09651..c0a919108 100644
+--- a/ggml/src/ggml-backend.cpp
++++ b/ggml/src/ggml-backend.cpp
+@@ -3047,6 +3053,7 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
+                 ggml_backend_synchronize(sched->backends[prev_backend_id]);
+             }
+         }
++        const int64_t st_c = st_on ? ggml_time_us() : 0;
+ 
+         // copy the input tensors to the split backend
+         // the weights in host memory are copied last, so that the copy callback can read the other inputs of the split
+
+diff --git a/ggml/src/ggml-backend.cpp b/ggml/src/ggml-backend.cpp
+index 928f09651..c0a919108 100644
+--- a/ggml/src/ggml-backend.cpp
++++ b/ggml/src/ggml-backend.cpp
+@@ -3061,8 +3068,20 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
+             }
+         }
+ 
++        const int64_t st_d = st_on ? ggml_time_us() : 0;
+         if (!sched->callback_eval) {
+             enum ggml_status ec = ggml_backend_graph_compute_async(split_backend, &split->graph);
++            if (st_on) {
++                const int64_t st_e = ggml_time_us();
++                if (st_e - st_a > 2000) {
++                    struct timeval tv2_; gettimeofday(&tv2_, nullptr);
++                    fprintf(stderr, "SPLIT ts=%lld id=%d/%d be=%d nodes=%d stage=%lld evsync=%lld copy=%lld launch=%lld\n",
++                            (long long) tv2_.tv_sec * 1000000 + tv2_.tv_usec,
++                            split_id, sched->n_splits, split_backend_id, split->graph.n_nodes,
++                            (long long)(st_b-st_a), (long long)(st_c-st_b),
++                            (long long)(st_d-st_c), (long long)(st_e-st_d));
++                }
++            }
+             if (ec != GGML_STATUS_SUCCESS) {
+                 return ec;
+             }
+
+diff --git a/ggml/src/ggml-backend.cpp b/ggml/src/ggml-backend.cpp
+index 928f09651..c0a919108 100644
+--- a/ggml/src/ggml-backend.cpp
++++ b/ggml/src/ggml-backend.cpp
+@@ -3371,19 +3390,38 @@ enum ggml_status ggml_backend_sched_graph_compute(ggml_backend_sched_t sched, st
+ 
+ enum ggml_status ggml_backend_sched_graph_compute_async(ggml_backend_sched_t sched, struct ggml_cgraph * graph) {
+     GGML_ASSERT(sched);
++    // WIP (3-GPU stutter probe; NOT for the delivery): sub-phase timing.
++    static const bool st_on = [] { const char * e = getenv("LLAMA_STEP_TRACE"); return e != nullptr && atoi(e) != 0; }();
++    const int64_t st0 = st_on ? ggml_time_us() : 0;
++    bool did_reset = false, did_alloc = false;
+     if (!sched->is_reset && !sched->is_alloc) {
+         ggml_backend_sched_reset(sched);
++        did_reset = true;
+     }
++    const int64_t st1 = st_on ? ggml_time_us() : 0;
+ 
+     if (!sched->is_alloc) {
+         if (!ggml_backend_sched_alloc_graph(sched, graph)) {
+             return GGML_STATUS_ALLOC_FAILED;
+         }
++        did_alloc = true;
+     }
++    const int64_t st2 = st_on ? ggml_time_us() : 0;
+ 
+     // wip/moe-expert-cache: the routed expert tables read the cache arena, so no calibration pass is
+     // needed here.
+-    return ggml_backend_sched_compute_splits(sched);
++    const enum ggml_status st_err = ggml_backend_sched_compute_splits(sched);
++    if (st_on) {
++        const int64_t st3 = ggml_time_us();
++        if (st3 - st0 > 2000) {
++            struct timeval tv_; gettimeofday(&tv_, nullptr);
++            fprintf(stderr, "SGA ts=%lld total=%lld reset=%lld alloc=%lld splits=%lld r=%d a=%d\n",
++                    (long long) tv_.tv_sec * 1000000 + tv_.tv_usec,
++                    (long long)(st3-st0), (long long)(st1-st0), (long long)(st2-st1),
++                    (long long)(st3-st2), (int)did_reset, (int)did_alloc);
++        }
++    }
++    return st_err;
+ }
+ 
+ void ggml_backend_sched_synchronize(ggml_backend_sched_t sched) {
+
+diff --git a/ggml/src/ggml-cuda/common.cuh b/ggml/src/ggml-cuda/common.cuh
+index 44dc05de1..73f47f99d 100644
+--- a/ggml/src/ggml-cuda/common.cuh
++++ b/ggml/src/ggml-cuda/common.cuh
+@@ -1435,12 +1435,23 @@ struct ggml_tensor_extra_gpu {
+ struct ggml_cuda_graph {
+ #ifdef USE_CUDA_GRAPH
+     ~ggml_cuda_graph() {
++        // WIP (3-GPU stutter probe; NOT for the delivery)
++        const bool st_on = [] { const char * e = getenv("LLAMA_STEP_TRACE"); return e != nullptr && atoi(e) != 0; }();
++        const int64_t st0 = st_on ? ggml_time_us() : 0;
+         if (instance != nullptr) {
+             CUDA_CHECK(cudaGraphExecDestroy(instance));
+         }
++        const int64_t st1 = st_on ? ggml_time_us() : 0;
+         if (graph != nullptr) {
+             CUDA_CHECK(cudaGraphDestroy(graph));
+         }
++        if (st_on) {
++            const int64_t st2 = ggml_time_us();
++            if (st2 - st0 > 1000) {
++                fprintf(stderr, "GRAPH_DTOR exec_destroy=%lld graph_destroy=%lld nodes=%zu\n",
++                        (long long)(st1-st0), (long long)(st2-st1), num_nodes);
++            }
++        }
+     }
+     cudaGraph_t graph = nullptr;
+     cudaGraphExec_t instance = nullptr;
+
+diff --git a/ggml/src/ggml-cuda/common.cuh b/ggml/src/ggml-cuda/common.cuh
+index 44dc05de1..73f47f99d 100644
+--- a/ggml/src/ggml-cuda/common.cuh
++++ b/ggml/src/ggml-cuda/common.cuh
+@@ -1758,22 +1769,38 @@ struct ggml_backend_cuda_context {
+ 
+     ggml_cuda_graph * cuda_graph(const ggml_cuda_graph_key & key) {
+         const int64_t time_now = ggml_time_us();
++        // WIP (3-GPU stutter probe; NOT for the delivery): graph-cache accounting.
++        static int64_t g_n_sweep = 0, g_n_evict = 0, g_n_new = 0, g_sweep_us = 0;
++        static bool g_reg = false;
++        static const bool g_on = [] { const char * e = getenv("LLAMA_STEP_TRACE"); return e != nullptr && atoi(e) != 0; }();
++        if (g_on && !g_reg) {
++            g_reg = true;
++            atexit([] {
++                fprintf(stderr, "GRAPH_CACHE sweeps=%lld evicted=%lld new_keys=%lld sweep_us=%lld\n",
++                        (long long) g_n_sweep, (long long) g_n_evict, (long long) g_n_new, (long long) g_sweep_us);
++            });
++        }
+ 
+         // sweep every 5s, evicting cuda graphs unused for >=10s
+         if (time_now - last_graph_eviction_sweep >= 5'000'000) {
+             last_graph_eviction_sweep = time_now;
++            const int64_t t_sweep = g_on ? ggml_time_us() : 0;
+             for (auto it = cuda_graphs.begin(); it != cuda_graphs.end(); ) {
+                 if (time_now - it->second->last_used_time >= 10'000'000) {
+                     it = cuda_graphs.erase(it);
++                    g_n_evict++;
+                 } else {
+                     ++it;
+                 }
+             }
++            g_n_sweep++;
++            if (g_on) { g_sweep_us += ggml_time_us() - t_sweep; }
+         }
+ 
+         auto it = cuda_graphs.find(key);
+         if (it == cuda_graphs.end()) {
+             it = cuda_graphs.emplace(key, std::make_unique<ggml_cuda_graph>()).first;
++            g_n_new++;
+         }
+         it->second->last_used_time = time_now;
+         return it->second.get();
+
+diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
+index e00b13f6a..473e0e966 100644
+--- a/ggml/src/ggml-cuda/ggml-cuda.cu
++++ b/ggml/src/ggml-cuda/ggml-cuda.cu
+@@ -1917,7 +1961,9 @@ static void ggml_backend_cuda_buffer_set_tensor_2d(ggml_backend_buffer_t buffer,
+                     cudaMemcpyHostToDevice, cudaStreamPerThread));
+         }
+         CUDA_CHECK(cudaStreamSynchronize(cudaStreamPerThread));
+-        CUDA_CHECK(cudaFreeHost(pin));
++        if (one_shot) {
++            CUDA_CHECK(cudaFreeHost(pin));
++        }
+         return;
+     }
+     CUDA_CHECK(cudaMemcpyAsync((char *) tensor->data + offset, data, size, cudaMemcpyHostToDevice, cudaStreamPerThread));
+
+diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
+index e00b13f6a..473e0e966 100644
+--- a/ggml/src/ggml-cuda/ggml-cuda.cu
++++ b/ggml/src/ggml-cuda/ggml-cuda.cu
+@@ -2982,8 +3028,11 @@ static bool ggml_backend_buft_is_cuda_host(ggml_backend_buffer_type_t buft) {
+     return buft->iface.get_name == ggml_backend_cuda_host_buffer_type_name;
+ }
+ 
++static void * g_st_pin_alloc(size_t size, const char * where);
++static void   g_st_pin_free(void * ptr, const char * where);
++
+ static void ggml_backend_cuda_host_buffer_free_buffer(ggml_backend_buffer_t buffer) {
+-    CUDA_CHECK(cudaFreeHost(buffer->context));
++    g_st_pin_free(buffer->context, "host_buffer_free");
+ }
+ 
+ static void * ggml_cuda_host_malloc(size_t size) {
+
+diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
+index e00b13f6a..473e0e966 100644
+--- a/ggml/src/ggml-cuda/ggml-cuda.cu
++++ b/ggml/src/ggml-cuda/ggml-cuda.cu
+@@ -2991,8 +3040,8 @@ static void * ggml_cuda_host_malloc(size_t size) {
+         return nullptr;
+     }
+ 
+-    void * ptr = nullptr;
+-    cudaError_t err = cudaMallocHost((void **) &ptr, size);
++    void * ptr = g_st_pin_alloc(size, "ggml_cuda_host_malloc");
++    cudaError_t err = ptr != nullptr ? cudaSuccess : cudaErrorMemoryAllocation;
+     if (err != cudaSuccess) {
+         // clear the error
+         (void)cudaGetLastError();
+
+diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
+index e00b13f6a..473e0e966 100644
+--- a/ggml/src/ggml-cuda/ggml-cuda.cu
++++ b/ggml/src/ggml-cuda/ggml-cuda.cu
+@@ -3229,6 +3278,102 @@ static const bool g_cuda_splice_env_on = [] {
+     const char * e = getenv("GGML_CUDA_SPLICE_GATHER");
+     return e == nullptr || atoi(e) != 0;
+ }();
++// WIP (3-GPU stutter probe; NOT for the delivery): segment timestamps.
++#include <sys/time.h>
++static const bool g_st_on = [] { const char * e = getenv("LLAMA_STEP_TRACE"); return e != nullptr && atoi(e) != 0; }();
++// WIP (3-GPU stutter probe; NOT for the delivery): graph capture/instantiate totals.
++static int64_t g_st_cap_n = 0, g_st_cap_us = 0, g_st_capinst_n = 0, g_st_capinst_us = 0;
++static int64_t g_st_updest_n = 0, g_st_updest_us = 0, g_st_upinst_n = 0, g_st_upinst_us = 0;
++static int64_t g_st_calls = 0;
++static int64_t g_st_cap_t0 = 0;
++static void g_st_dump() {
++    fprintf(stderr, "GRAPH_TOT captures=%lld capture_body_us=%lld cap_instantiate=%lld/%lldus "
++                    "exec_destroy=%lld/%lldus upd_instantiate=%lld/%lldus calls=%lld\n",
++            (long long) g_st_cap_n, (long long) g_st_cap_us, (long long) g_st_capinst_n, (long long) g_st_capinst_us,
++            (long long) g_st_updest_n, (long long) g_st_updest_us, (long long) g_st_upinst_n, (long long) g_st_upinst_us,
++            (long long) g_st_calls);
++}
++static const bool g_st_reg = [] { if (g_st_on) atexit(g_st_dump); return true; }();
++static int64_t g_st_ts[8] = {0}; static const char * g_st_tag[8] = {nullptr};
++static int64_t g_st_top_us[3] = {0}; static const char * g_st_top_name[3] = {nullptr}; static int g_st_top_op[3] = {0};
++static inline void g_st_node(int64_t us, const ggml_tensor * n) {
++    if (!g_st_on || us < 200) return;
++    for (int k = 0; k < 3; k++) {
++        if (us > g_st_top_us[k]) {
++            for (int m = 2; m > k; --m) { g_st_top_us[m] = g_st_top_us[m-1]; g_st_top_name[m] = g_st_top_name[m-1]; g_st_top_op[m] = g_st_top_op[m-1]; }
++            g_st_top_us[k] = us; g_st_top_name[k] = n->name; g_st_top_op[k] = (int) n->op;
++            break;
++        }
++    }
++}
++static int g_st_n = 0;
++static inline void g_st_mark(const char * tag) {
++    if (!g_st_on) return;
++    struct timeval tv; gettimeofday(&tv, nullptr);
++    if (g_st_n < 8) { g_st_ts[g_st_n] = (int64_t) tv.tv_sec*1000000 + tv.tv_usec; g_st_tag[g_st_n] = tag; g_st_n++; }
++}
++// WIP #89 probe: per (device, op) first-use accounting -- the lazy-module-load test.  A stall that
++// coincides with a first use of that op on that device is a module load; one that does not is not.
++static int64_t g_st_fw_n [GGML_CUDA_MAX_DEVICES][GGML_OP_COUNT] = {};
++static int64_t g_st_fw_us[GGML_CUDA_MAX_DEVICES][GGML_OP_COUNT] = {};
++static int64_t g_st_step_seq = 0;  // per child-graph launch (one per device per subgraph)
++static void g_st_dump_ops() {
++    for (int d = 0; d < GGML_CUDA_MAX_DEVICES; d++) {
++        for (int o = 0; o < GGML_OP_COUNT; o++) {
++            if (g_st_fw_n[d][o] == 0) continue;
++            fprintf(stderr, "OPAGG dev=%d op=%s n=%lld us=%lld\n", d, ggml_op_name((enum ggml_op) o),
++                    (long long) g_st_fw_n[d][o], (long long) g_st_fw_us[d][o]);
++        }
++    }
++}
++static const bool g_st_ops_reg = [] { if (g_st_on) atexit(g_st_dump_ops); return true; }();
++static inline void g_st_op(int dev, const ggml_tensor * n, int64_t us) {
++    if (!g_st_on) return;
++    const int o = (int) n->op;
++    if (o < 0 || o >= GGML_OP_COUNT || dev < 0 || dev >= GGML_CUDA_MAX_DEVICES) return;
++    if (g_st_fw_n[dev][o] == 0) {
++        struct timeval tv; gettimeofday(&tv, nullptr);
++        fprintf(stderr, "FIRSTUSE ts=%lld dev=%d op=%s us=%lld step=%lld\n",
++                (long long) tv.tv_sec*1000000 + tv.tv_usec, dev, ggml_op_name((enum ggml_op) o),
++                (long long) us, (long long) g_st_step_seq);
++    }
++    g_st_fw_n[dev][o]++;
++    g_st_fw_us[dev][o] += us;
++    if (us > 1000) {
++        struct timeval tv; gettimeofday(&tv, nullptr);
++        fprintf(stderr, "SLOWOP ts=%lld dev=%d op=%s name=%s us=%lld step=%lld\n",
++                (long long) tv.tv_sec*1000000 + tv.tv_usec, dev, ggml_op_name((enum ggml_op) o),
++                n->name, (long long) us, (long long) g_st_step_seq);
++    }
++}
++// WIP #89 probe: pinned host allocation accounting (hipHostMalloc / hipHostFree on the hot path).
++static int64_t g_st_pin_n = 0, g_st_pin_us = 0, g_st_pinfree_n = 0, g_st_pinfree_us = 0;
++static void * g_st_pin_alloc(size_t size, const char * where) {
++    const int64_t t0 = g_st_on ? ggml_time_us() : 0;
++    void * ptr = nullptr;
++    const cudaError_t err = cudaMallocHost((void **) &ptr, size);
++    if (g_st_on) {
++        const int64_t d = ggml_time_us() - t0;
++        g_st_pin_n++; g_st_pin_us += d;
++        if (d > 500) fprintf(stderr, "PINALLOC where=%s bytes=%zu us=%lld step=%lld\n", where, size, (long long) d, (long long) g_st_step_seq);
++    }
++    if (err != cudaSuccess) { (void) cudaGetLastError(); return nullptr; }
++    return ptr;
++}
++static void g_st_pin_free(void * ptr, const char * where) {
++    const int64_t t0 = g_st_on ? ggml_time_us() : 0;
++    (void) cudaFreeHost(ptr);
++    if (g_st_on) {
++        const int64_t d = ggml_time_us() - t0;
++        g_st_pinfree_n++; g_st_pinfree_us += d;
++        if (d > 500) fprintf(stderr, "PINFREE where=%s us=%lld step=%lld\n", where, (long long) d, (long long) g_st_step_seq);
++    }
++}
++static void g_st_dump_pin() {
++    fprintf(stderr, "PIN_TOT alloc=%lld/%lldus free=%lld/%lldus\n",
++            (long long) g_st_pin_n, (long long) g_st_pin_us, (long long) g_st_pinfree_n, (long long) g_st_pinfree_us);
++}
++static const bool g_st_pin_reg = [] { if (g_st_on) atexit(g_st_dump_pin); return true; }();
+ static int64_t g_gc_pre_us = 0;    // graph_compute before evaluate_and_capture (q8_1 clear, graph-key probe)
+ static int64_t g_ev_pre_us = 0;    // evaluate_and_capture before the main node loop (concurrent events, alloc)
+ static int64_t g_ev_rest_us = 0;   // the main node loop + evaluate_and_capture's tail
+
+diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
+index e00b13f6a..473e0e966 100644
+--- a/ggml/src/ggml-cuda/ggml-cuda.cu
++++ b/ggml/src/ggml-cuda/ggml-cuda.cu
+@@ -4642,7 +4787,8 @@ static void ggml_backend_cuda_set_tensor_2d_async(ggml_backend_t backend, struct
+         if (need > s.sz) {
+             if (s.ev != nullptr) { (void) hipEventSynchronize(s.ev); (void) hipEventDestroy(s.ev); s.ev = nullptr; }
+             if (s.buf != nullptr) { (void) hipHostFree(s.buf); s.buf = nullptr; }
+-            CUDA_CHECK(hipHostMalloc(&s.buf, need, hipHostMallocDefault));
++            s.buf = (void *) g_st_pin_alloc(need, "splice_pin_ring");
++            CUDA_CHECK(s.buf != nullptr ? hipSuccess : hipErrorMemoryAllocation);
+             CUDA_CHECK(hipEventCreateWithFlags(&s.ev, hipEventDisableTiming));
+             s.sz = need;
+         } else if (s.ev != nullptr) {
+
+diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
+index e00b13f6a..473e0e966 100644
+--- a/ggml/src/ggml-cuda/ggml-cuda.cu
++++ b/ggml/src/ggml-cuda/ggml-cuda.cu
+@@ -4947,11 +5093,21 @@ static void ggml_cuda_graph_update_executable(ggml_backend_cuda_context * cuda_c
+     // update path anyway (e.g. on a ROCm that has the driver fix).
+     static const bool force_update = getenv("GGML_HIP_GRAPH_FORCE_UPDATE") != nullptr;
+     if (!force_update) {
++        const bool st_on2 = g_st_on;
++        const int64_t su0 = st_on2 ? ggml_time_us() : 0;
+         if (graph->instance != nullptr) {
+             CUDA_CHECK(cudaGraphExecDestroy(graph->instance));
+             graph->instance = nullptr;
+         }
++        const int64_t su1 = st_on2 ? ggml_time_us() : 0;
+         CUDA_CHECK(cudaGraphInstantiate(&graph->instance, graph->graph, NULL, NULL, 0));
++        if (st_on2) {
++            const int64_t su2 = ggml_time_us();
++            if (su2 - su0 > 1000) {
++                fprintf(stderr, "GRAPH_UPD_EXEC dev=%d exec_destroy=%lld instantiate=%lld nodes=%zu\n",
++                        cuda_ctx->device, (long long)(su1-su0), (long long)(su2-su1), graph->num_nodes);
++            }
++        }
+         return;
+     }
+ #endif // GGML_USE_HIP
+
+diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
+index e00b13f6a..473e0e966 100644
+--- a/ggml/src/ggml-cuda/ggml-cuda.cu
++++ b/ggml/src/ggml-cuda/ggml-cuda.cu
+@@ -5034,6 +5190,7 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
+         }
+     };
+ 
++    if (g_st_on) { g_st_mark("ev_pre"); }
+     while (!graph_evaluated_or_captured) {
+         // Only perform the graph execution if CUDA graphs are not enabled, or we are capturing the graph.
+         // With the use of CUDA graphs, the execution will be performed by the graph launch.
+
+diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
+index e00b13f6a..473e0e966 100644
+--- a/ggml/src/ggml-cuda/ggml-cuda.cu
++++ b/ggml/src/ggml-cuda/ggml-cuda.cu
+@@ -5182,8 +5339,10 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
+                 }
+ 
+                 const int64_t t_f = g_cgc_on ? ggml_time_us() : 0;
++                const int64_t st_n0 = g_st_on ? ggml_time_us() : 0;
+                 int nodes_to_skip = ggml_cuda_try_fuse(cuda_ctx, cgraph, i);
+                 if (t_f) { g_fuse_us += ggml_time_us() - t_f; g_fuse_calls++; }
++                if (st_n0) { g_st_node(ggml_time_us() - st_n0, node); }
+ 
+                 if (nodes_to_skip != 0) {
+                     if (op_timing) {
+
+diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
+index e00b13f6a..473e0e966 100644
+--- a/ggml/src/ggml-cuda/ggml-cuda.cu
++++ b/ggml/src/ggml-cuda/ggml-cuda.cu
+@@ -5222,7 +5381,9 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
+                 }
+ 
+                 const int64_t t_fw = g_cgc_on ? ggml_time_us() : 0;
++                const int64_t st_n1 = g_st_on ? ggml_time_us() : 0;
+                 bool ok = ggml_cuda_compute_forward(*cuda_ctx, node);
++                if (st_n1) { const int64_t st_d1 = ggml_time_us() - st_n1; g_st_node(st_d1, node); g_st_op(cuda_ctx->device, node, st_d1); }
+                 if (t_fw) { const int64_t d = ggml_time_us() - t_fw; g_fwd_us += d; g_fwd_calls++;
+                             const int o = (int) node->op; if (o >= 0 && o < GGML_OP_COUNT) { g_opus[o] += d; g_opn[o]++; } }
+                 if (!ok) {
+
+diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
+index e00b13f6a..473e0e966 100644
+--- a/ggml/src/ggml-cuda/ggml-cuda.cu
++++ b/ggml/src/ggml-cuda/ggml-cuda.cu
+@@ -5260,7 +5421,9 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
+                                             ggml_nelements(last));
+             }
+ 
++            if (g_st_on) { g_st_mark("loop"); }
+             CUDA_CHECK(cudaStreamEndCapture(cuda_ctx->stream(), &graph->graph));
++            if (g_st_on) { g_st_cap_n++; g_st_cap_us += ggml_time_us() - g_st_cap_t0; g_st_mark("endcap"); }
+             graph_evaluated_or_captured = true; // CUDA graph has been captured
+ 
+             std::lock_guard<std::mutex> lock(ggml_cuda_lock);
+
+diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
+index e00b13f6a..473e0e966 100644
+--- a/ggml/src/ggml-cuda/ggml-cuda.cu
++++ b/ggml/src/ggml-cuda/ggml-cuda.cu
+@@ -5274,14 +5437,28 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
+ 
+     if (use_cuda_graph) {
+         ggml_cuda_graph * graph = cuda_ctx->cuda_graph(graph_key);
++        if (g_st_on) { g_st_mark("inst0"); }
+         if (graph->instance == nullptr) { // Create executable graph from captured graph.
++            const bool st_on3 = g_st_on;
++            const int64_t si0 = st_on3 ? ggml_time_us() : 0;
+             CUDA_CHECK(cudaGraphInstantiate(&graph->instance, graph->graph, NULL, NULL, 0));
++            if (st_on3) { g_st_capinst_n++; g_st_capinst_us += ggml_time_us() - si0; }
++            if (st_on3) {
++                const int64_t si1 = ggml_time_us();
++                if (si1 - si0 > 1000) {
++                    fprintf(stderr, "GRAPH_CAP_INST dev=%d instantiate=%lld nodes=%d\n",
++                            cuda_ctx->device, (long long)(si1-si0), cgraph->n_nodes);
++                }
++            }
+         }
++        if (g_st_on) { g_st_mark("inst1"); }
+         if (cuda_graph_update_required) { // Update graph executable
+             ggml_cuda_graph_update_executable(cuda_ctx, graph_key);
+         }
++        if (g_st_on) { g_st_mark("upd"); }
+         // Launch graph
+         CUDA_CHECK(cudaGraphLaunch(graph->instance, cuda_ctx->stream()));
++        if (g_st_on) { g_st_mark("launch"); }
+ #else
+         GGML_UNUSED(graph_key);
+         graph_evaluated_or_captured = true;
+
+diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
+index e00b13f6a..473e0e966 100644
+--- a/ggml/src/ggml-cuda/ggml-cuda.cu
++++ b/ggml/src/ggml-cuda/ggml-cuda.cu
+@@ -5363,11 +5540,17 @@ static bool ggml_cuda_graph_set_enabled(ggml_backend_cuda_context * cuda_ctx, co
+ 
+ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend, ggml_cgraph * cgraph) {
+     const cuda_gc_timer cuda_gc_timer_inst(cgraph);
++    const int64_t g_st_t0 = g_st_on ? ggml_time_us() : 0;
++    if (g_st_on) { g_st_n = 0; g_st_mark("enter"); g_st_step_seq++;
++        g_st_top_us[0] = g_st_top_us[1] = g_st_top_us[2] = 0;
++        g_st_top_name[0] = g_st_top_name[1] = g_st_top_name[2] = nullptr; }
+     int64_t t_gc = g_cgc_on ? ggml_time_us() : 0;
+     ggml_backend_cuda_context * cuda_ctx = (ggml_backend_cuda_context *) backend->context;
+ 
++    if (g_st_on) { g_st_mark("dev"); }
+     ggml_cuda_set_device(cuda_ctx->device);
+     ggml_cuda_async_input_wait(cuda_ctx->device, cuda_ctx->stream());
++    if (g_st_on) { g_st_mark("asyncwait"); }
+     const ggml_cuda_async_input_done_guard async_input_done { cuda_ctx->device, cuda_ctx->stream() };
+ 
+     if (g_stream_dbg_on) {
+
+diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
+index e00b13f6a..473e0e966 100644
+--- a/ggml/src/ggml-cuda/ggml-cuda.cu
++++ b/ggml/src/ggml-cuda/ggml-cuda.cu
+@@ -5404,9 +5587,11 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend,
+     const bool op_timing = g_op_timing_on;
+ 
+ #ifdef USE_CUDA_GRAPH
++    if (g_st_on) { g_st_mark("caches"); }
+     graph_key = ggml_cuda_graph_get_key(cgraph);
+ 
+     ggml_cuda_graph_set_enabled(cuda_ctx, graph_key);
++    if (g_st_on) { g_st_mark("seten"); }
+ 
+     ggml_cuda_graph * graph = cuda_ctx->cuda_graph(graph_key);
+     if (!op_timing && graph->is_enabled()) {
+
+diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
+index e00b13f6a..473e0e966 100644
+--- a/ggml/src/ggml-cuda/ggml-cuda.cu
++++ b/ggml/src/ggml-cuda/ggml-cuda.cu
+@@ -5424,6 +5609,7 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend,
+                 use_cuda_graph = false;
+             } else {
+             const bool properties_changed = ggml_cuda_graph_update_required(cuda_ctx, cgraph);
++            if (g_st_on) { g_st_mark("updreq"); }
+ 
+             // A capture must NEVER start while the slab's wide band is armed.  The band is reclaimed at
+             // the prefill -> decode drop, so it cannot hold a captured graph's pointers (that is why
+
+diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
+index e00b13f6a..473e0e966 100644
+--- a/ggml/src/ggml-cuda/ggml-cuda.cu
++++ b/ggml/src/ggml-cuda/ggml-cuda.cu
+@@ -5512,12 +5698,29 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend,
+         }
+ 
+         cuda_ctx->cuda_graph(graph_key)->mem_gen = ggml_cuda_graph_mem_gen(cuda_ctx->device);
++        g_st_cap_t0 = g_st_on ? ggml_time_us() : 0;
+         CUDA_CHECK(cudaStreamBeginCapture(cuda_ctx->stream(), cudaStreamCaptureModeRelaxed));
+     }
+ 
+     if (t_gc) { g_gc_pre_us += ggml_time_us() - t_gc; }
++    if (g_st_on) { g_st_mark("pre"); }
+     ggml_cuda_graph_evaluate_and_capture(cuda_ctx, cgraph, use_cuda_graph, cuda_graph_update_required, graph_key);
+     if (t_gc) { g_ev_rest_us += ggml_time_us() - g_loop_start; }
++    if (g_st_on) {
++        const int64_t t1 = ggml_time_us();
++        if (t1 - g_st_t0 > 5000) {
++            fprintf(stderr, "CUDAGC_SLOW dev=%d nodes=%d total=%lld graph=%d cap=%d:", cuda_ctx->device,
++                    cgraph->n_nodes, (long long)(t1-g_st_t0), (int) use_cuda_graph, (int) cuda_graph_update_required);
++            for (int k = 1; k < g_st_n; k++) {
++                fprintf(stderr, " %s=%lld", g_st_tag[k], (long long)(g_st_ts[k]-g_st_ts[k-1]));
++            }
++            for (int k = 0; k < 3 && g_st_top_name[k]; k++) {
++                fprintf(stderr, " | top%d %s(%s)=%lldus", k, ggml_op_name((enum ggml_op) g_st_top_op[k]),
++                        g_st_top_name[k], (long long) g_st_top_us[k]);
++            }
++            fprintf(stderr, "\n");
++        }
++    }
+ 
+     ggml_cuda_mmb_compute_done();
+     return GGML_STATUS_SUCCESS;
+
+diff --git a/src/llama-context.cpp b/src/llama-context.cpp
+index 2f29e698b..96913bf52 100644
+--- a/src/llama-context.cpp
++++ b/src/llama-context.cpp
+@@ -26,6 +26,22 @@
+ #include <string>
+ #include <unordered_map>
+ 
++// WIP (3-GPU stutter probe; NOT for the delivery): per-decode step trace.
++// LLAMA_STEP_TRACE=1 logs one line per synchronize() with the host-side graph
++// build / async-submit / wait split plus the gap since the previous step.
++#include <cstdio>
++#include <cstdlib>
++#include <sys/time.h>
++static bool step_trace_on() {
++    static const bool on = [] { const char * e = getenv("LLAMA_STEP_TRACE"); return e != nullptr && atoi(e) != 0; }();
++    return on;
++}
++static int64_t g_st_step  = 0;
++static int64_t g_st_last  = 0;   // us, end of the previous step
++static int64_t g_st_build = 0;   // us, graph_compute entry (= graph build done)
++static int64_t g_st_sub   = 0;   // us, graph_compute return (async submit done)
++static int64_t g_st_ntok  = 0;
++
+ //
+ // llama_context
+ //
+
+diff --git a/src/llama-context.cpp b/src/llama-context.cpp
+index 2f29e698b..96913bf52 100644
+--- a/src/llama-context.cpp
++++ b/src/llama-context.cpp
+@@ -1329,7 +1345,24 @@ void llama_context::synchronize() {
+         return;
+     }
+ 
++    const int64_t st_t0 = step_trace_on() ? ggml_time_us() : 0;
+     ggml_backend_sched_synchronize(sched.get());
++    if (step_trace_on()) {
++        const int64_t st_t1 = ggml_time_us();
++        g_st_step++;
++        struct timeval tv_; gettimeofday(&tv_, nullptr);
++        fprintf(stderr, "STEP ts=%lld %6lld gap=%7lld ntok=%4lld build=%7lld submit=%7lld wait=%8lld\n",
++                (long long) tv_.tv_sec * 1000000 + tv_.tv_usec, (long long) g_st_step,
++                (long long) (g_st_last ? (st_t0 - g_st_last) : 0),
++                (long long) g_st_ntok,
++                (long long) (g_st_build ? (g_st_sub - g_st_build) : 0),
++                (long long) (g_st_sub ? (st_t0 - g_st_sub) : 0),
++                (long long) (st_t1 - st_t0));
++        g_st_last  = st_t1;
++        g_st_build = 0;
++        g_st_sub   = 0;
++        g_st_ntok  = 0;
++    }
+ 
+     // FIXME: if multiple single tokens are evaluated without a synchronization,
+     // the stats will be added to the prompt evaluation stats
+
+diff --git a/src/llama-context.cpp b/src/llama-context.cpp
+index 2f29e698b..96913bf52 100644
+--- a/src/llama-context.cpp
++++ b/src/llama-context.cpp
+@@ -2307,6 +2340,9 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
+         //LLAMA_LOG_INFO("graph set inputs time: %.3f ms\n", (ggml_time_us() - t_start_us)/1000.0);
+     }
+ 
++    if (step_trace_on()) {
++        g_st_ntok += ubatch.n_tokens;
++    }
+     const auto status = graph_compute(res->get_gf(), ubatch.n_tokens > 1);
+     if (status != GGML_STATUS_SUCCESS) {
+         LLAMA_LOG_ERROR("%s: failed to compute graph, compute status: %d\n", __func__, status);
+
+diff --git a/src/llama-context.cpp b/src/llama-context.cpp
+index 2f29e698b..96913bf52 100644
+--- a/src/llama-context.cpp
++++ b/src/llama-context.cpp
+@@ -3750,10 +3786,16 @@ ggml_status llama_context::graph_compute(
+         set_n_threads_fn.second(set_n_threads_fn.first, n_threads);
+     }
+ 
++    if (step_trace_on()) {
++        g_st_build = ggml_time_us();
++    }
+     auto status = ggml_backend_sched_graph_compute_async(sched.get(), gf);
+     if (status != GGML_STATUS_SUCCESS) {
+         LLAMA_LOG_ERROR("%s: ggml_backend_sched_graph_compute_async failed with error %d\n", __func__, status);
+     }
++    if (step_trace_on()) {
++        g_st_sub = ggml_time_us();
++    }
+ 
+     // fprintf(stderr, "splits: %d\n", ggml_backend_sched_get_n_splits(sched));
+ 
+

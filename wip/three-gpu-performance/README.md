@@ -22,8 +22,12 @@ maintainer's go-ahead (see the WIP and promotion rules in `AGENTS.md`).
 > bit-identical MTP acceptance; 3 GPUs now decodes **faster** than 2.  The all-reduce was never involved
 > (`GGML_CUDA_AR_PROFILE=1` max 2 ms/call).  Record + probe:
 > [`../../archive/work/graph-key-churn/`](../../archive/work/graph-key-churn/README.md).  This campaign
-> stays open for the residual ~70 ms per-device stall (TODO #89), the `-sm layer`/AR-profile grid and
-> the MoE field-config arm.
+> stays open for the `-sm layer`/AR-profile grid and the MoE field-config arm.
+> **TODO #89 is closed** (2026-10-22): the "residual ~70 ms per-device stall" is a one-time lazy HIP
+> code-object load per (module, device) — ~300 ms of *cold start* paid inside the existing warm-up, 0 %
+> of decode, the same count at 300 / 1000 / 1500 tokens.  Nothing about it is 3-GPU-specific (it scales
+> with device count only because the load is per device).
+> [`../../archive/work/decode-warmup-stall/`](../../archive/work/decode-warmup-stall/README.md).
 >
 > **Dense datapoint (2026-10-22, r109).**  The deficit is **width**-dependent, not direction-dependent.
 > Qwen3.8-27B Q8_0, `-sm tensor`, four axes at `-n 3000`: 3 GPU is **+3.4 %** aggregate and **+9.2 %** on
