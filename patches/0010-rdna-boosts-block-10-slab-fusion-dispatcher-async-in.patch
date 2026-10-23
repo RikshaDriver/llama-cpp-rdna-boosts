@@ -1,4 +1,4 @@
-From 2d13dc4ec32cd08beaf558fe9076a7818b1001a5 Mon Sep 17 00:00:00 2001
+From eef7c615ca1517413709455ed964e75fd7bcc303 Mon Sep 17 00:00:00 2001
 From: Stew Forster <ci@rdna-boosts.invalid>
 Date: Thu, 22 Oct 2026 07:24:38 -0500
 Subject: [PATCH 10/13] rdna-boosts: block 10: slab, fusion dispatcher, async
@@ -18719,7 +18719,7 @@ index 68aa913ce..c46538dcd 100644
              }
              view_src = view_src->view_src;
 diff --git a/src/llama-context.cpp b/src/llama-context.cpp
-index f8b8e616b..7eb5a7d20 100644
+index 5cf73a24f..a8696dbfb 100644
 --- a/src/llama-context.cpp
 +++ b/src/llama-context.cpp
 @@ -1,6 +1,7 @@
@@ -18890,7 +18890,7 @@ index f8b8e616b..7eb5a7d20 100644
      {
          const bool diff = n_nodes_pp != n_nodes_tg || n_splits_pp != n_splits_tg ||
                            n_inputs_pp != n_inputs_tg || n_input_tensors_pp != n_input_tensors_tg;
-@@ -1724,12 +1831,12 @@ bool llama_context::set_adapter_cvec(
+@@ -1730,12 +1837,12 @@ bool llama_context::set_adapter_cvec(
      return res;
  }
  
@@ -18909,7 +18909,7 @@ index f8b8e616b..7eb5a7d20 100644
  
  llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, llm_graph_type gtype, llama_memory_context_i * mctx, ggml_status & ret) {
      if (mctx && !mctx->apply()) {
-@@ -1760,6 +1867,13 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
+@@ -1766,6 +1873,13 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
      // settled on" -- self-calibrating, no history guess, and it fires on the FIRST narrow pass of a
      // short-prompt workload.  Without a slab the classic wide-pass condition is kept, because there
      // reclaiming the wide layout is exactly what used to abort.
@@ -18923,7 +18923,7 @@ index f8b8e616b..7eb5a7d20 100644
      bool drop_now = false;
      // The work region actually observed before the drop.  The reference must be at least this: the narrow
      // layout varies with the graph (the MTP decode/verify graph is wider than the `n_rs_batch` reserve the
-@@ -1819,7 +1933,7 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
+@@ -1825,7 +1939,7 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
          // (`mctx`) spans this ubatch's streams, and `build_attn_mha`/`ggml_flash_attn_ext` require the
          // query and the cache to agree on the stream dim (`q->ne[3] == k->ne[3]`).  A hard-coded 1
          // against a multi-sequence batch took `q->ne[2]/n_stream` to zero and aborted (issue #48).
@@ -18932,7 +18932,7 @@ index f8b8e616b..7eb5a7d20 100644
          // wip/slab-ring-region: measure the narrow (decode/verify) layout BEFORE allocating it, so the slab
          // can pin its narrow floor AHEAD of the cache's deferred sizing (which runs later in this same pass).
          // `split_only` + a `sizes` array is a size-only reserve (no allocation); the real reserve follows.
-@@ -1966,7 +2080,25 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
+@@ -1972,7 +2086,25 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
              return nullptr;
          }
  
@@ -18959,7 +18959,7 @@ index f8b8e616b..7eb5a7d20 100644
              LLAMA_LOG_ERROR("%s: failed to allocate graph\n", __func__);
              ret = GGML_STATUS_ALLOC_FAILED;
              return nullptr;
-@@ -1992,6 +2124,7 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
+@@ -1998,6 +2130,7 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
          return nullptr;
      }
  
@@ -18967,7 +18967,7 @@ index f8b8e616b..7eb5a7d20 100644
      ret = GGML_STATUS_SUCCESS;
  
      return res;
-@@ -2339,6 +2472,7 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
+@@ -2345,6 +2478,7 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
  
      output_swaps.clear();
      embd_batch_idxs.clear();
@@ -18975,7 +18975,7 @@ index f8b8e616b..7eb5a7d20 100644
  
      sched_reserve();
  
-@@ -2637,6 +2771,22 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
+@@ -2681,6 +2815,22 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
          }
      } while (true);
  
@@ -18998,7 +18998,7 @@ index f8b8e616b..7eb5a7d20 100644
      // set to total number of outputs in the batch, for use in llama_get_logits_ith
      n_outputs = n_outputs_all;
  
-@@ -2868,8 +3018,130 @@ uint32_t llama_context::output_reserve(int32_t n_outputs_l) {
+@@ -2912,8 +3062,130 @@ uint32_t llama_context::output_reserve(int32_t n_outputs_l) {
      return n_outputs_max;
  }
  
@@ -19129,7 +19129,7 @@ index f8b8e616b..7eb5a7d20 100644
      for (uint32_t il = 0; il < cparams.embeddings_layer_inp.size(); ++il) {
          if (!cparams.embeddings_layer_inp[il]) {
              continue;
-@@ -2970,7 +3242,8 @@ void llama_context::output_reorder() {
+@@ -3014,7 +3286,8 @@ void llama_context::output_reorder() {
                  }
              }
              for (auto & layer : embd_layer_inp) {
@@ -19139,7 +19139,7 @@ index f8b8e616b..7eb5a7d20 100644
                      for (size_t k = 0; k < n_embd; ++k) {
                          std::swap(layer.data[i*n_embd + k], layer.data[j*n_embd + k]);
                      }
-@@ -3172,10 +3445,34 @@ ggml_cgraph * llama_context::graph_reserve(
+@@ -3216,10 +3489,34 @@ ggml_cgraph * llama_context::graph_reserve(
          } else {
              ggml_backend_sched_split_graph(sched.get(), gf);
          }
@@ -19178,7 +19178,7 @@ index f8b8e616b..7eb5a7d20 100644
      }
  
      return gf;
-@@ -4507,6 +4804,26 @@ llama_context_params llama_context_default_params() {
+@@ -4551,6 +4848,26 @@ llama_context_params llama_context_default_params() {
      return result;
  }
  
@@ -19205,7 +19205,7 @@ index f8b8e616b..7eb5a7d20 100644
  llama_context * llama_init_from_model(
                   llama_model * model,
          llama_context_params   params) {
-@@ -4542,10 +4859,49 @@ llama_context * llama_init_from_model(
+@@ -4586,10 +4903,49 @@ llama_context * llama_init_from_model(
          if (model->get_split_state_ud.n_devices == 1) {
              LLAMA_LOG_WARN("%s: SPLIT_MODE_TENSOR being used for a single device is not recommended\n", __func__);
          }
@@ -19257,7 +19257,7 @@ index f8b8e616b..7eb5a7d20 100644
          return nullptr;
      }
  
-@@ -4774,6 +5130,26 @@ float * llama_get_embeddings_nextn_ith(llama_context * ctx, int32_t i) {
+@@ -4822,6 +5178,26 @@ float * llama_get_embeddings_nextn_ith(llama_context * ctx, int32_t i) {
      return ctx->get_embeddings_nextn_ith(i);
  }
  
@@ -19285,10 +19285,10 @@ index f8b8e616b..7eb5a7d20 100644
      ctx->synchronize();
  
 diff --git a/src/llama-context.h b/src/llama-context.h
-index 228304bc5..4462bc54a 100644
+index 914176a16..748927a4a 100644
 --- a/src/llama-context.h
 +++ b/src/llama-context.h
-@@ -248,6 +248,28 @@ private:
+@@ -249,6 +249,28 @@ private:
      // from backend into host-side embd_layer_inp buffers
      bool extract_layer_inputs(const llm_graph_result * res, size_t token_offset, size_t n_tokens);
  
@@ -19318,10 +19318,10 @@ index 228304bc5..4462bc54a 100644
      // graph
      //
 diff --git a/src/llama-ext.h b/src/llama-ext.h
-index 7c301cf64..170efb75a 100644
+index 90901f708..dd9bf051f 100644
 --- a/src/llama-ext.h
 +++ b/src/llama-ext.h
-@@ -139,6 +139,18 @@ LLAMA_API void llama_set_embeddings_layer_inp(struct llama_context * ctx, uint32
+@@ -145,6 +145,18 @@ LLAMA_API void llama_set_embeddings_layer_inp(struct llama_context * ctx, uint32
  // LLAMA_API float * llama_get_embeddings(struct llama_context * ctx);
  LLAMA_API float * llama_get_embeddings_layer_inp(struct llama_context * ctx, uint32_t lid);
  

@@ -1,4 +1,7 @@
-# wip/mtp-tail-readback
+# mtp-tail-readback (PR #206)
+
+Folded into block 02 as the r118 amendment (see `RESOLUTION.md`; the record arrived as `wip/mtp-tail-readback/`
+and moved here per the promotion rule).  The submitter's text below is unchanged.
 
 A follow-up to `LLAMA_MTP_INGEST_TAIL` (#143, block 02). With the variable set, the draft ingests only the last N
 positions of each prompt, but the target still read back the nextn hidden state (the hidden state the MTP draft head takes as input) of every prompt row and the MTP hook

@@ -3,8 +3,9 @@
 ## 261023.003 (r118) -- PR #206: the MTP prompt tail no longer forces a whole-path `synchronize()` (or the target's nextn readback) after every prompt batch (block 02); +1.24 % prefill with `LLAMA_MTP_INGEST_TAIL`, nothing without it
 
 **Shipped:** `v14-097cf33d9-r118` (**block 02** amended; the deliverable changes are `common/speculative.cpp`,
-`src/llama-context.{h,cpp}` and `src/llama-ext.h`, and blocks 03-13 change only in the re-cut commit/parent
-lines of the two files block 02 already touches).  Records: `archive/work/mtp-tail-readback/` (decision +
+`src/llama-context.{h,cpp}` and `src/llama-ext.h`; blocks 03-13 change only in their re-cut `From`/`index`
+lines and the hunk line numbers of `common/speculative.cpp` / `src/llama-context.cpp`, which block 02
+already touches -- no later-block code changes).  Records: `archive/work/mtp-tail-readback/` (decision +
 purity argument), `benchmarks/2026-10-23-pr206-mtp-tail-readback-promotion.md` (measurements).
 
 **1. What the tail was still paying for.**  `LLAMA_MTP_INGEST_TAIL` (block 02, #143) already made the MTP

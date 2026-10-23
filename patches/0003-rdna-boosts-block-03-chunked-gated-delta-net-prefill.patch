@@ -1,4 +1,4 @@
-From 6a1ba13906700d3435bed4208629c4e2cbecf3dc Mon Sep 17 00:00:00 2001
+From 3e2b0d8a6c8d710cd99fb9516ef6fdc2eb18636a Mon Sep 17 00:00:00 2001
 From: Stew Forster <ci@rdna-boosts.invalid>
 Date: Wed, 21 Oct 2026 10:40:31 -0500
 Subject: [PATCH 03/13] rdna-boosts: block 03: chunked gated-delta-net prefill
@@ -57,10 +57,10 @@ index e0bc5c58a..ca4fe36b4 100644
      cparams.n_outputs_max_per_seq = std::max(params.n_outputs_max_per_seq, 0);
      cparams.n_batch           = params.n_batch;
 diff --git a/common/speculative.cpp b/common/speculative.cpp
-index 8b8ce907d..8951f3d09 100644
+index 936b83cf4..242fd08f6 100644
 --- a/common/speculative.cpp
 +++ b/common/speculative.cpp
-@@ -2797,6 +2797,7 @@ common_speculative_init_result::common_speculative_init_result(
+@@ -2830,6 +2830,7 @@ common_speculative_init_result::common_speculative_init_result(
      // note: for small models maybe we can set this to the maximum possible draft from all speculative types
      //       the extra memory for small models is likely negligible?
      cparams.n_rs_seq  = 0;
@@ -3046,7 +3046,7 @@ index 882cdf4a5..f34b5de51 100644
      result->op     = GGML_OP_GATED_DELTA_NET;
      result->src[0] = q;
 diff --git a/src/llama-context.cpp b/src/llama-context.cpp
-index eb7926f0c..88f2714e9 100644
+index fa0270aa0..6a972bff0 100644
 --- a/src/llama-context.cpp
 +++ b/src/llama-context.cpp
 @@ -195,6 +195,10 @@ llama_context::llama_context(

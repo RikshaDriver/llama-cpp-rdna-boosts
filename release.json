@@ -1,28 +1,28 @@
 {
-  "release": "v14-097cf33d9-r117",
+  "release": "v14-097cf33d9-r118",
   "base": "097cf33d9",
   "base_tree": "30c400ccea2e2fb47b663036a6cee08a4dc542d8",
   "n_blocks": 14,
-  "tip": "d94211a2c7768692bfeeb6034d89ceda39bc6fa3",
-  "tree": "8cb64b69150d3134a830b9033c0043beb3b19e91",
+  "tip": "111e9ed00e5b653fcbee61d924f598ceecd579f1",
+  "tree": "30e902e2e2ee62ff716b7633ffdc1064c1014a3e",
   "all_patch": {
     "name": "rdna-boosts-all.patch",
-    "sha256": "4714eba6fb427d515f932d5de3eabcf22edf3686e8739e9a4bf85ecb52758e0b"
+    "sha256": "84af8777af918a82afe740a98e6b945b1d66ae5cfaf1243645b1000059e3ab9e"
   },
   "patches": {
     "0000-rdna-boosts-block-00-foundation-band-uniformity-Meta.patch": "4189daf619087a02989f6b3325016296d61abbfa82dac04fe65ed45068df07c0",
     "0001-rdna-boosts-block-01-hybrid-HIP-all-reduce-RDNA4-gat.patch": "547f16e074b1eca8d8e00840c678b854909bae6ccbefedd6a9fe1b7bd85a51b8",
-    "0002-rdna-boosts-block-02-adaptive-MTP-draft-depth.patch": "bb8f8743841b07b8a099a1147fe573bfb7a91b07130b9eb4828b187689f43951",
-    "0003-rdna-boosts-block-03-chunked-gated-delta-net-prefill.patch": "06fad6ecdbd5d26525323f116d78b09ec7ab079098b079a77dc98162cb8250f3",
-    "0004-rdna-boosts-block-04-BF16-KV-cache-and-native-BF16-f.patch": "ce9d0bed6af025869d0a9a32ae24cb08ea360ecb16f7f03092147cbb66e5a52e",
-    "0005-rdna-boosts-block-05-flash-attention-band-native-qua.patch": "16acb2b98462a1c812a1f98745b65866a9218d4d82f8596c19d58631c72dbefe",
-    "0006-rdna-boosts-block-06-MMB-quantized-prefill-GEMM.patch": "7e0ba6a08cadf842e44dd91fe9876d9d25380b4d72448e894e1d5f0c29c296a2",
-    "0007-rdna-boosts-block-07-k-quant-boosts-mmvq-VDR-Q6_K-MM.patch": "f1ebbedfa52d816d54a6feb4c484dca5c6e9b74f5aee6d5141d0b5a7f43a8d97",
-    "0008-rdna-boosts-block-08-fused-kernels-old-08-fusions-ol.patch": "57ea3ff1d7fdc6f2ddb3320bc20d449472c494db414e4852ede2d2b3c008fcd3",
-    "0009-rdna-boosts-block-09-host-resident-MoE-iface-schedul.patch": "20b46b9a8306e8f21eb66f6bd112d5382b669e4ba02c4fdbe9dee8f0350d8261",
-    "0010-rdna-boosts-block-10-slab-fusion-dispatcher-async-in.patch": "acbb27fe74039d9e4e2c549add426bcd4218edf63712f9d0442d343a7258715f",
-    "0011-rdna-boosts-block-11-qwen4exp-model-hyper-connection.patch": "53dab7b7e5398c66f9499cf29017c62d4b5e35ef7c09ae65458d7c6269f7badf",
-    "0012-rdna-boosts-block-12-campaign-remainder-CPU-wins-bac.patch": "77b1d568c5b1e4f066dd7422476e5b3d8cdb3e6a99788913c2d03a7c61d14da3",
-    "0013-rdna-boosts-block-13-MTP-draft-vocabulary-subset-spe.patch": "395132f5a8b58a9c443df3a936a4f4be7dd096da834da2f7ebd6d0b1f9f63aab"
+    "0002-rdna-boosts-block-02-adaptive-MTP-draft-depth.patch": "c2b5aeb13f4bec1632296a6433443594309756b9fc7a0c736946027a7617075a",
+    "0003-rdna-boosts-block-03-chunked-gated-delta-net-prefill.patch": "858c37851483ca5ecc9768c23e7ee57e1e2ea80ffc821ff77e23305413ee817b",
+    "0004-rdna-boosts-block-04-BF16-KV-cache-and-native-BF16-f.patch": "0f52c787854b035f2addcd40f5b795cf5e807e30f332f550599645e2551df0fd",
+    "0005-rdna-boosts-block-05-flash-attention-band-native-qua.patch": "2ed049edb1f397a65dde6d701267e874172e024a2e75b1eb0e38e183c14b8579",
+    "0006-rdna-boosts-block-06-MMB-quantized-prefill-GEMM.patch": "15ece32411d8ed5234e3b9249d57139037846868c6bb77b1c9ee0305bc54e839",
+    "0007-rdna-boosts-block-07-k-quant-boosts-mmvq-VDR-Q6_K-MM.patch": "039bf71562b54e12fd9ece6543eb3d2b075f411d63a070f0f702a19160ddf2fc",
+    "0008-rdna-boosts-block-08-fused-kernels-old-08-fusions-ol.patch": "7fc4d84bc7e416ebc4299b1247ec6c3fad32cc2f69adb26aac0a5a79118c2a7e",
+    "0009-rdna-boosts-block-09-host-resident-MoE-iface-schedul.patch": "2faccf42476065715de510401707388ac91159b0289873c4a04f58bbcbfbd54a",
+    "0010-rdna-boosts-block-10-slab-fusion-dispatcher-async-in.patch": "23f93508aacb852f9748580a7ec8360fd7dea8b94276719ad658e63ff96713d4",
+    "0011-rdna-boosts-block-11-qwen4exp-model-hyper-connection.patch": "15ef7152813080ec09f663d56f43d9c63f54f55fcbe866846c487db2be922f5b",
+    "0012-rdna-boosts-block-12-campaign-remainder-CPU-wins-bac.patch": "285a2c09a819d98e56dc9c888b726e0a1e470090f9472d4be144ed7c1154cb93",
+    "0013-rdna-boosts-block-13-MTP-draft-vocabulary-subset-spe.patch": "8509f4e0f9629b6558de97f8a1757da6f82ed0c70f05ae1de7a1c6fd9017faca"
   }
 }

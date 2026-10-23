@@ -1,4 +1,4 @@
-From d94211a2c7768692bfeeb6034d89ceda39bc6fa3 Mon Sep 17 00:00:00 2001
+From 111e9ed00e5b653fcbee61d924f598ceecd579f1 Mon Sep 17 00:00:00 2001
 From: Stew Forster <ci@rdna-boosts.invalid>
 Date: Thu, 22 Oct 2026 05:53:08 -0500
 Subject: [PATCH 13/13] rdna-boosts: block 13: MTP draft vocabulary subset
@@ -111,10 +111,10 @@ index a68b807fb..a0611c2a0 100644
      common_cpu_params cpuparams_batch;
  
 diff --git a/common/speculative.cpp b/common/speculative.cpp
-index 7342effa9..3b3f4cffd 100644
+index 99cfd6239..bd59a2733 100644
 --- a/common/speculative.cpp
 +++ b/common/speculative.cpp
-@@ -2880,7 +2880,8 @@ common_speculative_init_result::common_speculative_init_result(
+@@ -2913,7 +2913,8 @@ common_speculative_init_result::common_speculative_init_result(
      auto cparams = common_context_params_to_llama(params);
  
      if (spec_mtp) {
@@ -201,7 +201,7 @@ index 8ba97b8ab..6f21ae174 100644
          enum llama_context_type      ctx_type;          // set the context type (e.g. MTP)
          enum llama_rope_scaling_type rope_scaling_type; // RoPE scaling type, from `enum llama_rope_scaling_type`
 diff --git a/src/llama-context.cpp b/src/llama-context.cpp
-index cf2f37e8c..2f29e698b 100644
+index b59f5c970..21fe9e1a6 100644
 --- a/src/llama-context.cpp
 +++ b/src/llama-context.cpp
 @@ -798,6 +798,22 @@ llama_context::llama_context(
@@ -227,7 +227,7 @@ index cf2f37e8c..2f29e698b 100644
          sched_reserve();
  
          // wip/first-prefill-latency: reserve the wide prefill work region in the slab BEFORE the MoE
-@@ -3689,6 +3705,7 @@ llm_graph_params llama_context::graph_params(
+@@ -3733,6 +3749,7 @@ llm_graph_params llama_context::graph_params(
          /*.prec_policy =*/ &model.prec_policy,
          /*.hdmd        =*/ model.hdmd.rot.empty() ? nullptr : &model.hdmd,
          /*.samplers    =*/ sampling.samplers,
@@ -235,7 +235,7 @@ index cf2f37e8c..2f29e698b 100644
          /*.n_outputs   =*/ n_outputs,
          /*.cb          =*/ graph_get_cb(),
          /*.res         =*/ res,
-@@ -5113,6 +5130,7 @@ llama_context_params llama_context_default_params() {
+@@ -5157,6 +5174,7 @@ llama_context_params llama_context_default_params() {
          /*.n_outputs_max_per_seq       =*/ 1,
          /*.n_threads                   =*/ GGML_DEFAULT_N_THREADS, // TODO: better default
          /*.n_threads_batch             =*/ GGML_DEFAULT_N_THREADS,
@@ -244,10 +244,10 @@ index cf2f37e8c..2f29e698b 100644
          /*.rope_scaling_type           =*/ LLAMA_ROPE_SCALING_TYPE_UNSPECIFIED,
          /*.pooling_type                =*/ LLAMA_POOLING_TYPE_UNSPECIFIED,
 diff --git a/src/llama-context.h b/src/llama-context.h
-index e0da0a94f..96dcaf264 100644
+index 006bf6021..117617554 100644
 --- a/src/llama-context.h
 +++ b/src/llama-context.h
-@@ -350,6 +350,9 @@ private:
+@@ -351,6 +351,9 @@ private:
  
      llama_cross cross; // TODO: tmp for handling cross-attention - need something better probably
  
