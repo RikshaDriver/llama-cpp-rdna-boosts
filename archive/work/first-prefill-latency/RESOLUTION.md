@@ -37,7 +37,7 @@ prototype for a workload that does stand tables down.
 ## Residuals / follow-ups
 
 * The 3-GPU decode deficit this work surfaced is a separate, revived campaign:
-  [`wip/three-gpu-performance/`](../../wip/three-gpu-performance/README.md) (TODO #51).
+  [`archive/work/three-gpu-performance/`](../three-gpu-performance/README.md) (TODO #51).
 * The 2/3-GPU arms of the corrected design must be re-measured (the earlier 84.4/100 % numbers were the
   rejected reservation draft).
 * Async seeding (overlap the H2D once the arena exists) remains an alternative to the load-time seed.

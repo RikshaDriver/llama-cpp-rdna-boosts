@@ -1,0 +1,4 @@
+# Flash-Next GSQ-IQ3_XXS + shared MTP head, -sm tensor -ncmoe 48, -c 2048 --chunks 6, q8_0 KV, -t 8
+2 GPU: PPL = 10.8452 +/- 0.70059
+3 GPU: PPL = 10.8623 +/- 0.69942
+# 0.16 % apart: the cross-device-count text difference is the tensor split's own rounding class (GREEDY-PURITY §45), not a deviation

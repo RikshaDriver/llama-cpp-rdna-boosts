@@ -1,0 +1,6 @@
+# dense 27B Q8_0 plain decode at depth (prose16k.txt = 15746 tok sha256 6fec9806b375..., -c 20480, -n 300, r116)
+# 2 GPU vs 3 GPU, -sm layer and -sm tensor, greedy text identical at 2 and 3 GPUs in BOTH split modes
+d16-01-layer-none    [ Prompt: 1501.3 t/s | Generation: 18.0 t/s ]
+d16-012-layer-none   [ Prompt: 1583.7 t/s | Generation: 16.9 t/s ]
+d16-01-tensor-none   [ Prompt: 1846.7 t/s | Generation: 33.6 t/s ]
+d16-012-tensor-none  [ Prompt: 1999.2 t/s | Generation: 42.2 t/s ]

@@ -1,5 +1,68 @@
 # WORKLOG - dated delivery records
 
+## 261023.001 (r116) -- TODO #51 closed for the field/MoE arm: 3 GPUs now decodes **+40.5 %** faster than 2 on the arm the headline came from; the residual is the expert cache's *identity cliff*, not the device count (no delivery change)
+
+**No delivery change.**  This is the closure of the `three-gpu-performance` campaign
+(now [`archive/work/three-gpu-performance/`](archive/work/three-gpu-performance/RESOLUTION.md)) and the
+narrowing of **`TODO #51`** to plain decode.  The set is still `v14-097cf33d9-r116`; `patches/` and
+`release.json` are untouched.
+
+**1. The arm the headline came from, re-measured.**  The 2026-10-16 field table (2 GPU 84.4 vs 3 GPU
+56.9 t/s, GSQ-IQ3_XXS, `-ncmoe 48 -sm tensor`, adaptive MTP, `field3.sh` config) on r116, same prompt
+(`mixed30k.txt`, 32358 tok, sha256 `69624f4d…62ae241`), `-n 1000`, `ROCBLAS_USE_HIPBLASLT=0`:
+
+| devices | arena | identity tables | prefill t/s | decode t/s | acceptance | accepted/gen | mean len |
+|---|---:|---:|---:|---:|---|---|---:|
+| 2 | 37328 MiB (91.2 %) | 0 / 288 | 1416.9 | **93.4** | 0.66358 | 215/324 | 3.65 |
+| 3 | 40925 MiB (100 %) | 432/432 | 1517.1 | **131.2** | 0.74517 | 193/259 | 4.06 |
+
+r115's graph key plus a resident arena moved the 3-GPU arm 2.3x.  The headline is inverted, and the
+2-GPU arm is the misconfigured one (its `-c 204800` leaves it 3.6 GiB short of the host set).
+
+**2. The 24-cell matrix** (`{2,3} x {none, draft-mtp, draft-mtp-adaptive} x {partial, resident} x
+{tensor, layer}`, `-c 40000`, one binary).  Every **speculative** cell is at least as fast at 3 GPUs once
+the arena is fully resident: tensor **+14.0 %** (`draft-mtp`) / **+22.9 %** (adaptive); `-sm layer` 0.0 % /
+−0.4 %.  Partial residency (91 %, non-identity at both counts) is +4.0 % adaptive / −3.6 % draft-mtp.
+Prefill +2.9…+4.0 % tensor.  Plain decode is the only loser: −2.0 % resident, −10.5 % at 91 %, −10.2 % on
+`-sm layer`.
+
+**3. The dominant residual is the identity cliff (new `TODO #93`).**  A table is on the identity fast path
+only at 100 % of its slots, and `alloc_all_locked()` holds back one slab arena unit *per table* as
+"rounding", so a budget that is just enough in aggregate lands one slot short per table: 3 devices with
+`MOE_EXPERT_CACHE_MIB=13800` → arena 40845.1 of 40925.0 MiB, **0/432** identity tables, **46.7 t/s**;
+`15000` → 40925.0, 432/432, **65.0 t/s**.  The same cliff (not the device count) is why the field arm
+measured 46.3 t/s at *2* devices with `-c 204800` (92.4 %, 0 identity) and 66.4 with `-c 40000`.
+**~40 % of decode.**  Filed, not fixed: it is a block-09 sizing policy and needs its own A/B and gates.
+
+**4. Suspect 1 (all-reduce) retired for throughput.**  `GGML_CUDA_AR_PROFILE=1`, plain decode, 4096 calls:
+2 devices 20.1 µs/call (p50 13.8, p90 26.5) = 0.26 ms/token = 1.7 % of decode; 3 devices 35.2 µs
+(p50 21.3, p90 56.2) = 0.45 ms/token = 2.9 %.  The extra 0.19 ms/token is 1.2 % of decode — most of the
+−2.0 % plain-tensor gap and nothing more.  At 3 ranks `hybrid` (default) 65.1 t/s beats `nccl` (59.3,
+−9 %, not bit-identical); forcing `internal` for every size is 67.5 but changes the prefill AR path (smoke
+only); `AR_SMALL_BLOCKS=8` is not better than 4.  Suspects 2/4 are subsumed by the residency axis: the
+verify-width gather only shows at *non-identity* residency, and the MTP arms are the best arms at 3 devices.
+
+**5. Block 13's trim re-measured and accepted with the rule.**  27B Q8_0, `draft-mtp-adaptive,ngram-mod`,
+`-n 1000`: 2 GPU 84.6 → 85.3 t/s (+0.8 %) for `--spec-draft-mtp-vocab 98304`, 3 GPU 105.5 → 103.5
+(**−1.9 %**), text identical within each count.  r109's −2.2 % reproduces; the `N · n_devices < n_vocab`
+rule stands as the accepted limitation (a startup warning when it is violated is folded into `#93`).
+
+**6. Purity finding to carry forward.**  Cross-device-count greedy text is **not** a valid gate on the MoE
+tensor split: 2 vs 3 GPUs differ (`40d493bbb5ac` / `ecf8a32bae77`) with both arenas at 100 % identity and
+with `GGML_CUDA_AR_BF16_THRESHOLD=0`, while PPL is **10.8452 vs 10.8623 (0.16 %)** — §45's split rounding.
+Dense tensor split and every `-sm layer` arm are text-identical across counts (27B at depth 15746:
+`-sm layer` −6.1 % at 3 GPUs, `-sm tensor` **+25.6 %**, same hash at both counts).  `AGENTS.md`
+invariants for the identity cliff and for the per-device-count text reference.  Within one device count the
+three `--spec-type` arms share a hash in all 24 cells (spec purity holds, n_max ≤ 7).
+`scripts/check-gpu-faults.sh --since "150 min ago"` over the run logs and the journal: **clean** (one arm
+OOM'd on VRAM at `-c 204800` + 100 % arena + draft, `CUBLAS_STATUS_ALLOC_FAILED`, not a fault).
+
+**7. Docs.**  `TODO #51` narrowed (field arm closed; plain decode accepted with the production rule: 3 GPUs
+for speculative decode, 2 for plain decode at partial residency, never `-sm layer` for decode), `TODO #93`
+filed, `wip/CAMPAIGNS.md` entry removed, campaign archived with `RESOLUTION.md` + `evidence/` (the matrix,
+the AR profiles, the controls, the identity-cliff A/B, PPL) and the three scripts used
+(`field116.sh`, `cli116.sh`, `matrix116.sh`).
+
 ## 261022.012 (r116) -- TODO #90: the `-sm tensor` model-load staging buffer is reused instead of allocated per tensor (block 08); 27B Q8_0 3-GPU load 12.7 s -> 9.5 s
 
 **Shipped:** `v14-097cf33d9-r116` (**block 08** amended; blocks 00-07 and 09-13 apply to byte-identical
@@ -535,7 +598,7 @@ apply on a fresh tarball, tree `5abfa8e4…`).
 (`--spec-draft-mtp-vocab N`) plus one guidance caveat the 3-GPU arm forced.  Tree `8e67f977…` (r109),
 ROCm 10.1.0, 3x R9700 gfx1201, `ROCBLAS_USE_HIPBLASLT=0` for every run (determinism, `GREEDY-PURITY.md` §44).
 Record: `archive/work/spec-draft-mtp-vocab/VALIDATION-2026-10-22.md`; raw runs + harness:
-`wip/three-gpu-performance/tools/arms-2026-10-22/` (`summary.csv` = the 36 runs used, `invalidated.csv` =
+`archive/work/three-gpu-performance/tools/arms-2026-10-22/` (`summary.csv` = the 36 runs used, `invalidated.csv` =
 the two setup mistakes kept for the record).
 
 **The 3-GPU arm is a loss, and the mechanism is the block's own allocation.**  Qwen3.8-27B Q8_0,
@@ -574,7 +637,7 @@ at 3 GPU vs -2.2 % at 2 GPU.  So 3-GPU decode is *width*-dependent on a dense mo
 verify widths, loses at ~30 and at depth), which is the discriminator §5 of the campaign predicts: on 3
 devices the small-message path is the host-staged chunked ring (both 2-device fast paths need exactly 2
 devices) and its cost grows with the message.  Written up in
-`wip/three-gpu-performance/FINDING-2026-10-22-dense-27b-and-mirrored-draft-subset.md`; it does **not** close
+`archive/work/three-gpu-performance/FINDING-2026-10-22-dense-27b-and-mirrored-draft-subset.md`; it does **not** close
 #51 (the MoE/field-config arm is still the campaign's target).
 
 ## 261022.003 (r109) -- block 10 split in two: the infrastructure stays 10, qwen4exp becomes block 11
@@ -4004,7 +4067,7 @@ are x8 (his R9700 pair) and x16 (the 7900 XTX on PCIe 4.0), so his cross-device 
 
 Two measurements say our multi-GPU prefill is link-bound, not GPU-bound (r81, 35B-A3B Q4_K_M, q8_0 KV,
 `llama-bench -p 31500 -n 0 -r 3`): 1 GPU **3613.8** t/s, 2 GPU tensor **4481.5 (+24 %)**, 3 GPU tensor
-**4347.0 (+20 %, i.e. 3 % below 2 GPU)**.  `wip/three-gpu-performance/` sees the same +17 % / +1 % shape on
+**4347.0 (+20 %, i.e. 3 % below 2 GPU)**.  `archive/work/three-gpu-performance/` sees the same +17 % / +1 % shape on
 the field config, so this is the host, not a model.
 
 That qualifies the #175 prefill verdict above but does **not** change it.  Isolating the fusion itself with
@@ -4272,7 +4335,7 @@ pp512 flat; `llama-batched-bench` B=1/B=4/B=8 **+1.4 / +1.9 / +2.7 %**; 4-axis M
 `n_max 3`; it is acceptance-driven (0.772 -> 0.718, mean accepted length 3.32 -> 3.15) because the greedy
 continuation changes, while **plain** decode on the same prompt is **+0.7 %** (121.2 -> 122.1 t/s).  It
 is content-dependent rounding drift, not a kernel slowdown, and it is **not** 3-GPU-specific; the
-cross-reference for the three-GPU campaign is `wip/three-gpu-performance/` §0.1.
+cross-reference for the three-GPU campaign is `archive/work/three-gpu-performance/` §0.1.
 
 **PR #168 default-on (gfx1201, r79 release build).**  31 k-token prompt, `-ub 2048`, q8_0 KV, default vs
 `LLAMA_KV_N_PAD_PREFILL=0`: MoE 35B-A3B 3-GPU tensor **+2.5 %**, dense 27B 3-GPU tensor **+0.7-0.8 %**,
@@ -4572,7 +4635,7 @@ design -- see the handoff.)
 
 **Records.** `archive/work/first-prefill-latency/` (measurement, the `keep-survivors` prototype -- inert
 in this config -- the seed-floor log and the failure logs).  The 3-GPU decode deficit this surfaced is
-revived separately as `wip/three-gpu-performance/` (TODO #51).
+revived separately as `archive/work/three-gpu-performance/` (TODO #51).
 
 ## 261016.008 (r73) -- MoE heat map: one unified sidecar name per model (block 09)
 

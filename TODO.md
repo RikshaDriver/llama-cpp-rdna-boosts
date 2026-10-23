@@ -21,12 +21,31 @@ top of `WORKLOG.md` is the newest record.
 | **79** | RDNA3_0 verify-band fusions: no multi-device measurement, and gfx1101/gfx1102 untested | platform validation | open (shipped default-on in r95; needs a 2+ card gfx1100 box).  `ssh fingon` is single-RDNA3 (`ROCm0`; its second rocm-smi entry is an iGPU and is not a HIP device), so it does **not** cover the multi-device arm — it validates single-GPU gfx1100 only.  gfx1101/gfx1102 still have no hardware |
 | **70** | harden the expert-cache re-arm / wide-aux growth against a starved arena | robustness | open |
 | **59** | `ngram-mod` + `draft-mtp-adaptive` halves decode with host-resident experts | performance | open (`wip/ngram-mod-host-experts/`) |
-| **51** | 3-GPU decode is slower than 2-GPU | performance | open, **narrowed (r115)**.  The dominant cause was HIP graph-capture churn under the `-sm tensor` Meta backend (the graph-cache key was the first node's *object* address, which the meta re-creates on every rebuild: 3954 keys / 1206 captures / 484 ms of `hipGraphInstantiate` per 300-token decode at 3 devices vs 67 keys / 9 ms with `-sm layer`).  r115 keys on the first node's *data* pointer: 144 keys / 15 ms, **+41 %** at 3 devices (+6 % at 2, 0 % at 1), identical text and acceptance, so **3 GPUs now decodes faster than 2** (`archive/work/graph-key-churn/`).  #89 closed — the residual is a one-time lazy HIP code-object load, ~300 ms of cold start inside the existing warm-up and 0 % of decode (`archive/work/decode-warmup-stall/`); still open for the `-sm layer` / AR-profile grid and the MoE field-config arm.  Earlier (2026-10-22, dense 27B Q8_0, `wip/three-gpu-performance/FINDING-2026-10-22-dense-27b-and-mirrored-draft-subset.md`): width-dependent, not direction-dependent — +9.2 % at mean verify len 2.9, −14.4 % at mean len 29.2 with bit-identical acceptance, −8.5 % at depth 16384 |
+| **51** | 3-GPU decode is slower than 2-GPU | performance | **narrowed to PLAIN decode (2026-10-23, r116)**.  The field/MoE headline (2 GPU 84.4 vs 3 GPU 56.9 t/s, 2026-10-16) is **closed**: on r116 the same config measures **2 GPU 93.4 vs 3 GPU 131.2 t/s (+40.5 %)**, and in the 24-cell matrix every *speculative* arm is at least as fast at 3 devices with the arena fully resident (+14.0 %/+22.9 % `-sm tensor`, 0.0 %/−0.4 % `-sm layer`, `archive/work/three-gpu-performance/RESOLUTION.md`).  What is left is plain decode: **−2.0 %** resident (the 3-device internal all-reduce, 0.45 vs 0.26 ms/token = 1.2 % of decode), **−10.5 %** at 91 % residency (the non-identity per-op routing readback, paid per device) and **−10.2 %** with `-sm layer` (no intra-token parallelism; reproduced on dense 27B at depth, −6.1 %).  Accepted limitation + production rule: 3 GPUs for speculative decode, 2 GPUs for plain decode at partial residency, never `-sm layer` for decode.  The dominant residual *mechanism* is the identity cliff, `#93` |
 | **36** | genuine CPU/GPU overlap for the MoE misses | performance | open, scoping (`wip/moe-cpu-overlap/`) |
 
 Accepted limitations that are deliberately **not** fixed are listed at the end — do not re-report them.
 
 ---
+
+## 93. Expert-cache sizing lands one arena unit per table short of full residency — PERFORMANCE
+
+Opened 2026-10-23 with `archive/work/three-gpu-performance/RESOLUTION.md`.  `alloc_table_locked` puts a
+table on the **identity fast path** only at 100 % of its own slots ("the decode band reads the arena
+directly; no per-token routing readback"), and that path is worth **+40 %** decode on the field config
+(65.0 vs 46.7 t/s, and 66.4 vs 46.3 at 2 devices with `-c 204800`).  `alloc_all_locked()` holds back
+`rounding = dev_n_tables[d] * ggml_cuda_slab_arena_unit(d)` from the slab capacity, so a budget that is
+"just enough" in aggregate lands **one arena unit per table short**: measured at 3 devices,
+`MOE_EXPERT_CACHE_MIB=13800` → 40845.1 of 40925.0 MiB and **0 of 432** tables fully resident, while
+`15000` → 40925.0 and 432/432.  The auto path usually reaches it (at `-c 40000`; at `-c 204800` it does
+not on 2 devices), so this bites explicit budgets and large contexts.
+
+Candidate (needs its own A/B + the MTP/prefill gates, **not** smuggled into a campaign): when the
+shortfall is small, prefer whole-table identity — drop the coldest table(s) rather than spreading a
+one-slot deficit across every table — and/or report `identity fast path ON` / total in the cache summary
+so a mis-sized arena is visible without grepping.  Related, same item: warn (do not silently accept) when
+`--spec-draft-mtp-vocab N` violates the block-13 `N · n_devices < n_vocab` admission rule, which measures
+−1.9 % at 3 devices (2 GPU +0.8 %; text identical, `RESOLUTION.md` §7).
 
 ## 80. Meta split-state cache: 30+ lookups per node per re-allocation — PERFORMANCE (parked)
 
@@ -103,32 +122,36 @@ in the README "Recommended configuration" section.  Working home
 per-op host-expert upload, the MoE cache band and verify graph recapture, the staging-ring width; bisect
 plan in that README).
 
-## 51. 3-GPU decode is slower than 2-GPU (MTP and plain, partial and fully resident) — PERFORMANCE
+## 51. 3-GPU decode is slower than 2-GPU — NARROWED to PLAIN decode (closed for the field/MoE arm)
 
+**Measured to a verdict 2026-10-23 on r116** (`archive/work/three-gpu-performance/RESOLUTION.md`, 24-cell
+matrix + controls, one binary, `ROCBLAS_USE_HIPBLASLT=0`).  Campaign history: revived 2026-10-16 from the
+r55 `mtp-3gpu-decode` closure; r115 (`archive/work/graph-key-churn/`) fixed the graph-key churn; #89 closed
+(one-time HIP code-object load, 0 % of decode).
 
-Reopened 2026-10-16; measured.  Formerly closed at r55 (a fresh A/B then found 3-GPU MTP 74.3 vs 2-GPU
-65.0 t/s).  A 2026-10-16 measurement on r73 found the opposite: 2-GPU **84.4** vs 3-GPU **56.9** t/s
-(13.8K prompt, GSQ-IQ3_XXS, `-ncmoe 48 -sm tensor`, adaptive MTP), and it is present at **100 % arena
-residency** (so not an arena-sizing artifact).  3-GPU prefill is the fastest (1258 t/s).  Broader than MTP
-(the fresh arm is MTP; the matrix must cover plain and fully-resident too).
+**Closed half — the field/MoE arm.**  The 2026-10-16 r73 table (2 GPU 84.4 vs 3 GPU 56.9 t/s,
+GSQ-IQ3_XXS, `-ncmoe 48 -sm tensor`, adaptive MTP) does **not** reproduce: r116 measures **2 GPU 93.4 vs
+3 GPU 131.2 t/s (+40.5 %)** on the same config, and with a 100 %-resident arena every speculative cell of
+the matrix is at least as fast at 3 devices (`draft-mtp` +14.0 %, adaptive +22.9 % tensor; 0.0 % / −0.4 %
+`-sm layer`; prefill +2.9…+4.0 %).  Three mechanisms did it: r115's graph key, the arena reaching every
+table's identity fast path, and (for the 2-GPU arm) the context no longer starving it of arena.
 
-**r115 (2026-10-22) removed the dominant cause and inverted the ranking again**: the stutter and the
-3-GPU deficit were HIP graph-capture churn under the Meta backend — the graph-cache key was the first
-node's *tensor object* address, which the meta re-creates on every rebuild, so the cache never warmed
-(3 GPU tensor: 3954 keys / 1206 captures / 484 ms `hipGraphInstantiate` per 300-token decode, vs 67
-keys / 9 ms with `-sm layer` on the same devices).  Keying on the first node's *data* pointer gives 144
-keys / 15 ms and **+41 %** at 3 devices (+6 % at 2, unchanged at 1), byte-identical text and identical
-MTP acceptance, so 3 GPUs now decodes **faster** than 2.  Record and probe:
-[`archive/work/graph-key-churn/`](archive/work/graph-key-churn/README.md).  **#89 is closed**: what was
-left is a one-time lazy HIP code-object load per (module, device), ~300 ms of *cold start* inside the
-existing warm-up and 0 % of decode (`archive/work/decode-warmup-stall/README.md`).  Remaining: the
-`-sm layer` / AR-profile grid and the MoE field-config arm.
+**Open half — plain (non-speculative) decode.**  3 GPUs loses, for three separate reasons:
+1. `-sm tensor`, arena fully resident: **−2.0 %** (66.4 → 65.1 t/s).  The 3-device internal all-reduce is
+   0.45 ms/token vs 0.26 (2.9 % vs 1.7 % of decode) — i.e. 1.2 % of the gap; the rest is launch/schedule
+   noise.  `nccl` is 9 % *worse* at 3 ranks and not bit-identical; forcing `internal` for every size gains
+   3.7 % but changes the prefill AR path (smoke only).  **No AR change is warranted**; suspect 1 is retired.
+2. `-sm tensor`, 91 % residency: **−10.5 %** (51.5 → 46.1 t/s).  A non-identity table pays a per-token
+   routing readback, and at 3 devices it is paid per device.  Fixing the residency removes it (see #93).
+3. `-sm layer`, any residency: **−0.4…−10.2 %**.  A single-token decode has no intra-token parallelism to
+   gain, so the 3rd device only adds a pipeline stage — reproduced on dense 27B Q8_0 at depth 15746
+   (−6.1 %, text identical at both counts).  Property of the split, not a defect; `-sm layer` is not the
+   decode recommendation (it is also 25-45 % slower than tensor split overall).
 
-Working home [`wip/three-gpu-performance/`](wip/three-gpu-performance/README.md) (revived 2026-10-16 from the
-r55 `mtp-3gpu-decode` campaign; that campaign's r55 closure record moved with it and is kept beside the
-README as `RESOLUTION-2026-10-13-closed.md`).  Step 0: re-run the r55 harness on the current tree, then the full
-`{2,3}` x `{plain,MTP}` x `{partial,fully-resident}` x `{tensor,layer}` grid, then the all-reduce /
-identity-path / tensor-split-gather profile.
+**Purity note for anyone re-measuring this:** cross-device-count greedy text is **not** a valid gate on
+the MoE tensor-split path (2 GPU `40d493bbb5ac` vs 3 GPU `ecf8a32bae77`, PPL 10.8452 vs 10.8623 = 0.16 %,
+the §45 split rounding); dense tensor split and every `-sm layer` arm are text-identical across counts.
+Compare builds *within* a device count.
 
 ## 36. Genuine CPU/GPU overlap for the MoE misses (Strata's pipeline shape) — PERFORMANCE (scoping)
 
@@ -197,6 +220,13 @@ fraction at 43 % residency; if it is <20 %, park it.  Design space and gates:
   is in [`archive/work/fix-gemma-4/ISWA-WRITE-FUSION.md`](archive/work/fix-gemma-4/ISWA-WRITE-FUSION.md) §5.6.
   (The iSWA builder order that made the 256-wide half of this fusion live is r101, `WORKLOG.md` 261021.003;
   `GREEDY-PURITY.md` §45 records the split-state rule that came with it.)
+- **3-GPU plain (non-speculative) decode is a few percent slower than 2-GPU — accepted** (2026-10-23,
+  r116; `TODO #51`, `archive/work/three-gpu-performance/RESOLUTION.md`).  −2.0 % with a fully-resident
+  arena (the 3-device internal all-reduce is 1.2 % of decode and no backend/size knob beats it), −10.5 % at
+  91 % residency (the non-identity per-token routing readback, paid per device — see `#93`), −10.2 % with
+  `-sm layer` (no intra-token parallelism; a property of layer splitting, reproduced on dense 27B).
+  Speculative decode does **not** lose: +14…+23 % at 3 devices when resident.  Production rule: 3 GPUs for
+  speculative/MTP workloads, 2 GPUs for plain decode at partial residency, never `-sm layer` for decode.
 - **Not worth pursuing** (measured, no win): the decode fq-inline-quantize port (wash-to-negative — the
   tree already launches fewer kernels/step and sits at wall parity) and the GDN +72-launch 2-kernel split
   (cosmetic).

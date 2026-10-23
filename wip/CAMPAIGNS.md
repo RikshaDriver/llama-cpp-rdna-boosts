@@ -20,10 +20,23 @@ is the signature of a stub, not of a campaign.
 
 | directory | what | status |
 |---|---|---|
-| [`three-gpu-performance/`](three-gpu-performance/README.md) | **3-GPU decode is slower than 2-GPU** — MTP and plain, partial and **fully resident** (the former `archive/work/mtp-3gpu-decode/`, closed at r55, **revived** 2026-10-16).  Fresh measurement: 2-GPU 84.4 vs 3-GPU 56.9 t/s at 100 % residency, while 3-GPU prefill is fastest.  Step 0 is to re-run the r55 harness on the current release (r104); note the available gfx1100 box (`ssh fingon`) is **single-RDNA3** — its second rocm-smi entry is an iGPU — so it cannot cover this campaign's 3-GPU arm, then the full {2,3} x {plain,MTP} x {partial,fully-resident} x {tensor,layer} grid, then profile the all-reduce / identity path / tensor-split gather.  **2026-10-22 (r109) dense 27B datapoint:** the deficit is *width*-dependent — 3 GPU wins +9.2 % at mean verify len 2.9 and loses −14.4 % at mean len 29.2 with bit-identical acceptance, −8.5 % at depth 16384 ([`FINDING-2026-10-22-dense-27b-and-mirrored-draft-subset.md`](three-gpu-performance/FINDING-2026-10-22-dense-27b-and-mirrored-draft-subset.md)); the same runs found the first 3-GPU regression owned by a delivery feature (block-13 mirrored draft subset, −2.2 %) | **OPEN (revived 2026-10-16; much narrower after r115; next session = [`HANDOVER-2026-10-23.md`](three-gpu-performance/HANDOVER-2026-10-23.md), which also carries the `TODO #51` exit criteria)** — r115 fixed the dominant cause: the `-sm tensor` HIP graph cache never warmed (Meta rebuild changes the first node's object address), which was the 3-GPU stutter *and* the deficit; keying on the node's data pointer is +41 % at 3 GPUs and 3 GPUs now beats 2 (`archive/work/graph-key-churn/`).  Remaining: the `-sm layer`/AR-profile grid (the 2-vs-3-device per-call AR p50/p90 + spin split was never run) and the MoE field-config arm (the 2026-10-16 `-ncmoe 48` table has not been re-measured since r115); suspects 2/4 (verify-width tensor-split gather, draft placement) are still unmeasured. TODO #89 closed: its residual is a one-time lazy code-object load, 0 % of decode — `archive/work/decode-warmup-stall/` |
 | [`fp8-support/`](fp8-support/README.md) | native FP8 E4M3 for RDNA4 | PARKED (2026-09-26) — rebased and building, fully RDNA4-gated, but **gate 2 failed** (the fp8 4B is 0.69x Q8_0 where cllm had 1.16x, because the delivery's MMB/GEMM work made Q8_0 +32 % and the fp8 WMMA path did not follow).  Resume actions are in `PLAN.md`.  Not closed — paused behind the delivery work |
 | [`moe-cpu-overlap/`](moe-cpu-overlap/README.md) | genuine CPU/GPU overlap for the expert misses (the Strata shape) | OPEN / scoping (TODO #36) — **work in flight**: the note refutes the earlier "cannot be done" verdict for the interleaved shape and sets out the pipeline to try |
 | [`ngram-mod-host-experts/`](ngram-mod-host-experts/README.md) | `ngram-mod` + `draft-mtp-adaptive` roughly halves decode when the MoE experts are host-resident (`-ncmoe`/`-cmoe`, expert cache active); plain `draft-mtp-adaptive` restores the expected rate | **OPEN (seeded 2026-10-14), scoping + measurement** |
+
+**Closed (2026-10-23, r116, no delivery change).**  `three-gpu-performance/` left `wip/` for
+[`archive/work/three-gpu-performance/`](../archive/work/three-gpu-performance/RESOLUTION.md) with a
+`RESOLUTION.md`, and **`TODO #51` is narrowed to plain decode**: the 2026-10-16 field/MoE headline (2 GPU
+84.4 vs 3 GPU 56.9 t/s) does not reproduce — the same config measures **2 GPU 93.4 vs 3 GPU 131.2 t/s
+(+40.5 %)** on r116, and every speculative arm of the 24-cell `{2,3} x {none,mtp,adaptive} x
+{partial,resident} x {tensor,layer}` matrix is at least as fast at 3 devices once the expert arena is
+100 % resident (+14 % / +23 % tensor, flat `-sm layer`).  The dominant residual is the **identity cliff**:
+an arena one arena unit per table short of 100 % drops *every* table off the identity fast path
+(40845 vs 40925 MiB = 46.7 vs 65.0 t/s), filed as `TODO #93`; the all-reduce is retired for throughput
+(2.9 % of decode at 3 devices, `nccl` is 9 % worse); the remaining `-sm layer` loss is a pipeline-stage
+property (reproduced on dense 27B at depth, −6.1 %).  Cross-device-count greedy text is **not** a valid
+purity gate on the MoE tensor split (PPL is 0.16 % apart; dense and `-sm layer` are text-identical).  See
+`WORKLOG.md` 261023.001.
 
 **Closed (2026-10-22, no delivery change).**  `decode-warmup-stall/` left `wip/` for
 [`archive/work/decode-warmup-stall/`](../archive/work/decode-warmup-stall/README.md) and **TODO #89 is
@@ -229,7 +242,7 @@ pad to **default-on (8192) on a multi-device split** and inactive on one GPU (3-
 / +0.8 % dense, 3-GPU layer +42 % / +49 %, 1-GPU unchanged).  The PR was never a `wip/` entry on
 `main` (it arrived as a PR branch), so the open set was not touched; the record is
 `archive/work/rdna3-mmvq-moe-q4k-vdr4/` with a `RESOLUTION.md`.  The P-axis finding is cross-referenced
-in `three-gpu-performance/README.md` §0.1 (it is not 3-GPU-specific).  See `WORKLOG.md` 261017.002.
+in `archive/work/three-gpu-performance/README.md` §0.1 (it is not 3-GPU-specific).  See `WORKLOG.md` 261017.002.
 
 **Promoted and rejected (r78, 2026-10-17).**  Three contributor PRs were reviewed; **none of them was
 ever a `wip/` entry on `main`** (they arrived as PR branches under their own `wip/<name>/`, so the open
@@ -268,7 +281,7 @@ earlier persistent-reservation draft (eviction 84 MiB) shrank the arena permanen
 then fixed a placement regression this work exposed (the wide compute view aliasing the carved H2D ring;
 blocks 10/11).  The `keep-survivors` prototype was inert in this config and stays un-promoted.  Record
 moved to `archive/work/first-prefill-latency/` (with a `RESOLUTION.md`).  The 3-GPU decode deficit it
-surfaced is revived as `wip/three-gpu-performance/`.  See `WORKLOG.md` 261016.009 (r74) and 261016.010 (r75).
+surfaced is revived as `archive/work/three-gpu-performance/`.  See `WORKLOG.md` 261016.009 (r74) and 261016.010 (r75).
 
 **Promoted (r69, 2026-10-16).**  Two contributor PRs from `@briansp2020` (#162, #163) were merged and
 folded into their owner blocks (07/08/10; the delivery stays a 12-block set), then archived with a
@@ -387,9 +400,9 @@ closed as a no-win) moved to `archive/work/` with a `RESOLUTION.md` each; `mtp-3
 its record also moved to `archive/work/`.  TODO #15, #28 and #51 are closed.
 
 > **Reopened (2026-10-16).**  `mtp-3gpu-decode/` was **revived** from `archive/work/` as
-> [`three-gpu-performance/`](three-gpu-performance/README.md) after a fresh measurement found 3-GPU
+> [`archive/work/three-gpu-performance/`](../archive/work/three-gpu-performance/README.md) after a fresh measurement found 3-GPU
 > decode *slower* than 2-GPU (56.9 vs 84.4 t/s) at 100 % residency.  The r55 closure is kept as
-> `three-gpu-performance/RESOLUTION-2026-10-13-closed.md`; TODO #51 is live again.
+> `archive/work/three-gpu-performance/RESOLUTION-2026-10-13-closed.md`; TODO #51 is live again.
 
 
 **Resolved (r54, 2026-10-13).**  Three campaigns left `wip/`, all with a `RESOLUTION.md` under

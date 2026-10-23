@@ -1056,7 +1056,7 @@ the 3-GPU advice is leave the trim off.  Depth-16384 decode is flat (2 GPU +0.1 
 gemma4 corollary (unmeasured): its only lossless cut is >= 245760, i.e. above the 2-device share, so even
 the "no-op" cut would be a width loss.  Record:
 `../archive/work/spec-draft-mtp-vocab/VALIDATION-2026-10-22.md`; mechanism + numbers also in
-`../wip/three-gpu-performance/FINDING-2026-10-22-dense-27b-and-mirrored-draft-subset.md`.
+`../archive/work/three-gpu-performance/FINDING-2026-10-22-dense-27b-and-mirrored-draft-subset.md`.
 
 **Purity.**  `GREEDY-PURITY.md` §48: a draft-side restriction cannot change an accepted token, and inside the
 `n_max <= 7` band the trim is *text*-identical to plain decode (verified on prose and code at `-n 3000`).

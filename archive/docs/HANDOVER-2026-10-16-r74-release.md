@@ -132,7 +132,7 @@ Per `AGENTS.md` → "Pushing policy".  **Never push to upstream `ggml-org/llama.
 
 - **MoE near-tie drift** (the arena residency timing; `TODO.md` #50, `GREEDY-PURITY.md`): if the
   coherence gate differs from r73, it is likely this.  Record, do not silently accept.
-- **3-GPU decode deficit** — a separate, revived campaign: `wip/three-gpu-performance/` (TODO #51).
+- **3-GPU decode deficit** — a separate, revived campaign: `archive/work/three-gpu-performance/` (TODO #51).
   r74 is not expected to fix it; the 3-GPU arm is a re-measure target.
 - **2/3-GPU arms of the corrected arena design** are unmeasured (see §2.5.5).
 - **`keep-survivors`** re-arm prototype is inert in this config and stays un-promoted

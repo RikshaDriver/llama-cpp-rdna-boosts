@@ -72,7 +72,7 @@ a delivery claim.
 not as refuted.**  Each R9700 has a x16 device-side link but a **x4 @ 32 GT/s uplink to the host**
 (`current_link_width` = 4 on `0000:01:00.0` / `04:00.0` / `07:00.0`), which is half of the contributor's
 x8 host and a quarter of x16, so our multi-GPU prefill is link-bound: `pp31500` scales 3613.8 (1 GPU) ->
-4481.5 (2 GPU tensor, +24 %) -> 4347.0 (3 GPU, -3 % vs 2 GPU), and `wip/three-gpu-performance/` shows the
+4481.5 (2 GPU tensor, +24 %) -> 4347.0 (3 GPU, -3 % vs 2 GPU), and `archive/work/three-gpu-performance/` shows the
 same +17 % / +1 % shape on the field config.  Isolating the fusion with its own kill switch in the r81
 binary (same build, so both arms carry the same link cost) gives:
 

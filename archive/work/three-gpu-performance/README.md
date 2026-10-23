@@ -1,9 +1,17 @@
 # `three-gpu-performance` — 3-GPU decode is slower than 2-GPU (MTP and plain, partial and fully resident)
 
-**Status: REVIVED (2026-10-16) from `archive/work/mtp-3gpu-decode/` (the r55 closure).**  This is the same
-item as the former **TODO #51**, now scoped wider: it is **not MTP-only** and it reproduces in the
-**fully-resident** case.  Not part of the delivery; nothing here may be applied to the fork without the
-maintainer's go-ahead (see the WIP and promotion rules in `AGENTS.md`).
+**Status: CLOSED (2026-10-23, r116) — see [`RESOLUTION.md`](RESOLUTION.md).**  The 2026-10-16 headline does
+not reproduce: the field/MoE config measures **2 GPU 93.4 vs 3 GPU 131.2 t/s (+40.5 %)** on r116, every
+speculative arm is at least as fast at 3 devices at 100 % arena residency, and what remains is *plain*
+decode (−2 % resident, −10 % partial, −10 % with `-sm layer`) with each mechanism named.  The dominant
+residual is the **identity cliff** (an arena one arena unit per table short of 100 % drops *every* table
+off the identity fast path: 46.7 vs 65.0 t/s), now `TODO.md` #93; no delivery code changed in this
+campaign.
+
+This directory was `wip/three-gpu-performance/`; it was revived 2026-10-16 from `archive/work/mtp-3gpu-decode/`
+(the r55 closure).  Not part of the delivery; nothing here may be applied to the fork (see the WIP and
+promotion rules in `AGENTS.md`).  Measurement tooling for the closure: `tools/field116.sh` (server arm),
+`tools/cli116.sh` (llama-cli arm), `tools/matrix116.sh` (the §1 matrix); numbers in `evidence/`.
 
 > **Revival note (2026-10-16).**  The campaign was closed at r55 with no code change because a fresh A/B
 > then found 3-GPU MTP **faster** than 2-GPU (74.3 vs 65.0 t/s, 32K prompt, IQ4_NL).  A 2026-10-16
@@ -21,13 +29,13 @@ maintainer's go-ahead (see the WIP and promotion rules in `AGENTS.md`).
 > pointer: 144 keys / 15 ms, **+41 %** at 3 devices (+6 % at 2, unchanged at 1), byte-identical text and
 > bit-identical MTP acceptance; 3 GPUs now decodes **faster** than 2.  The all-reduce was never involved
 > (`GGML_CUDA_AR_PROFILE=1` max 2 ms/call).  Record + probe:
-> [`../../archive/work/graph-key-churn/`](../../archive/work/graph-key-churn/README.md).  This campaign
+> [`../graph-key-churn/`](../graph-key-churn/README.md).  This campaign
 > stays open for the `-sm layer`/AR-profile grid and the MoE field-config arm.
 > **TODO #89 is closed** (2026-10-22): the "residual ~70 ms per-device stall" is a one-time lazy HIP
 > code-object load per (module, device) — ~300 ms of *cold start* paid inside the existing warm-up, 0 %
 > of decode, the same count at 300 / 1000 / 1500 tokens.  Nothing about it is 3-GPU-specific (it scales
 > with device count only because the load is per device).
-> [`../../archive/work/decode-warmup-stall/`](../../archive/work/decode-warmup-stall/README.md).
+> [`../decode-warmup-stall/`](../decode-warmup-stall/README.md).
 >
 > **Dense datapoint (2026-10-22, r109).**  The deficit is **width**-dependent, not direction-dependent.
 > Qwen3.8-27B Q8_0, `-sm tensor`, four axes at `-n 3000`: 3 GPU is **+3.4 %** aggregate and **+9.2 %** on
@@ -85,7 +93,7 @@ accepted length 3.32 -> 3.15), while **plain** decode on the same prompt is fast
 gfx1201 flat).  It reproduces at `-n 2000`, `-n 3000` and fixed `n_max 3`, so it is content-dependent
 rounding drift, not a 3-GPU cost.  Keep it out of the 3-GPU diagnosis; if it needs a fix, it belongs to
 the adaptive controller's response to a changed continuation, not to the split/all-reduce path.
-Full numbers: [`../../benchmarks/2026-10-17-pr167-r79-acceptance.md`](../../benchmarks/2026-10-17-pr167-r79-acceptance.md).
+Full numbers: [`../../../benchmarks/2026-10-17-pr167-r79-acceptance.md`](../../../benchmarks/2026-10-17-pr167-r79-acceptance.md).
 
 ### 0.2 The host link is PCIe 5.0 **x4** per card, so multi-GPU prefill is link-bound (2026-10-17)
 
@@ -113,8 +121,8 @@ card.  So:
   for before blaming the AR implementation.
 * **Cross-device prefill claims from an x8/x16 host can only be under-measured here.**  Record them as
   "not measurable on our link" rather than "does not reproduce": PR #175's 2-GPU tensor prefill
-  +11.7 % is the worked example (see `../../WORKLOG.md` 261017.008 and
-  `../../archive/work/mrope-rope-fusion/RESOLUTION.md`), while its decode gain did reproduce at 2-GPU
+  +11.7 % is the worked example (see `../../../WORKLOG.md` 261017.008 and
+  `../mrope-rope-fusion/RESOLUTION.md`), while its decode gain did reproduce at 2-GPU
   tensor because the per-token AR traffic is negligible.
 
 ## 1. The work matrix this campaign must fill
@@ -176,9 +184,9 @@ If the gap is gone or much smaller, close #51 and record why.
 
 The harness is preserved in the repo (the `/tmp/srr` copies are transient):
 
-- [`archive/work/moe-verify-fusions/tools/field3.sh`](../../archive/work/moe-verify-fusions/tools/field3.sh)
+- [`archive/work/moe-verify-fusions/tools/field3.sh`](../moe-verify-fusions/tools/field3.sh)
   — MTP arm (`--spec-draft-model`, `--spec-type draft-mtp --spec-draft-n-max 3`).
-- [`archive/work/moe-verify-fusions/tools/field_nospec.sh`](../../archive/work/moe-verify-fusions/tools/field_nospec.sh)
+- [`archive/work/moe-verify-fusions/tools/field_nospec.sh`](../moe-verify-fusions/tools/field_nospec.sh)
   — plain arm (`--spec-type none`, no draft model).
 
 Both default to the field model and head (present on this box):
@@ -238,12 +246,12 @@ Work them in order; each has an A/B and a cheap first measurement.
 
 > **Status after r115/r116 (2026-10-22).**  Suspect **3** (per-op graph capture re-firing) was the
 > dominant cause and is **fixed** in r115: the graph key is the first node's `data` pointer, and the
-> 3-GPU stutter + deficit inverted to **+41 %** (`../../archive/work/graph-key-churn/`).  Suspect **1**'s
+> 3-GPU stutter + deficit inverted to **+41 %** (`../graph-key-churn/`).  Suspect **1**'s
 > *stutter* role is retired with it — `GGML_CUDA_AR_PROFILE=1` shows max 2 ms/call — but the **per-call
 > p50/p90 and spin-split comparison of 2 vs 3 devices was still never run**, so it stays listed for the
 > *throughput* arm.  Suspect **5** is unchanged.  Suspects **2** and **4** remain unmeasured.  The
 > residual per-device stall that was suspect-3-adjacent is **closed as a one-time code-object load**
-> (`../../archive/work/decode-warmup-stall/`), so it is no longer part of this campaign.
+> (`../decode-warmup-stall/`), so it is no longer part of this campaign.
 
 1. **Internal all-reduce on 3 devices (highest prior).** Profile with `GGML_CUDA_AR_PROFILE=1` and compare
    the per-call p50/p90 and the spin split between 2 and 3 GPUs. A/B
@@ -290,9 +298,9 @@ Work them in order; each has an A/B and a cheap first measurement.
 ## 8. Pointers
 
 - `TODO.md` #51; `WORKLOG.md` 2026-10-10 (r39, the `slab-ring-region` promotion).
-- [`archive/work/slab-ring-region/HANDOVER.md`](../../archive/work/slab-ring-region/HANDOVER.md) §4.3.1
+- [`archive/work/slab-ring-region/HANDOVER.md`](../slab-ring-region/HANDOVER.md) §4.3.1
   (the original measurement) and `WORKLOG.md` around the r39 entry.
-- [`archive/work/allreduce-small-msg-latency/README.md`](../../archive/work/allreduce-small-msg-latency/README.md)
+- [`archive/work/allreduce-small-msg-latency/README.md`](../allreduce-small-msg-latency/README.md)
   + `RESOLUTION.md` (the r45/r46 small-message AR work; "Not measured: more than 2 GPUs" is this item).
 - `ENVIRONMENT.md` §6 and the `GGML_CUDA_AR_*` rows (all-reduce knobs and their defaults).
 - `ggml/src/ggml-cuda/allreduce-hip.cu` (chunked kernel, dispatch), `ggml-cuda.cu`

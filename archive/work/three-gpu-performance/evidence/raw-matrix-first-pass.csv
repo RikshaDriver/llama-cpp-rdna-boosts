@@ -1,0 +1,82 @@
+part-tensor-2g-none,gpus=0,1,sm=tensor,spec=none,ncmoe=48,cache=18830,prompt_n=32358 prompt_tps=1600.7 predicted_n=297 predicted_tps=51.5 text_sha=40d493bbb5ac text_len=990,no-acceptance,MoE expert cache: h=0.9946 (887780/892560 reaches), fills=140140 evictions=4780, tables=288, slots=135360, arena=37567.9 MiB total (budget 18830 MiB/device),no-auto-res,evict_lines=0
+part-tensor-2g-draft-mtp,gpus=0,1,sm=tensor,spec=draft-mtp,ncmoe=48,cache=18830,prompt_n=32358 prompt_tps=1438.7 predicted_n=297 predicted_tps=101.4 text_sha=40d493bbb5ac text_len=990,draft acceptance = 0.73913 (  204 accepted /   276 generated), mean len =  3.22,MoE expert cache: h=0.9820 (1088849/1108860 reaches), fills=152551 evictions=4217, tables=288, slots=135360, arena=37567.9 MiB total (budget 18830 MiB/device),no-auto-res,evict_lines=6
+part-tensor-2g-draft-mtp-adaptive,gpus=0,1,sm=tensor,spec=draft-mtp-adaptive,ncmoe=48,cache=18830,prompt_n=32358 prompt_tps=1428.6 predicted_n=297 predicted_tps=96.8 text_sha=40d493bbb5ac text_len=990,draft acceptance = 0.66358 (  215 accepted /   324 generated), mean len =  3.65,MoE expert cache: h=0.9792 (1195744/1221180 reaches), fills=148106 evictions=4345, tables=288, slots=135360, arena=37567.9 MiB total (budget 18830 MiB/device),no-auto-res,evict_lines=5
+part-tensor-3g-none,gpus=0,1,2,sm=tensor,spec=none,ncmoe=48,cache=12550,prompt_n=32358 prompt_tps=1646.5 predicted_n=257 predicted_tps=46.1 text_sha=ecf8a32bae77 text_len=842,no-acceptance,MoE expert cache: h=0.9931 (1158045/1166040 reaches), fills=208875 evictions=7995, tables=432, slots=200880, arena=37168.2 MiB total (budget 12550 MiB/device),no-auto-res,evict_lines=0
+part-tensor-3g-draft-mtp,gpus=0,1,2,sm=tensor,spec=draft-mtp,ncmoe=48,cache=12550,prompt_n=32358 prompt_tps=1497.6 predicted_n=257 predicted_tps=97.8 text_sha=ecf8a32bae77 text_len=842,draft acceptance = 0.76068 (  178 accepted /   234 generated), mean len =  3.28,MoE expert cache: h=0.9939 (1429812/1438650 reaches), fills=209718 evictions=8838, tables=432, slots=200880, arena=37168.2 MiB total (budget 12550 MiB/device),no-auto-res,evict_lines=0
+part-tensor-3g-draft-mtp-adaptive,gpus=0,1,2,sm=tensor,spec=draft-mtp-adaptive,ncmoe=48,cache=12550,prompt_n=32358 prompt_tps=1483.3 predicted_n=257 predicted_tps=100.7 text_sha=ecf8a32bae77 text_len=842,draft acceptance = 0.74517 (  193 accepted /   259 generated), mean len =  4.06,MoE expert cache: h=0.9937 (1481097/1490490 reaches), fills=210273 evictions=9393, tables=432, slots=200880, arena=37168.2 MiB total (budget 12550 MiB/device),no-auto-res,evict_lines=0
+part-layer-2g-none,gpus=0,1,sm=layer,spec=none,ncmoe=48,cache=18830,prompt_n=32358 prompt_tps=1435.0 predicted_n=300 predicted_tps=38.6 text_sha=28e9b06d38d7 text_len=1003,no-acceptance,MoE expert cache: h=0.9954 (448533/450600 reaches), fills=70302 evictions=2067, tables=144, slots=68235, arena=37590.0 MiB total (budget 18830 MiB/device),no-auto-res,evict_lines=0
+part-layer-2g-draft-mtp,gpus=0,1,sm=layer,spec=draft-mtp,ncmoe=48,cache=18830,prompt_n=32358 prompt_tps=1340.7 predicted_n=300 predicted_tps=69.6 text_sha=28e9b06d38d7 text_len=1003,draft acceptance = 0.71579 (  204 accepted /   285 generated), mean len =  3.15,MoE expert cache: h=0.9888 (565316/571710 reaches), fills=71109 evictions=1718, tables=144, slots=68235, arena=37590.0 MiB total (budget 18830 MiB/device),no-auto-res,evict_lines=2
+part-layer-2g-draft-mtp-adaptive,gpus=0,1,sm=layer,spec=draft-mtp-adaptive,ncmoe=48,cache=18830,prompt_n=32358 prompt_tps=1327.0 predicted_n=300 predicted_tps=64.1 text_sha=28e9b06d38d7 text_len=1003,draft acceptance = 0.65060 (  216 accepted /   332 generated), mean len =  3.60,MoE expert cache: h=0.9852 (615754/624990 reaches), fills=70676 evictions=1685, tables=144, slots=68235, arena=37590.0 MiB total (budget 18830 MiB/device),no-auto-res,evict_lines=3
+part-layer-3g-none,gpus=0,1,2,sm=layer,spec=none,ncmoe=48,cache=12550,prompt_n=32358 prompt_tps=1424.5 predicted_n=300 predicted_tps=39.4 text_sha=28e9b06d38d7 text_len=1003,no-acceptance,MoE expert cache: h=0.9915 (288491/290970 reaches), fills=70420 evictions=2479, tables=144, slots=67941, arena=37426.4 MiB total (budget 12550 MiB/device),no-auto-res,evict_lines=0
+part-layer-3g-draft-mtp,gpus=0,1,2,sm=layer,spec=draft-mtp,ncmoe=48,cache=12550,prompt_n=32358 prompt_tps=1339.0 predicted_n=300 predicted_tps=71.6 text_sha=28e9b06d38d7 text_len=1003,draft acceptance = 0.71579 (  204 accepted /   285 generated), mean len =  3.15,MoE expert cache: h=0.9930 (366638/369240 reaches), fills=70543 evictions=2602, tables=144, slots=67941, arena=37426.4 MiB total (budget 12550 MiB/device),no-auto-res,evict_lines=0
+part-layer-3g-draft-mtp-adaptive,gpus=0,1,2,sm=layer,spec=draft-mtp-adaptive,ncmoe=48,cache=12550,prompt_n=32358 prompt_tps=1336.7 predicted_n=300 predicted_tps=66.0 text_sha=28e9b06d38d7 text_len=1003,draft acceptance = 0.63988 (  215 accepted /   336 generated), mean len =  3.56,MoE expert cache: h=0.9933 (405559/408300 reaches), fills=70682 evictions=2741, tables=144, slots=67941, arena=37426.4 MiB total (budget 12550 MiB/device),no-auto-res,evict_lines=0
+full-tensor-2g-none,gpus=0,1,sm=tensor,spec=none,ncmoe=40,cache=auto,prompt_n=32358 prompt_tps=1630.7 predicted_n=297 predicted_tps=66.9 text_sha=40d493bbb5ac text_len=990,no-acceptance,MoE expert cache: h=0.0000 (0/0 reaches), fills=122880 evictions=0, tables=240, slots=122880, arena=34950.0 MiB total (budget auto MiB/device),MoE expert cache (auto): arena 34950.0 MiB of 34950.0 MiB host experts (100.0% residency),evict_lines=0
+full-tensor-2g-draft-mtp,gpus=0,1,sm=tensor,spec=draft-mtp,ncmoe=40,cache=auto,prompt_n=32358 prompt_tps=1462.9 predicted_n=297 predicted_tps=115.3 text_sha=40d493bbb5ac text_len=990,draft acceptance = 0.73913 (  204 accepted /   276 generated), mean len =  3.22,MoE expert cache: h=0.9146 (215941/236100 reaches), fills=127167 evictions=0, tables=240, slots=122880, arena=34950.0 MiB total (budget auto MiB/device),MoE expert cache (auto): arena 34950.0 MiB of 34950.0 MiB host experts (100.0% residency),evict_lines=6
+full-tensor-2g-draft-mtp-adaptive,gpus=0,1,sm=tensor,spec=draft-mtp-adaptive,ncmoe=40,cache=auto,prompt_n=32358 prompt_tps=1457.6 predicted_n=297 predicted_tps=107.3 text_sha=40d493bbb5ac text_len=990,draft acceptance = 0.66358 (  215 accepted /   324 generated), mean len =  3.65,MoE expert cache: h=0.9185 (285162/310460 reaches), fills=126162 evictions=0, tables=240, slots=122880, arena=34950.0 MiB total (budget auto MiB/device),MoE expert cache (auto): arena 34950.0 MiB of 34950.0 MiB host experts (100.0% residency),evict_lines=4
+full-tensor-3g-none,gpus=0,1,2,sm=tensor,spec=none,ncmoe=40,cache=auto,prompt_n=32358 prompt_tps=1705.8 predicted_n=257 predicted_tps=68.3 text_sha=ecf8a32bae77 text_len=842,no-acceptance,MoE expert cache: h=0.0000 (0/0 reaches), fills=184320 evictions=0, tables=360, slots=184320, arena=34950.0 MiB total (budget auto MiB/device),MoE expert cache (auto): arena 34950.0 MiB of 34950.0 MiB host experts (100.0% residency),evict_lines=0
+full-tensor-3g-draft-mtp,gpus=0,1,2,sm=tensor,spec=draft-mtp,ncmoe=40,cache=auto,Traceback (most recent call last):
+  File "<stdin>", line 7, in <module>
+  File "/usr/lib64/python3.14/urllib/request.py", line 187, in urlopen
+    return opener.open(url, data, timeout)
+           ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib64/python3.14/urllib/request.py", line 487, in open
+    response = self._open(req, data)
+  File "/usr/lib64/python3.14/urllib/request.py", line 504, in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+                              '_open', req)
+  File "/usr/lib64/python3.14/urllib/request.py", line 464, in _call_chain
+    result = func(*args)
+  File "/usr/lib64/python3.14/urllib/request.py", line 1362, in http_open
+    return self.do_open(http.client.HTTPConnection, req)
+           ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib64/python3.14/urllib/request.py", line 1337, in do_open
+    r = h.getresponse()
+  File "/usr/lib64/python3.14/http/client.py", line 1478, in getresponse
+    response.begin()
+    ~~~~~~~~~~~~~~^^
+  File "/usr/lib64/python3.14/http/client.py", line 343, in begin
+    version, status, reason = self._read_status()
+                              ~~~~~~~~~~~~~~~~~^^
+  File "/usr/lib64/python3.14/http/client.py", line 312, in _read_status
+    raise RemoteDisconnected("Remote end closed connection without"
+                             " response")
+http.client.RemoteDisconnected: Remote end closed connection without response,draft acceptance = 0.18182 (    2 accepted /    11 generated), mean len =  1.50,no-h,MoE expert cache (auto): arena 34950.0 MiB of 34950.0 MiB host experts (100.0% residency),evict_lines=0
+full-tensor-3g-draft-mtp-adaptive,gpus=0,1,2,sm=tensor,spec=draft-mtp-adaptive,ncmoe=40,cache=auto,Traceback (most recent call last):
+  File "<stdin>", line 7, in <module>
+  File "/usr/lib64/python3.14/urllib/request.py", line 187, in urlopen
+    return opener.open(url, data, timeout)
+           ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib64/python3.14/urllib/request.py", line 487, in open
+    response = self._open(req, data)
+  File "/usr/lib64/python3.14/urllib/request.py", line 504, in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+                              '_open', req)
+  File "/usr/lib64/python3.14/urllib/request.py", line 464, in _call_chain
+    result = func(*args)
+  File "/usr/lib64/python3.14/urllib/request.py", line 1362, in http_open
+    return self.do_open(http.client.HTTPConnection, req)
+           ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib64/python3.14/urllib/request.py", line 1337, in do_open
+    r = h.getresponse()
+  File "/usr/lib64/python3.14/http/client.py", line 1478, in getresponse
+    response.begin()
+    ~~~~~~~~~~~~~~^^
+  File "/usr/lib64/python3.14/http/client.py", line 343, in begin
+    version, status, reason = self._read_status()
+                              ~~~~~~~~~~~~~~~~~^^
+  File "/usr/lib64/python3.14/http/client.py", line 312, in _read_status
+    raise RemoteDisconnected("Remote end closed connection without"
+                             " response")
+http.client.RemoteDisconnected: Remote end closed connection without response,draft acceptance = 0.15385 (    2 accepted /    13 generated), mean len =  1.50,no-h,MoE expert cache (auto): arena 34950.0 MiB of 34950.0 MiB host experts (100.0% residency),evict_lines=0
+full-tensor-2g-none,gpus=0,1,sm=tensor,spec=none,ncmoe=48,cache=21000,prompt_n=32358 prompt_tps=1615.5 predicted_n=297 predicted_tps=66.4 text_sha=40d493bbb5ac text_len=990,no-acceptance,MoE expert cache: h=0.0000 (0/0 reaches), fills=150528 evictions=0, tables=288, slots=147456, arena=40925.0 MiB total (budget 21000 MiB/device),no-auto-res,evict_lines=4
+full-tensor-2g-draft-mtp,gpus=0,1,sm=tensor,spec=draft-mtp,ncmoe=48,cache=21000,prompt_n=32358 prompt_tps=1445.5 predicted_n=297 predicted_tps=114.0 text_sha=40d493bbb5ac text_len=990,draft acceptance = 0.73913 (  204 accepted /   276 generated), mean len =  3.22,MoE expert cache: h=0.9110 (236600/259720 reaches), fills=151120 evictions=0, tables=288, slots=147456, arena=40925.0 MiB total (budget 21000 MiB/device),no-auto-res,evict_lines=4
+full-tensor-2g-draft-mtp-adaptive,gpus=0,1,sm=tensor,spec=draft-mtp-adaptive,ncmoe=48,cache=21000,prompt_n=32358 prompt_tps=1434.0 predicted_n=297 predicted_tps=106.3 text_sha=40d493bbb5ac text_len=990,draft acceptance = 0.66358 (  215 accepted /   324 generated), mean len =  3.65,MoE expert cache: h=0.9141 (307861/336800 reaches), fills=149771 evictions=0, tables=288, slots=147456, arena=40925.0 MiB total (budget 21000 MiB/device),no-auto-res,evict_lines=5
+full-tensor-3g-none,gpus=0,1,2,sm=tensor,spec=none,ncmoe=48,cache=13800,prompt_n=32358 prompt_tps=1679.3 predicted_n=257 predicted_tps=47.0 text_sha=ecf8a32bae77 text_len=842,no-acceptance,MoE expert cache: h=1.0000 (1166022/1166040 reaches), fills=220770 evictions=18, tables=432, slots=220752, arena=40845.1 MiB total (budget 13800 MiB/device),no-auto-res,evict_lines=0
+full-tensor-3g-draft-mtp,gpus=0,1,2,sm=tensor,spec=draft-mtp,ncmoe=48,cache=13800,prompt_n=32358 prompt_tps=1526.5 predicted_n=257 predicted_tps=100.0 text_sha=ecf8a32bae77 text_len=842,draft acceptance = 0.76068 (  178 accepted /   234 generated), mean len =  3.28,MoE expert cache: h=1.0000 (1438626/1438650 reaches), fills=220776 evictions=24, tables=432, slots=220752, arena=40845.1 MiB total (budget 13800 MiB/device),no-auto-res,evict_lines=0
+full-tensor-3g-draft-mtp-adaptive,gpus=0,1,2,sm=tensor,spec=draft-mtp-adaptive,ncmoe=48,cache=13800,prompt_n=32358 prompt_tps=1508.8 predicted_n=257 predicted_tps=103.5 text_sha=ecf8a32bae77 text_len=842,draft acceptance = 0.74517 (  193 accepted /   259 generated), mean len =  4.06,MoE expert cache: h=1.0000 (1490466/1490490 reaches), fills=220776 evictions=24, tables=432, slots=220752, arena=40845.1 MiB total (budget 13800 MiB/device),no-auto-res,evict_lines=0
+full-layer-2g-none,gpus=0,1,sm=layer,spec=none,ncmoe=48,cache=21000,prompt_n=32358 prompt_tps=1461.7 predicted_n=300 predicted_tps=46.7 text_sha=28e9b06d38d7 text_len=1003,no-acceptance,MoE expert cache: h=0.9949 (214740/215850 reaches), fills=72898 evictions=326, tables=144, slots=72279, arena=40028.3 MiB total (budget 21000 MiB/device),no-auto-res,evict_lines=2
+full-layer-2g-draft-mtp,gpus=0,1,sm=layer,spec=draft-mtp,ncmoe=48,cache=21000,prompt_n=32358 prompt_tps=1342.1 predicted_n=300 predicted_tps=80.2 text_sha=28e9b06d38d7 text_len=1003,draft acceptance = 0.71579 (  204 accepted /   285 generated), mean len =  3.15,MoE expert cache: h=0.9722 (273805/281640 reaches), fills=73752 evictions=276, tables=144, slots=72279, arena=40028.3 MiB total (budget 21000 MiB/device),no-auto-res,evict_lines=3
+full-layer-2g-draft-mtp-adaptive,gpus=0,1,sm=layer,spec=draft-mtp-adaptive,ncmoe=48,cache=21000,prompt_n=32358 prompt_tps=1331.2 predicted_n=300 predicted_tps=73.1 text_sha=28e9b06d38d7 text_len=1003,draft acceptance = 0.65060 (  216 accepted /   332 generated), mean len =  3.60,MoE expert cache: h=0.9671 (314376/325080 reaches), fills=73812 evictions=306, tables=144, slots=71934, arena=39814.8 MiB total (budget 21000 MiB/device),no-auto-res,evict_lines=4
+full-layer-3g-none,gpus=0,1,2,sm=layer,spec=none,ncmoe=48,cache=13800,prompt_n=32358 prompt_tps=1442.2 predicted_n=300 predicted_tps=39.6 text_sha=28e9b06d38d7 text_len=1003,no-acceptance,MoE expert cache: h=0.9987 (290598/290970 reaches), fills=72453 evictions=372, tables=144, slots=72081, arena=39910.5 MiB total (budget 13800 MiB/device),no-auto-res,evict_lines=0
+full-layer-3g-draft-mtp,gpus=0,1,2,sm=layer,spec=draft-mtp,ncmoe=48,cache=13800,prompt_n=32358 prompt_tps=1354.1 predicted_n=300 predicted_tps=73.2 text_sha=28e9b06d38d7 text_len=1003,draft acceptance = 0.71579 (  204 accepted /   285 generated), mean len =  3.15,MoE expert cache: h=0.9989 (368817/369240 reaches), fills=72504 evictions=423, tables=144, slots=72081, arena=39910.5 MiB total (budget 13800 MiB/device),no-auto-res,evict_lines=0
+full-layer-3g-draft-mtp-adaptive,gpus=0,1,2,sm=layer,spec=draft-mtp-adaptive,ncmoe=48,cache=13800,prompt_n=32358 prompt_tps=1351.6 predicted_n=300 predicted_tps=67.4 text_sha=28e9b06d38d7 text_len=1003,draft acceptance = 0.63988 (  215 accepted /   336 generated), mean len =  3.56,MoE expert cache: h=0.9988 (407817/408300 reaches), fills=72564 evictions=483, tables=144, slots=72081, arena=39910.5 MiB total (budget 13800 MiB/device),no-auto-res,evict_lines=0

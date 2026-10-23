@@ -8,7 +8,7 @@ diagnostic instrumentation used to find it is [`tools/LLAMA_STEP_TRACE-probe.pat
 
 Originating item: `TODO.md` **#51** (3-GPU decode slower than 2-GPU) and the field report that 3-GPU
 decode *stutters* — 200-400 ms pauses at a ~1 s period on Qwen3.8-27B Q8_0, ~3 s on Flash-Next GSQ —
-while 2 GPUs looks smooth.  Campaign home at the time: `wip/three-gpu-performance/`.
+while 2 GPUs looks smooth.  Campaign home at the time: `archive/work/three-gpu-performance/`.
 
 ## 1. Symptom, measured
 

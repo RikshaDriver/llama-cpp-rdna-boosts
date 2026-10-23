@@ -1,0 +1,6 @@
+# llama-cli plain-decode arms, r116, ROCKBLAS_USE_HIPBLASLT=0, -t 8 (t/s from stdout, cleaned text hashes)
+d27-2g-none          [ Prompt: 1866.4 t/s | Generation: 34.3 t/s ]
+d27-3g-none          [ Prompt: 2006.4 t/s | Generation: 43.2 t/s ]
+d27-3g-none-rep      [ Prompt: 2006.2 t/s | Generation: 43.3 t/s ]
+d27-01-layer-none    [ Prompt: 1355.7 t/s | Generation: 18.4 t/s ]
+d27-012-layer-none   [ Prompt: 1347.6 t/s | Generation: 17.2 t/s ]

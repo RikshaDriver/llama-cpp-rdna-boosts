@@ -122,7 +122,7 @@ the width gain; 98304 remains the better cut.)
 ## Reproducer
 
 ```bash
-cd wip/three-gpu-performance/tools/arms-2026-10-22
+cd archive/work/three-gpu-performance/tools/arms-2026-10-22
 ARMS_LOG_DIR=/tmp/arms22 ./gate4.sh        # A + C: four axes x trim {0,98304} x {2,3} GPU
 ARMS_LOG_DIR=/tmp/arms22 ./arm2-depth.sh   # B: prose x3 (15746 tok), -c 20480
 ARMS_LOG_DIR=/tmp/arms22 ./arm3-moe.sh     # the MoE/-ncmoe arm (35B-A3B Q8_0), see the block-13 record

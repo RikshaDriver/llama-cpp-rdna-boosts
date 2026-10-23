@@ -1,0 +1,10 @@
+AR-PROFILE: 4096 calls, total 144.3 ms, avg 35.2 us/call | min 15.2 p50 21.3 p90 56.2 p99 195.5 max 1969.7 us | ne range 2560..10240
+AR-PROFILE:   ne=2560  calls=3811
+AR-PROFILE:   ne=5120  calls=190
+AR-PROFILE:   ne=10240  calls=95
+AR-PROFILE:   dev0 spin: 4096 calls, total 85.0 ms, avg 20.76 us | min 2.9 p50 6.2 p90 40.4 p99 178.7 max 1757.8 us (clock 100000 kHz)
+AR-PROFILE:   dev1 spin: 4096 calls, total 90.7 ms, avg 22.14 us | min 2.8 p50 12.0 p90 32.2 p99 188.5 max 959.8 us (clock 100000 kHz)
+AR-PROFILE:   dev2 spin: 4096 calls, total 58.1 ms, avg 14.18 us | min 2.9 p50 4.2 p90 20.2 p99 167.1 max 766.9 us (clock 100000 kHz)
+AR-PROFILE:   dev0 phase1(entry->signal): p25 2.0 p50 2.0 p75 2.2 (min 1.9 max 7.6) us (clock 100000 kHz)
+AR-PROFILE:   dev1 phase1(entry->signal): p25 2.1 p50 2.4 p75 2.8 (min 2.0 max 136.1) us (clock 100000 kHz)
+AR-PROFILE:   dev2 phase1(entry->signal): p25 2.1 p50 2.4 p75 2.6 (min 1.9 max 8.8) us (clock 100000 kHz)

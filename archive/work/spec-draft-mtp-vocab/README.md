@@ -221,7 +221,7 @@ property of the *schedule*, and they are the reason the recommended configuratio
    width-neutral after all: the subset head is *mirrored* per device while the untrimmed head is *split*, so
    the trim only pays when `N · n_devices < n_vocab`.  See [`VALIDATION-2026-10-22.md`](VALIDATION-2026-10-22.md)
    §1 and the width-sweep control in
-   [`../../wip/three-gpu-performance/FINDING-2026-10-22-dense-27b-and-mirrored-draft-subset.md`](../../wip/three-gpu-performance/FINDING-2026-10-22-dense-27b-and-mirrored-draft-subset.md).
+   [`../three-gpu-performance/FINDING-2026-10-22-dense-27b-and-mirrored-draft-subset.md`](../three-gpu-performance/FINDING-2026-10-22-dense-27b-and-mirrored-draft-subset.md).
 2. **Deep-context decode** (depth 16384) — **DONE 2026-10-22, flat** (2 GPU +0.1 %, 3 GPU −1.4 %), purity
    identical at depth.
 3. **Default-on?**  It stays opt-in (`0`).  A default-on variant would need a per-payload N (98304 dense Qwen,

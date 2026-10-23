@@ -1,0 +1,5 @@
+# adaptive-MTP trim (block 13) at r116: 27B Q8_0, P prompt, draft-mtp-adaptive,ngram-mod (n-match 45, n-max 7), -n 1000, -sm tensor
+trim-01-0        [ Prompt: 1671.0 t/s | Generation: 84.6 t/s ]  text=9576970df1ec
+trim-01-98304    [ Prompt: 1664.2 t/s | Generation: 85.3 t/s ]  text=9576970df1ec
+trim-012-0       [ Prompt: 1775.1 t/s | Generation: 105.5 t/s ]  text=3981ee1763f8
+trim-012-98304   [ Prompt: 1762.9 t/s | Generation: 103.5 t/s ]  text=3981ee1763f8

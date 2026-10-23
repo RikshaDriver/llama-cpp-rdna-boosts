@@ -33,7 +33,7 @@ r78.  The 0002 opt-in on **2 GPUs** is flat on single-token decode (+0.06 %), sl
 verify widths (B=1 +0.9 %, B=4 +0.5 %, B=8 +1.5 %), and mixed on MTP (R +3.4 %, K +0.8 %, P -1.65 %,
 C -0.5 %).  That is not a clear default-on win, so 0002 remains an opt-in; the default RDNA4 path is
 unchanged.  The 3-GPU P drop is content-driven and is cross-referenced from
-`wip/three-gpu-performance/`.
+`archive/work/three-gpu-performance/`.
 
 ## Validation (r79 candidate, gfx1201 and gfx1100)
 

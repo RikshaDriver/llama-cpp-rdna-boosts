@@ -11,8 +11,8 @@ ROCm 10.1.0, 3x R9700 gfx1201, `ROCBLAS_USE_HIPBLASLT=0`.
 arm is negative (−2.2 % aggregate)** because the subset head is *mirrored* per device while the untrimmed
 head is *split* — the feature is only profitable when `N · n_devices < n_vocab`, and at 3 GPUs on a
 248320-vocab model it is not.  Detail + the width-sweep control:
-[`../../wip/three-gpu-performance/FINDING-2026-10-22-dense-27b-and-mirrored-draft-subset.md`](../../wip/three-gpu-performance/FINDING-2026-10-22-dense-27b-and-mirrored-draft-subset.md)
-(raw runs: `../../wip/three-gpu-performance/tools/arms-2026-10-22/summary.csv`).
+[`../three-gpu-performance/FINDING-2026-10-22-dense-27b-and-mirrored-draft-subset.md`](../three-gpu-performance/FINDING-2026-10-22-dense-27b-and-mirrored-draft-subset.md)
+(raw runs: `../three-gpu-performance/tools/arms-2026-10-22/summary.csv`).
 
 ## 0. Command — and a correction to §3 of the head record
 
@@ -128,4 +128,4 @@ not the trim.)
 Open follow-ups (not failable gates, recorded so they are not re-derived): whether a per-device *slice* of
 the subset (rather than a mirrored copy) would make the trim device-count neutral — that is a `Meta`
 buffer-type change, not a knob; and the 3-GPU decode deficit itself, which is `TODO.md` #51 /
-`wip/three-gpu-performance/`.
+`archive/work/three-gpu-performance/`.

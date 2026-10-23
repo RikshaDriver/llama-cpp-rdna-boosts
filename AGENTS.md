@@ -219,6 +219,26 @@ stub alive to serve them, and treat a `wip/` path in an old record as a historic
   (`MOE_EXPERT_HEATMAP_DECODE_SAMPLE`, default 64, 0 off) and weighted by the period.  The heat mirror
   is pre-allocated at sizing: the decode band is a captured graph and a `cudaMalloc` there aborts the
   capture (`operation failed due to a previous error during capture`).
+- **The expert cache's *identity fast path* is an all-or-nothing cliff, and it is worth ~40 % of decode
+  (r116, `TODO #93`, `archive/work/three-gpu-performance/RESOLUTION.md`).**  A table is identity only at
+  **100 % of its own slots** ("the decode band reads the arena directly; no per-token routing readback");
+  one slot short and it — and with a marginal arena, *every* table — drops to the remap path.  Measured on
+  the field config (GSQ `-ncmoe 48 -sm tensor`, plain decode): 3 devices with `MOE_EXPERT_CACHE_MIB=13800`
+  → arena 40845.1 of 40925.0 MiB, **0/432** identity, 46.7 t/s; `15000` → 40925.0, 432/432, **65.0 t/s**;
+  and at 2 devices `-c 204800` → 37808 MiB (92.4 %), 0 identity, 46.3 t/s vs `-c 40000` → 40925, 294
+  identity, 66.4 t/s.  Why: `alloc_all_locked()` subtracts `dev_n_tables[d] * slab_arena_unit` as
+  "rounding", so a budget within one arena unit per table of the host set lands just below 100 %.
+  **Any 2-vs-3-device (or any decode) comparison must record the arena, the residency % and the count of
+  `identity fast path ON` lines** — a 2-vs-3 "deficit" that is really "no table is identity" is what the
+  `three-gpu-performance` campaign spent two months on, and it cost the 2-GPU arm 29 % in one sweep here.
+  `auto` reaches identity at sane context sizes; an explicit budget must be oversized by a few hundred MiB.
+- **Greedy text is a per-device-count reference on the MoE tensor split (r116).**  2 vs 3 GPUs on
+  `-ncmoe` + `-sm tensor` produce different text (`PPL 10.8452` vs `10.8623`, 0.16 %, the tensor split's
+  own rounding class, `GREEDY-PURITY.md` §45) — it is **not** the AR's BF16 wire (`GGML_CUDA_AR_BF16_THRESHOLD=0`
+  does not reconcile it).  A **dense** tensor split and *every* `-sm layer` arm are text-identical across
+  device counts.  So gate a build change **within** each device count (as r116's own gates did); use
+  `-sm layer` when a cross-count text comparison is required; never read a 2-vs-3 text difference as a
+  purity defect.
 - **The disk tier is bounded by this box's SSD at ~1.8 GB/s, so the cache's currency is `L3 MiB/token`, not
   `h`.**  1 MiB/token of reads that neither VRAM nor the pinned pool holds is ~0.55 ms/token of unavoidable
   stall (~1800 t/s of pure read budget at a 1 MiB/token traffic level, ~100 t/s at 18 MiB/token).  Every
@@ -247,7 +267,7 @@ stub alive to serve them, and treat a `wip/` path in an old record as a historic
   ports `00:01.1` / `00:01.2` are x4 too). That is ~16 GB/s raw per card, **half** of a x8 host and a
   quarter of x16.  Consequences for measurement, measured 2026-10-17 on 35B-A3B Q4_K_M q8_0
   `pp31500`: 1 GPU 3614 t/s, 2 GPU tensor **4482 (+24 %)**, 3 GPU tensor **4347 (-3 % vs 2 GPU)**; the
-  same +17 % / +1 % shape is in `wip/three-gpu-performance/` (1065 / 1246 / 1258 t/s).  So **multi-GPU
+  same +17 % / +1 % shape is in `archive/work/three-gpu-performance/` (1065 / 1246 / 1258 t/s).  So **multi-GPU
   prefill on this box is link-bound**, and a tensor-split prefill claim from a x8/x16 contributor host
   can only be *under-measured* here, not refuted: report it as "not measurable on our link", not as
   "does not reproduce".  Decode claims do carry over (the per-token AR traffic is tiny): #175's decode
