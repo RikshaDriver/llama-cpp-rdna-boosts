@@ -22,6 +22,7 @@ top of `WORKLOG.md` is the newest record.
 | **70** | harden the expert-cache re-arm / wide-aux growth against a starved arena | robustness | open |
 | **59** | `ngram-mod` + `draft-mtp-adaptive` halves decode with host-resident experts | performance | open (`wip/ngram-mod-host-experts/`) |
 | **36** | genuine CPU/GPU overlap for the MoE misses | performance | open, scoping (`wip/moe-cpu-overlap/`) |
+| **94** | DFlash2 drafting on Qwen3.8-Flash-Next (qwen4exp): the target exports the wide HC residual as its DFlash layer input, so the head cannot attach | speculative decoding | open, scoping + one known shape blocker (`wip/qwen4exp-dflash2/`) |
 
 Accepted limitations that are deliberately **not** fixed are listed at the end — do not re-report them.
 
@@ -186,6 +187,32 @@ fraction at 43 % residency; if it is <20 %, park it.  Design space and gates:
   width rule found in the 3-GPU arm (`N · n_devices < n_vocab`) a second band only makes the **mirrored**
   draft matmul wider, so it is a non-goal, not a parked idea.  Record:
   `archive/work/spec-draft-mtp-vocab/VALIDATION-2026-10-22.md` §5.
+
+## 94. DFlash2 drafting on Qwen3.8-Flash-Next (qwen4exp): the target must export HC-averaged layer inputs — SPECULATIVE DECODING (open)
+
+**Status: open, scoping + one known shape blocker.**  Campaign: [`wip/qwen4exp-dflash2/`](wip/qwen4exp-dflash2/README.md).
+
+A DFlash2 head for Flash-Next exists (`incoai/Qwen3.8-Flash-Next-DFlash2`, plus GGUF conversions: Q4_K_M
+362 MB), it is a real DFlash2 head (`selector_top_k 16`, `block_size 8`, `target_layers
+[6,16,26,36,46]`, `fc.weight [2560, 12800]`), and every shape lines up with the target (vocab 248320,
+`output.weight` plain 2560 wide).  It does not attach on r120: `src/models/qwen4exp.cpp` exports
+`t_layer_inp[il] = res_hc`, the **wide** hyper-connection residual (4 x 2560 = 10240), while
+`llama_context::extract_layer_inp()` requires `n_embd` per row and the head wants the **mean over the 4 HC
+streams** (5 x 2560 = 12800), so the run aborts with
+`GGML_ASSERT(row_floats == model.hparams.n_embd)` (llama-context.cpp:3437).
+
+The head author's own sglang capture patch settles the convention (`hidden_states.mean(dim=-2)`, completed
+layers `[5,15,25,35,45]`, i.e. the GGUF's `completed + 1`, which is exactly llama.cpp's layer-input
+convention), and `src/models/deepseek4.cpp` already exports the averaged state for its own DFlash path.  The
+fix is therefore a small **block 11** amendment: add `build_hc_mean()` to the qwen4exp graph (same 8 lines)
+and export `t_layer_inp[il]` through it, gated on `cparams.embeddings_layer_inp[il]` like deepseek4 does so
+no node is added to any graph that does not ask for layer inputs (plain decode, MTP, QSA).
+
+Why it is worth doing: on the same target DFlash2 beats adaptive-MTP by ~20 % on the mean across four axes
+(144.3 vs 126.8 t/s at n-max 5; 153.1 at its own ceiling of 7), and Flash-Next has **no embedded MTP head**,
+so today its alternative is plain decode.  Known prerequisites/risks: the `-sm tensor` + `-ncmoe` arm relies on r106's
+`GGML_OP_ALL_GATHER` selector path, and the acceptance has to come back in the healthy band (a broken encoder
+reads ~0.3) with `plain == draft-dflash` text.
 
 ## Where the current lists live
 
