@@ -47,7 +47,7 @@ Two residency classes, held equal **at both device counts** by sizing `MOE_EXPER
 Decode t/s (prefill in brackets):
 
 | residency | split | spec | 2 GPU | 3 GPU | Δ (3 vs 2) |
-|---|---|---|---|---:|---:|---:|
+|---|---|---|---|---:|---:|
 | PART | tensor | none | 51.5 (1601) | 46.1 (1647) | **−10.5 %** |
 | PART | tensor | draft-mtp (n-max 3) | 101.4 (1439) | 97.8 (1498) | −3.6 % |
 | PART | tensor | draft-mtp-adaptive (7) | 96.8 (1429) | 100.7 (1483) | +4.0 % |
