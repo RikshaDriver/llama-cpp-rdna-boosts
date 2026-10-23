@@ -12,7 +12,7 @@ Details never live here: they live in `AGENTS.md`, `patches/README.md`, `MANIFES
 still means the same subject after that item is closed and removed from this file.  New items append.
 
 **Current state:** the **14-block V2.1 set** (block 00 + blocks 01-13) at fork point **`097cf33d9`**,
-release **`v14-097cf33d9-r114`**.  `release.json` is the source of truth for the tip/tree and hashes; the
+release **`v14-097cf33d9-r116`**.  `release.json` is the source of truth for the tip/tree and hashes; the
 top of `WORKLOG.md` is the newest record.
 
 | # | subject | kind | status |
@@ -22,7 +22,6 @@ top of `WORKLOG.md` is the newest record.
 | **70** | harden the expert-cache re-arm / wide-aux growth against a starved arena | robustness | open |
 | **59** | `ngram-mod` + `draft-mtp-adaptive` halves decode with host-resident experts | performance | open (`wip/ngram-mod-host-experts/`) |
 | **51** | 3-GPU decode is slower than 2-GPU | performance | open, **narrowed (r115)**.  The dominant cause was HIP graph-capture churn under the `-sm tensor` Meta backend (the graph-cache key was the first node's *object* address, which the meta re-creates on every rebuild: 3954 keys / 1206 captures / 484 ms of `hipGraphInstantiate` per 300-token decode at 3 devices vs 67 keys / 9 ms with `-sm layer`).  r115 keys on the first node's *data* pointer: 144 keys / 15 ms, **+41 %** at 3 devices (+6 % at 2, 0 % at 1), identical text and acceptance, so **3 GPUs now decodes faster than 2** (`archive/work/graph-key-churn/`).  #89 closed — the residual is a one-time lazy HIP code-object load, ~300 ms of cold start inside the existing warm-up and 0 % of decode (`archive/work/decode-warmup-stall/`); still open for the `-sm layer` / AR-profile grid and the MoE field-config arm.  Earlier (2026-10-22, dense 27B Q8_0, `wip/three-gpu-performance/FINDING-2026-10-22-dense-27b-and-mirrored-draft-subset.md`): width-dependent, not direction-dependent — +9.2 % at mean verify len 2.9, −14.4 % at mean len 29.2 with bit-identical acceptance, −8.5 % at depth 16384 |
-| **90** | `ggml_backend_cuda_buffer_set_tensor_2d` allocates and frees a ~8-32 MiB pinned staging buffer per tensor on a `-sm tensor` load | performance | open, **patch prepared, awaiting go/no-go** (`archive/work/decode-warmup-stall/tools/stage-pin-staging.patch`, `GGML_CUDA_STAGE_PIN=0` kill switch). Measured: 678 `hipHostMalloc`/`hipHostFree` pairs, 2.2 s + 1.1 s of a ~10.7 s load; a grow-only per-device staging buffer (<=64 MiB retained) takes a 27B Q8_0 3-GPU load **12.7 -> 9.5 s** with byte-identical greedy text.  Not a decode cost and not part of #89 — see `archive/work/decode-warmup-stall/README.md` §7 |
 | **36** | genuine CPU/GPU overlap for the MoE misses | performance | open, scoping (`wip/moe-cpu-overlap/`) |
 
 Accepted limitations that are deliberately **not** fixed are listed at the end — do not re-report them.

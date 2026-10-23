@@ -1,12 +1,13 @@
 # decode-warmup-stall — TODO #89 is a one-time lazy code-object load, not a periodic decode stall
 
-**Status: CLOSED (2026-10-22, no delivery change).**  `TODO #89` is retired: the "residual ~70 ms
+**Status: CLOSED (2026-10-22).**  `TODO #89` is retired: the "residual ~70 ms
 per-device decode stall" does not exist in steady state.  What is left after r115 is **one lazy HIP
 code-object load per (module, device)**, ~4-6 per device, paid **once per process** — for the decode
 families inside `common_init_from_params`'s existing warm-up, and for the prefill-only families inside
 the first real prefill.  It is ~300 ms of the *cold start* (dense 27B, 3 devices), **0 % of the decode**
 and it does not recur at any run length tested (300 / 1000 / 1500 tokens, decay flat, depth 8 K and
-16 K).  Nothing in `patches/` changed.
+16 K).  Nothing in `patches/` changed for #89 itself; the one real win found beside it — the load-path pinned staging — shipped
+as the **block-08 amendment in `v14-097cf33d9-r116`** (TODO #90, §7).
 
 Two side findings came out of the same passes, and both decide something:
 
@@ -15,9 +16,7 @@ Two side findings came out of the same passes, and both decide something:
 2. The `hipHostMalloc`/`hipHostFree` churn (2.2 s + 1.1 s in one trace) is
    `ggml_backend_cuda_buffer_set_tensor_2d`'s per-tensor pinned staging during **model load**.  A
    grow-only per-device staging buffer removes it: **27B Q8_0 3-GPU load 12.7 s -> 9.5 s**, measured,
-   text byte-identical.  The patch is prepared at
-   [`tools/stage-pin-staging.patch`](tools/stage-pin-staging.patch) and **is not applied** — it is
-   `TODO #90`, waiting on the maintainer's go/no-go (§7).
+   text byte-identical.  It shipped as the block-08 amendment in r116 (§7).
 
 Origin: split out of `TODO #51` when r115 removed the dominant cause
 ([`../graph-key-churn/`](../graph-key-churn/README.md)).  Started from the scoping note that used to live
@@ -163,7 +162,7 @@ child-graph launch, so on 1 GPU (one 4 000-5 000-node graph per launch) ordinary
 the counter looks "stallier" the fewer devices there are.  Normalise per node (`total / nodes`, ~1-2 us)
 or by `FIRSTUSE`, or the 1-GPU arm is unreadable.
 
-## 7. What was NOT done, and the one open decision
+## 7. What was NOT done, and the one item that shipped
 
 - **No delivery change for #89.**  There is nothing to fix: the residual is a one-time OS/driver cost
   (loading a code object into the device), it is already absorbed by the warm-up, and the only ways to
@@ -173,8 +172,8 @@ or by `FIRSTUSE`, or the 1-GPU arm is unreadable.
   a ~10 s startup, and the only way to get it is running the warm-up subgraph per device from separate
   host threads — a Meta scheduler change for a cold-start number below the maintenance threshold.
   Re-open only if cold start becomes a product requirement.
-- **`TODO #90` (awaiting go/no-go): the load-path pinned staging.**  Prepared, measured, **not applied**:
-  [`tools/stage-pin-staging.patch`](tools/stage-pin-staging.patch) makes
+- **`TODO #90` — the load-path pinned staging.  SHIPPED in r116 (block 08).**
+  [`tools/stage-pin-staging.patch`](tools/stage-pin-staging.patch) is the cut that shipped; it makes
   `ggml_backend_cuda_buffer_set_tensor_2d` reuse one grow-only pinned staging buffer per device
   (≤ 64 MiB retained, `GGML_CUDA_STAGE_PIN=0` restores the per-call allocation) instead of
   `cudaMallocHost`+`cudaFreeHost` per tensor:
@@ -186,11 +185,23 @@ or by `FIRSTUSE`, or the 1-GPU arm is unreadable.
 
   (an earlier build of the same change measured 10.53 / 12.69 / 12.68 s against 9.87 / 9.88 / 9.91 s)
 
-  `678 -> 5` pinned allocations per load.  Same-seed text byte-identical with
+  `678 -> 5` pinned allocations per load.  Shipped (default-on) in **r116**; the store of record for the
+  code is `patches/README.md` block 08 and `ENVIRONMENT.md`.  Same-seed text byte-identical with
   `ROCBLAS_USE_HIPBLASLT=0` on 27B Q8_0 3 GPU (200 tokens, `draft-mtp-adaptive,ngram-mod`), 27B Q8_0
   2 GPU, and Flash-Next GSQ `-ncmoe 48` + MTP 3 GPU (80 tokens).  It touches no kernel and no numerics,
   so it needs the set gates, not the prefill-logit gate.  On the GSQ `-ncmoe 48` load the win is inside
   that arm's run-to-run spread (49.4-54.3 s both ways) — claim it only for the dense/resident load.
+
+  **The r116 gate caught a use-after-free in the first cut, which is worth remembering.**  The candidate
+  that was measured (and the one folded into block 08 first) guarded the *allocation* (`one_shot`) but
+  still called `cudaFreeHost(pin)` unconditionally at the end of the copy, so the buffer cached in the
+  per-device slot was freed on its first use and the next call memcpy'd into freed memory: `SIGSEGV` in
+  `__memmove_avx512_unaligned_erms` under `ggml_backend_cuda_buffer_set_tensor_2d`, on *every* arm of the
+  gate, within 6 s of a load.  The mechanism that hid it while the candidate was being measured: the
+  record patch above had been split out of a larger working-tree diff and the free hunk (`if (one_shot)
+  ...`) landed in the *probe* patch instead, so the tested tree and the saved patch were not the same
+  program.  Lesson: measure the patch you will ship (apply it to a clean tree, rebuild, re-run), and let
+  the gate reproduce on the release build — it did, immediately.
 
 ## 8. Tooling (all reusable, none of it part of the delivery)
 
@@ -198,7 +209,7 @@ or by `FIRSTUSE`, or the 1-GPU arm is unreadable.
 |---|---|
 | [`tools/LLAMA_STEP_TRACE-probe-ext.patch`](tools/LLAMA_STEP_TRACE-probe-ext.patch) | the probe + per-`(device,op)` first-use/first-cost accounting + pinned-allocation accounting.  `LLAMA_STEP_TRACE=1`.  Applies to the r115 tree on top of, or instead of, the original probe |
 | [`tools/hip-api-probe.c`](tools/hip-api-probe.c) | `LD_PRELOAD` interposer: attributes `hipHostMalloc`/`hipHostFree`/`hipFuncGetAttributes`/`hipModuleLoad`/`hipMalloc` to their caller, aggregated, with backtraces for the slowest calls |
-| [`tools/stage-pin-staging.patch`](tools/stage-pin-staging.patch) | the `TODO #90` candidate — **not applied** |
+| [`tools/stage-pin-staging.patch`](tools/stage-pin-staging.patch) | the `TODO #90` cut — **shipped in r116** (block 08) |
 
 `rocprofv3 --hip-trace` was used as the cross-check; `scripts/check-gpu-faults.sh --since "2 hours ago"`
 over the run logs was clean (no `page fault`/`slab` lines, no `HSA_STATUS_ERROR`).

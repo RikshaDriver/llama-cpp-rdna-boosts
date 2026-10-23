@@ -27,7 +27,7 @@ reorder, never insert.
 | 05 | `0005-…-block-05-flash-attention-band-…` | FA band / native quantized K-V / derived kq mask | |
 | 06 | `0006-…-block-06-MMB-quantized-prefill-GEMM` | MMB quantized prefill GEMM + `mmf32` (the F32 skinny prefill GEMM, r104; default-on for **RDNA4 and RDNA3_5** since r105, opt-in on RDNA3) | |
 | 07 | `0007-…-block-07-k-quant-boosts-…` | k-quant boosts (`mmvq` VDR, Q6_K MMQ, Q1_0, grid pad) | **the decode-numerics block** — see `GREEDY-PURITY.md` §2/§9 |
-| 08 | `0008-…-block-08-fused-kernels-…` | fused kernels | fusions + fused MoE gate+up+GLU + per-shape `mmvq` `nwarps` |
+| 08 | `0008-…-block-08-fused-kernels-…` | fused kernels | fusions + fused MoE gate+up+GLU + per-shape `mmvq` `nwarps`; also the `-sm tensor` **model-load staging buffer** (r116, TODO #90) |
 | 09 | `0009-…-block-09-host-resident-MoE-…` | host-resident MoE | slab, expert cache, prefill cache staging |
 | 10 | `0010-…-block-10-slab-fusion-dispatcher-async-in` | infrastructure: slab, fusion dispatcher, async input ring | the TUs split out of `ggml-cuda.cu`; GDN/rope/MMB fusions |
 | 11 | `0011-…-block-11-qwen4exp-…` | qwen4exp | model, hyper-connections, QSA/indexer, lazy reader, indexer cache (r109 split of the old block 10) |

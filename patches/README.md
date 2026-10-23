@@ -375,12 +375,22 @@ must be **bit-identical** to what it replaces at the widths it serves.
   (`GREEDY-PURITY.md` §31) with a sorted-key argmax and a stable tie-break.
 * The **RDNA3_5 single-token-only fusion skip** (the dense GLU and the weighted-down tail are not
   decode/verify bit-identical), `GGML_CUDA_ENABLE_RDNA3_5_SINGLE_TOKEN_FUSIONS=1` as the A/B.
+* `ggml_backend_cuda_buffer_set_tensor_2d`'s **model-load staging** (r116, TODO #90): a `-sm tensor`
+  load uploads one tensor at a time through a pinned gather buffer, and it used to
+  `cudaMallocHost`+`cudaFreeHost` that buffer on **every tensor**.  A 27B Q8_0 at 3 devices does it 678
+  times — measured in one `rocprofv3 --hip-trace` pass as 2.2 s of `hipHostMalloc` + 1.1 s of
+  `hipHostFree` of a ~10.7 s load — so the staging buffer is now **one grow-only buffer per device**
+  (bounded at 64 MiB retained; a larger tensor keeps the one-shot allocation) and the load drops from
+  **12.7 s to 9.5 s** on that model (678 -> 5 allocations).  It is a byte-for-byte move of the same
+  bytes on the same stream with a stream sync before reuse, so greedy text is unchanged; measured at
+  2 and 3 devices on the dense 27B and Flash-Next GSQ `-ncmoe 48`.  `GGML_CUDA_STAGE_PIN=0` restores
+  the per-call allocation.
 
 **Knobs.**  `GGML_CUDA_DISABLE_FUSION` (master), `_DISABLE_MOE_MMQ_FUSION`, `_DISABLE_MMQ_ROUTED`,
 `_DISABLE_TOPK_MOE_FUSION`, `_DISABLE_CONV_FUSION`, `_DISABLE_NORM_ROWS`, `GGML_CUDA_TOPK_SORTED`,
 `GGML_CUDA_FUSE_GDN_GATE`, `GGML_CUDA_FUSE_Q8_1_VERIFY`, `GGML_CUDA_MMVQ_RDNA3_SMALL_M`,
 `GGML_CUDA_SCALE_UNARY`, `GGML_PAIR_2X`, `GGML_CUDA_Q8_1_ARENA_FREE_OLD`,
-`GGML_CUDA_ENABLE_RDNA3_5_SINGLE_TOKEN_FUSIONS`.  Block 10 adds the rest of the `_DISABLE_*` / `_FUSE_*`
+`GGML_CUDA_ENABLE_RDNA3_5_SINGLE_TOKEN_FUSIONS`, `GGML_CUDA_STAGE_PIN`.  Block 10 adds the rest of the `_DISABLE_*` / `_FUSE_*`
 family (the qwen4exp/GDN fusions); the full catalogue is `ENVIRONMENT.md` §7.
 
 **Purity.**  Every fusion carries the same requirement: one arm across `W = 1..8`, and — because some

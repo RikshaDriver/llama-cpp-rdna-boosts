@@ -32,8 +32,8 @@ retired**: the "residual ~70 ms per-device decode stall" is a **one-time** lazy 
 devices, 0 % of decode, identical count at 300 / 1000 / 1500 tokens).  The same passes resolved the two old
 leads: `hipFuncGetAttributes` at ~1.5 ms/call is **librccl** (NCCL init), and the `hipHostMalloc` churn is
 the loader's per-tensor pinned staging (`set_tensor_2d`), not decode — that one is a real win (**27B Q8_0
-3-GPU load 12.7 -> 9.5 s**) and is staged, unapplied, as **TODO #90** awaiting the maintainer's go/no-go.
-See `WORKLOG.md` 261022.011.
+3-GPU load 12.7 -> 9.5 s**) and shipped in **r116** as the block-08 amendment (TODO #90 closed).
+See `WORKLOG.md` 261022.011 and 261022.012.
 
 **Closed (r114, 2026-10-22, block 12).**  Two campaigns left `wip/` for `archive/work/` with a
 `RESOLUTION.md` each, and both TODO items are retired.  **`#87`** (`host-pool-swap-and-prefill/`):

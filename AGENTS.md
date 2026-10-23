@@ -508,9 +508,8 @@ stub alive to serve them, and treat a `wip/` path in an old record as a historic
   call-site interposer): `archive/work/decode-warmup-stall/`.
 - **A `-sm tensor` model load uploads tensors through a pinned staging buffer, one alloc/free per
   tensor** (`ggml_backend_cuda_buffer_set_tensor_2d`, 678 pairs = 2.2 s + 1.1 s of a ~10.7 s load on a 27B
-  Q8_0 at 3 devices).  This is *load* time, not decode.  A grow-only per-device staging buffer takes it
-  to ~5 allocations and 12.7 s -> 9.5 s; the patch is prepared and **not applied** (TODO #90, awaiting the
-  maintainer's go/no-go).
+  Q8_0 at 3 devices).  This is *load* time, not decode.  Since **r116** the staging buffer is grow-only
+  per device (~5 allocations, 12.7 s -> 9.5 s, block 08; `GGML_CUDA_STAGE_PIN=0` is the kill switch).
 - **The deepseek4/glm5-next `DSV4_HC_POST` arm is split-mode dependent (r97).**  `cparams.fused_dsv4_hc_post`
   is the fused **op** whenever a Meta (tensor-split) device is in play and the primitive
   `hc_combine_norm` chain on one device.  The chain is faster on one device (+0.9..+1.8 % prefill,

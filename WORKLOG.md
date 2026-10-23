@@ -1,5 +1,58 @@
 # WORKLOG - dated delivery records
 
+## 261022.012 (r116) -- TODO #90: the `-sm tensor` model-load staging buffer is reused instead of allocated per tensor (block 08); 27B Q8_0 3-GPU load 12.7 s -> 9.5 s
+
+**Shipped:** `v14-097cf33d9-r116` (**block 08** amended; blocks 00-07 and 09-13 apply to byte-identical
+files — the only content change in the whole set is 50 added / 4 removed lines in
+`ggml/src/ggml-cuda/ggml-cuda.cu`, plus the `@@` line numbers of the later blocks' hunks in that one
+file).  Record: [`archive/work/decode-warmup-stall/`](archive/work/decode-warmup-stall/README.md) §7 (the
+finding, the numbers, the tooling); code notes: `patches/README.md` block 08, `ENVIRONMENT.md`
+(`GGML_CUDA_STAGE_PIN`).
+
+**1. The cost.**  A `-sm tensor` model load uploads one tensor at a time through
+`ggml_backend_cuda_buffer_set_tensor_2d`'s pinned gather buffer, and that buffer was
+`cudaMallocHost`'d and `cudaFreeHost`'d **per tensor**.  Measured with an `LD_PRELOAD` interposer that
+attributes a HIP call to its caller (`archive/work/decode-warmup-stall/tools/hip-api-probe.c`): a 27B
+Q8_0 load at 3 devices makes **678 pairs** — 2.2 s of `hipHostMalloc` + 1.1 s of `hipHostFree` of a
+~10.7 s load, i.e. ~30 % of the load.  (The same interposer showed the run's `hipFuncGetAttributes`
+calls are all librccl's, not ours — see the r116 sibling entry, `WORKLOG.md` 261022.011.)
+
+**2. The fix.**  One **grow-only pinned buffer per device**, reused across the tensors of a load, kept in
+a per-device slot behind the same `std::unique_lock` pattern `ggml_cuda_pin_chunk` already uses.  Retained
+footprint is bounded at **64 MiB per device** (a larger tensor falls back to the one-shot allocation), the
+copy is the same bytes on the same stream with a stream sync before the buffer can be reused, and
+`GGML_CUDA_STAGE_PIN=0` restores the per-call allocation.
+
+**3. Measured (same binary, `GGML_CUDA_STAGE_PIN` 0/1 alternating, 27B Q8_0, `-sm tensor`, 3 GPUs).**
+
+| arm | wall |
+|---|---:|
+| `=0` (pre-r116) | 11.15 / 12.94 s |
+| default (staging cached) | **9.70 / 10.22 s** |
+
+Pinned allocations per load **678 -> 5**.  Release-build A/B in the r115-vs-r116 gate also measures the
+load arm at 12.56 s (r115) vs 10.18 s (r116).  On the Flash-Next GSQ `-ncmoe 48` load the win is inside
+that arm's run-to-run spread (49.4-54.3 s both ways) — claim it only for the dense/resident load.
+
+**4. Gates.**  Same-seed greedy text **byte-identical to r115** with `ROCBLAS_USE_HIPBLASLT=0` on eight
+arms: 27B Q8_0 3 GPU and 2 GPU (`draft-mtp-adaptive,ngram-mod`, 200 tokens), Flash-Next GSQ
+`-ncmoe 48` + MTP head 3 GPU and 2 GPU (80 tokens), and the four adaptive-MTP axes at `-n 3000`
+(R reasoning on; P/C/K off) — the only differing line in any pair is the `build :` commit line.
+Acceptance is bit-identical where it can be read (`llama-server`, the only instrument that prints it):
+K axis 0.98214 (2694/2743, mean len 9.83) and R axis 0.47695 (2431/5097, mean len 5.29) on both builds.
+No prefill kernel is touched, so the prefill-logit gate does not apply.  `scripts/validate-set.sh` green
+(strict 14/14 `git am`, applied tree `39c7614ee31b664021cd3b19e4494a465a6c1c1f`),
+`scripts/check-gpu-faults.sh --since "90 min ago"` clean over the gate logs and the kernel journal.
+
+**5. The first cut was wrong, and the gate caught it — worth recording.**  The candidate that had been
+measured guarded the allocation but still freed the buffer unconditionally, so the cached buffer was
+freed on first use and the next call memcpy'd into released memory: `SIGSEGV` in
+`__memmove_avx512_unaligned_erms` under `set_tensor_2d` on **every** gate arm within 6 s of a load (the
+earlier measurements were clean because the record patch had been split out of a larger working-tree diff
+and the `if (one_shot)` free hunk landed in the *probe* patch, so the tested tree was not the saved
+patch).  Folded corrected into block 08; the whole matrix above was re-run on the release build.  Lesson
+recorded in the campaign README: apply the patch you will ship to a clean tree and re-measure it.
+
 ## 261022.011 (docs) -- TODO #89 closed: the "residual per-device decode stall" is a one-time lazy code-object load (0 % of decode); the load-path pinned churn is staged as #90
 
 **Nothing in `patches/` changed; no release.**  Record:
