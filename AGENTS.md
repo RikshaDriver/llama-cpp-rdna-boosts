@@ -392,6 +392,15 @@ stub alive to serve them, and treat a `wip/` path in an old record as a historic
   same-kernel ubatch change measures 0.105 / 85 %) and always prints a same-kernel control, so the
   absolute limits stay the criterion without an insensitive point waving a bad change through.
   Protocol: `benchmarks/prefill-logit-methodology.md`, `GREEDY-PURITY.md` §46.
+- **The draft context's KV cache type follows the main `-ctk` / `-ctv` (r125, block 02).**  Upstream gives
+  the speculative draft its own type pair (`-ctkd` / `-ctvd`, default f16) and applies it unconditionally;
+  since r125 the draft takes the main model's type unless `-ctkd` / `-ctvd` (or
+  `LLAMA_ARG_SPEC_DRAFT_CACHE_TYPE_K` / `_V`) pins it.  At `-c 131072` on a dense 27B that is 512 -> 144 MiB
+  of draft KV.  No generated token can change (the draft only proposes; the target verifies) and greedy text
+  is byte-identical between the two draft types, but **any VRAM/`--fit` arithmetic for an MTP or `-md` run
+  must use the main KV type for the draft context too**, and a *small, fast* model under `-sm tensor` pays
+  1.5-3 % decode for it (the quantized KV write costs a few host-side node evaluations per step; GPU kernel
+  time is identical).  Record: `WORKLOG.md` 261024.005, issue #216.
 - **Mixed K/V cache types are HARD-REJECTED** at context creation (`params.type_k != params.type_v`);
   every mixed pair measured 1.7-3.6x slower and never smaller. Pass matching `-ctk`/`-ctv`.
 - **The MTP draft-vocabulary trim is opt-in and draft-only (block 13, r107).**  `--spec-draft-mtp-vocab N`

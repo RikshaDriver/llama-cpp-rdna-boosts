@@ -84,6 +84,14 @@ the MoE arm still prints the line.
 * `scripts/gate-prefill-logits.sh` **PASS** (mean KLD 0.000000, same-top-p 100.000 %);
   `build-rocm/bin/test-arg-parser` OK.
 
+**Shipped.**  `v14-097cf33d9-r125` tagged and pushed (`main` = `ef955745` code + `bcaf9b69` docs, both CI
+workflows green: **Validate delivery set** 23 s, **Release patch set** 16 s); the fork branch `rdna-boosts`
+was force-pushed `355417a72...55d421582` to the personal fork after a **strict re-apply verification** of the
+shipped patches in a clean clone at `097cf33d9` (14/14 `git am`, applied tree `a3379b6d0` ==
+`release.json.tree`; the gated build is that same tree).  Container images are built/pushed off-host by the
+`radiance` watcher.  A follow-up docs commit sharpened this entry's cost measurement after the same-binary
+A/B and the kernel trace (see the cost bullet above).
+
 **Docs:** `patches/README.md` (block 02 paragraph + the two block 09 bullets), `ENVIRONMENT.md` §3
 (`LLAMA_ARG_SPEC_DRAFT_CACHE_TYPE_K` / `_V`), `README.md` (block table row `0002` + a "on a card that is
 close to full" note carrying the #216 budget numbers and the `-ngl` gotcha), `wiki/MTP-Quick-Reference.md`
