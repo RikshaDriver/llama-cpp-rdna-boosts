@@ -1,6 +1,6 @@
 Session: 1 (continued)    Date: 2026-10-24
 Delivery: old base 097cf33d9, chain r126 (tip 760ac6aaf, tree 6abcc1a92)
-Checkpoint: base 5aeac37a3    chain tip e1bd6da22    tree 78f5c1cc33822994e9d0efa21f0332cd166db85c
+Checkpoint: base 33d6135cb    chain tip e4a863a61    tree 1b5f20f202a43818308b414d969981db47bda3b3
 Blocks applied: 00..13 (all 14; no renumbering, no block merged)
 Build: ok — `~/llama-rebase/build-rocm` (ROCm 10.1.0, `~/bin/build-llama-rocm`), 0 errors
 Coherence:
@@ -11,6 +11,9 @@ Coherence:
     gate measures mean KLD 0.000657 / same-top-p 98.755 % against the r126 base (PASS, limits
     0.005 / 98 %), i.e. a rounding-level move, and greedy diverges at a near-tie later in the
     stream.  plain == mtp holds on both sides of the change.
+  * rung 5 (base 33d6135cb) re-checked: plain == draft-mtp, 850 chars sha=0cd2d424a564;
+    prefill-logit identical (0.000657 / 98.755 %); GATED_DELTA_NET 55/55; FLASH_ATTN_EXT log
+    /tmp/fa-r5.log
   * rung 4 (base 5aeac37a3) re-checked: plain == draft-mtp, 850 chars sha=0cd2d424a564 (same as
     rung 3); prefill-logit identical (0.000657 / 98.755 %); FLASH_ATTN_EXT 6402/6402;
     GATED_DELTA_NET 55/55
@@ -23,14 +26,14 @@ Op tests: GATED_DELTA_NET 55/55; FLASH_ATTN_EXT run at this rung (log: /tmp/fa-r
 Band gate (llama-batched-bench -npl 1,4,8, 27B UD-Q4_K_XL 3 GPU tensor, 512/128):
   rung 3 pp 1589/1781/1823, tg 47.7/144.1/230.7  vs  r126 pp 1609/1791/1814, tg 47.7/143.0/230.4
   -> equal within noise (one first-run pp anomaly of 1151 t/s did not reproduce)
-Next rung: 33d6135cb (MoE cache SLRU #30637, FA WAR #30573, Stream-K cap #30553)
-Next action: `cd ~/llama-rebase && git rebase --onto 33d6135cb 5aeac37a3 rebase-work`
+Next rung: 13786fbb3 (ssm_conv 7 #30873, mmf tile widths #30836, graph flush #26771)
+Next action: `cd ~/llama-rebase && git rebase --onto 13786fbb3 33d6135cb rebase-work`
 
 Where the work lives (NOT in the delivery repo — see the campaign rules):
   * worktree/branch: `~/llama-rebase`, branch `rebase-work`, 14 block commits
   * durable checkpoints: `rebase-ckpt-1` @ 632a8a568 (base 62df1815b),
     `rebase-ckpt-2` @ 38eb0ec47 (base 6afa9a313), `rebase-ckpt-3` @ f11c97861 (base 9d1878a43),
-    `rebase-ckpt-4` @ e1bd6da22 (base 5aeac37a3)
+    `rebase-ckpt-4` @ e1bd6da22 (base 5aeac37a3), `rebase-ckpt-5` @ e4a863a61 (base 33d6135cb)
   * build dir: `~/llama-rebase/build-rocm`
 
 Per-block tree attribution is INCOMPLETE (do it before the per-block build gate):
