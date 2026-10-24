@@ -12,7 +12,7 @@ Details never live here: they live in `AGENTS.md`, `patches/README.md`, `MANIFES
 still means the same subject after that item is closed and removed from this file.  New items append.
 
 **Current state:** the **14-block V2.1 set** (block 00 + blocks 01-13) at fork point **`097cf33d9`**,
-release **`v14-097cf33d9-r123`**.  `release.json` is the source of truth for the tip/tree and hashes; the
+release **`v14-097cf33d9-r124`**.  `release.json` is the source of truth for the tip/tree and hashes; the
 top of `WORKLOG.md` is the newest record.
 
 | # | subject | kind | status |
@@ -86,6 +86,21 @@ fraction at 43 % residency; if it is <20 %, park it.  Design space and gates:
 
 ## Documented, deliberately NOT fixed (accepted limitations — do not re-report)
 
+
+- **`std::min<int64_t>` / `std::max<int64_t>` in other HIP TUs is a latent Windows-only build failure
+  (TODO #95, accepted; no Windows toolchain here).**  With HIP on Windows (clang + the MSVC STL) clang's
+  force-included `cuda_wrappers/algorithm` and the MSVC STL `<utility>` each define an inline
+  `std::min<long long>` under **one** mangled name (the `enable_if` that makes clang's win overload
+  resolution is not part of the MSVC mangling), so a translation unit that instantiates both fails to
+  codegen with *"definition with same mangled name"* — r123's `moe-expert-cache.cu` was the first to
+  trigger it (issue #217, fixed in r124 with the local ternary helpers; see `patches/README.md` block 09).
+  The reporter's toolchain builds every other TU, but ~10 of them still carry the int64_t pattern
+  (`argmax.cu`, `cpy-batch.cu`, `fattn.cu`, `mmvf.cu`, `fattn-common.cuh`, `gated_delta_net.cu`, `top-k.cu`,
+  `ssm-scan.cu`, `ggml-cuda.cu`, `hc-mix.cu`): the collision only fires where the STL's own instantiation is
+  emitted too, which is a header-instantiation accident, not a property of the call.  Not proactively
+  rewritten because a non-AMD/Windows claim cannot be validated on this box (scope policy: non-AMD backends
+  are out of validation scope); if a Windows build log names one of them, apply the same two-line helper
+  fix there and bump the release.  Do not re-report as a new defect without a Windows build log.
 
 - **The Meta split-state lookup-count headroom (TODO #80) — retired 2026-10-24, accepted.**  The measured
   defect (issue #184: the pre-warm walk allocating one heap node per visited tensor on every graph

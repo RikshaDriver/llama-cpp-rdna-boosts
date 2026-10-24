@@ -472,6 +472,17 @@ whatever VRAM is left.
   expert path (band 0): there the wide draft is the win (378.7 vs 144.7 t/s).  `LLAMA_SPEC_NGRAM_MOD_BAND_CLAMP=0`
   restores the uncapped draft; a `draft.n_max` above the band warns instead of clamping (the 15 bound is a
   correctness one).  `GREEDY-PURITY.md` §50, `ENVIRONMENT.md` §3, `WORKLOG.md` 261024.002.
+* **int64_t min/max in this file use local helpers, not `std::min`/`std::max` (r124, issue #217).**  With
+  HIP on Windows (clang + the MSVC STL) clang's force-included `cuda_wrappers/algorithm` and the MSVC STL
+  `<utility>` each define an inline `std::min<long long>`; `int64_t` is `__int64` there, the `enable_if`
+  that makes clang's version win overload resolution is not part of the mangled name, and a translation
+  unit that instantiates both fails to codegen with *"definition with same mangled name"* (r123 failed the
+  reporter's Windows build in this file's host pass; r92 was clean, r112 introduced the first such call).
+  `moe_cache_min_i64()` / `moe_cache_max_i64()` replace all three int64_t sites (the auto-arena floor and
+  the heat-coverage bound here, and block 10's tables-registration slack guard).  Behaviour is unchanged —
+  greedy text is byte-identical on the dense and host-expert arms, prefill-logit KLD 0.000000, MTP
+  acceptance 0.73881 — so any NEW int64_t min/max in this file must use the helpers, and a rebuild of a
+  HIP TU that adds one would reintroduce the Windows failure.  `WORKLOG.md` 261024.004.
 * **Whole-table identity placement (r117, TODO #93).**  A table takes the decode band's identity fast
   path only at its FULL slot count (`t.slots == t.n_experts`); one slot short is not "almost" — it takes
   the remap path and pays the per-token routing readback like a table with no arena at all.  Each table's

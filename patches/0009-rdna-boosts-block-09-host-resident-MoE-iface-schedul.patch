@@ -1,4 +1,4 @@
-From 50a01d60fe02c3df261e712ad03faf864c5d75c7 Mon Sep 17 00:00:00 2001
+From c840a5341c3f32a506448412424699b16fb1e26f Mon Sep 17 00:00:00 2001
 From: Stew Forster <ci@rdna-boosts.invalid>
 Date: Wed, 21 Oct 2026 10:40:32 -0500
 Subject: [PATCH 09/13] rdna-boosts: block 09: host-resident MoE (iface,
@@ -197,6 +197,16 @@ Gates: prefilled-text purity with `ROCBLAS_USE_HIPBLASLT=0` (per the delivery's 
 `LLAMA_SPEC_NGRAM_MOD_BAND_CLAMP=0` reproduces 74.1 t/s exactly; the device-resident and CPU-expert
 controls are unchanged (380.2 and 68.1 t/s, no clamp line).  The clamp never touches a non-ngram config
 (the MTP-only arms log no clamp).  Record: `wip/ngram-mod-host-experts/EVIDENCE-2026-10-24.md`.
+
+Windows HIP build (issue #217): the three `std::min`/`std::max` calls on int64_t in
+moe-expert-cache.cu (the sizing slack guard, the auto-arena floor and the heat-coverage bound) are
+replaced with two local ternary helpers.  With HIP on Windows (clang + the MSVC STL) clang's
+force-included `cuda_wrappers/algorithm` and the MSVC STL `<utility>` each define an inline
+`std::min<long long>` (int64_t is `__int64` there, and the `enable_if` that makes clang's version win
+overload resolution is not part of the mangled name), so a translation unit that instantiates both
+fails to codegen with "definition with same mangled name".  Behaviour is unchanged: greedy text is
+byte-identical on the dense 4B (`-sm tensor`, 3 GPU) and the host-expert arm (35B-A3B `-ncmoe 40`),
+prefill-logit mean KLD 0.000000 / same-top-p 100.000 %, MTP acceptance 0.73881.
 ---
  common/CMakeLists.txt                         |    2 +
  common/arg.cpp                                |   21 +-
@@ -228,7 +238,7 @@ controls are unchanged (380.2 and 68.1 t/s, no clamp line).  The clamp never tou
  ggml/src/ggml-cuda/ggml-cuda.cu               | 2529 +++++++-
  ggml/src/ggml-cuda/mmvq.cu                    |  275 +-
  ggml/src/ggml-cuda/mmvq.cuh                   |   12 +
- ggml/src/ggml-cuda/moe-expert-cache.cu        | 5534 +++++++++++++++++
+ ggml/src/ggml-cuda/moe-expert-cache.cu        | 5542 +++++++++++++++++
  ggml/src/ggml-cuda/moe-expert-cache.h         |  323 +
  ggml/src/ggml-cuda/norm.cu                    |   35 +
  ggml/src/ggml-cuda/norm.cuh                   |    1 +
@@ -263,7 +273,7 @@ controls are unchanged (380.2 and 68.1 t/s, no clamp line).  The clamp never tou
  src/llama.cpp                                 |   16 +-
  tools/cli/cli.cpp                             |    6 +
  tools/llama-bench/llama-bench.cpp             |   65 +-
- 65 files changed, 14875 insertions(+), 535 deletions(-)
+ 65 files changed, 14883 insertions(+), 535 deletions(-)
  create mode 100644 common/draft-reserve.cpp
  create mode 100644 common/draft-reserve.h
  create mode 100644 ggml/src/ggml-cuda/cpy-batch.cu
@@ -10121,10 +10131,10 @@ index 4140f681a..35f625eaa 100644
 \ No newline at end of file
 diff --git a/ggml/src/ggml-cuda/moe-expert-cache.cu b/ggml/src/ggml-cuda/moe-expert-cache.cu
 new file mode 100644
-index 000000000..500c9c797
+index 000000000..ec00ce957
 --- /dev/null
 +++ b/ggml/src/ggml-cuda/moe-expert-cache.cu
-@@ -0,0 +1,5534 @@
+@@ -0,0 +1,5542 @@
 +// wip/moe-expert-cache — Phase 1a foundation.  See moe-expert-cache.h for the contract.
 +
 +#include "moe-expert-cache.h"
@@ -10158,6 +10168,14 @@ index 000000000..500c9c797
 +#include <unordered_map>
 +#include <unordered_set>
 +#include <vector>
++
++// int64_t min/max without `std::min`/`std::max` (issue #217).  With HIP on Windows (clang + the MSVC STL)
++// clang's force-included `cuda_wrappers/algorithm` and the MSVC STL `<utility>` each define an inline
++// template `std::min<long long>` (int64_t is `__int64` there, so the mangled name is the same -- the
++// `enable_if` that makes clang's version win overload resolution is not part of the mangling), and a
++// translation unit that instantiates both fails to codegen with "definition with same mangled name".
++static inline int64_t moe_cache_min_i64(int64_t a, int64_t b) { return a < b ? a : b; }
++static inline int64_t moe_cache_max_i64(int64_t a, int64_t b) { return a > b ? a : b; }
 +
 +// ---------------------------------------------------------------------------------------------
 +// state
@@ -12955,9 +12973,9 @@ index 000000000..500c9c797
 +                host_total += (int64_t) t.n_experts * (int64_t) t.expert_bytes;
 +            }
 +        }
-+        const int64_t floor_bytes = std::max((int64_t) g_min_mib * 1024 * 1024,
-+                                             (g_min_res_pct > 0 && host_total > 0)
-+                                                 ? host_total * g_min_res_pct / 100 : (int64_t) 0);
++        const int64_t floor_bytes = moe_cache_max_i64(
++            (int64_t) g_min_mib * 1024 * 1024,
++            (g_min_res_pct > 0 && host_total > 0) ? host_total * g_min_res_pct / 100 : (int64_t) 0);
 +        if (planned < floor_bytes) {
 +            // Do NOT disable here.  This runs AFTER the tables are registered and graphs have been planned
 +            // against them, and flipping the GLOBAL gate now plans the MTP draft and the target with
@@ -15495,7 +15513,7 @@ index 000000000..500c9c797
 +            if (!all_heat.empty() && total_mass > 0) {
 +                std::sort(all_heat.begin(), all_heat.end(),
 +                          [](uint64_t a, uint64_t b) { return a > b; });
-+                const int64_t k = std::min<int64_t>(n_slots, (int64_t) all_heat.size());
++                const int64_t k = moe_cache_min_i64(n_slots, (int64_t) all_heat.size());
 +                uint64_t bound = 0;
 +                for (int64_t i = 0; i < k; i++) {
 +                    bound += all_heat[(size_t) i];

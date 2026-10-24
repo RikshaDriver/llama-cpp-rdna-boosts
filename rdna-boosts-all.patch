@@ -49962,10 +49962,10 @@ index 5605bf7a4..10b689844 100644
 \ No newline at end of file
 diff --git a/ggml/src/ggml-cuda/moe-expert-cache.cu b/ggml/src/ggml-cuda/moe-expert-cache.cu
 new file mode 100644
-index 000000000..d8ea6bdcf
+index 000000000..2ec856a16
 --- /dev/null
 +++ b/ggml/src/ggml-cuda/moe-expert-cache.cu
-@@ -0,0 +1,6441 @@
+@@ -0,0 +1,6450 @@
 +// wip/moe-expert-cache — Phase 1a foundation.  See moe-expert-cache.h for the contract.
 +
 +#include "moe-expert-cache.h"
@@ -49995,6 +49995,14 @@ index 000000000..d8ea6bdcf
 +#include <unordered_map>
 +#include <unordered_set>
 +#include <vector>
++
++// int64_t min/max without `std::min`/`std::max` (issue #217).  With HIP on Windows (clang + the MSVC STL)
++// clang's force-included `cuda_wrappers/algorithm` and the MSVC STL `<utility>` each define an inline
++// template `std::min<long long>` (int64_t is `__int64` there, so the mangled name is the same -- the
++// `enable_if` that makes clang's version win overload resolution is not part of the mangling), and a
++// translation unit that instantiates both fails to codegen with "definition with same mangled name".
++static inline int64_t moe_cache_min_i64(int64_t a, int64_t b) { return a < b ? a : b; }
++static inline int64_t moe_cache_max_i64(int64_t a, int64_t b) { return a > b ? a : b; }
 +
 +// ---------------------------------------------------------------------------------------------
 +// state
@@ -53161,8 +53169,9 @@ index 000000000..d8ea6bdcf
 +    // exactly the partial-set latch this guard exists to prevent.  The `moe_host_expert_account` filter
 +    // is what keeps the gemma4 class (`ffn_down_exps.scale`, 512 B/layer, the reason an EXACT comparison
 +    // once failed) out of the expectation in the first place.
-+    const int64_t slack = std::min<int64_t>(std::max<int64_t>((int64_t) 1 << 20, expected / 4096),
-+                                            (int64_t) 16 << 20);
++    const int64_t slack = moe_cache_min_i64(
++        moe_cache_max_i64((int64_t) 1 << 20, expected / 4096),
++        (int64_t) 16 << 20);
 +    return registered + slack >= expected;
 +}
 +
@@ -53348,9 +53357,9 @@ index 000000000..d8ea6bdcf
 +                host_total += (int64_t) t.n_experts * (int64_t) t.expert_bytes;
 +            }
 +        }
-+        const int64_t floor_bytes = std::max((int64_t) g_min_mib * 1024 * 1024,
-+                                             (g_min_res_pct > 0 && host_total > 0)
-+                                                 ? host_total * g_min_res_pct / 100 : (int64_t) 0);
++        const int64_t floor_bytes = moe_cache_max_i64(
++            (int64_t) g_min_mib * 1024 * 1024,
++            (g_min_res_pct > 0 && host_total > 0) ? host_total * g_min_res_pct / 100 : (int64_t) 0);
 +        if (planned < floor_bytes) {
 +            // Do NOT disable here.  This runs AFTER the tables are registered and graphs have been planned
 +            // against them, and flipping the GLOBAL gate now plans the MTP draft and the target with
@@ -56243,7 +56252,7 @@ index 000000000..d8ea6bdcf
 +            if (!all_heat.empty() && total_mass > 0) {
 +                std::sort(all_heat.begin(), all_heat.end(),
 +                          [](uint64_t a, uint64_t b) { return a > b; });
-+                const int64_t k = std::min<int64_t>(n_slots, (int64_t) all_heat.size());
++                const int64_t k = moe_cache_min_i64(n_slots, (int64_t) all_heat.size());
 +                uint64_t bound = 0;
 +                for (int64_t i = 0; i < k; i++) {
 +                    bound += all_heat[(size_t) i];

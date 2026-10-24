@@ -442,6 +442,13 @@ stub alive to serve them, and treat a `wip/` path in an old record as a historic
   (`min(expert_size, 512)`; **64 is IQ4_NL-only**), keyed on `(input_cpy buffer, expert_bytes)`. Run
   `scripts/gate-qwen4exp-quant-coherence.sh` before changing `moe_cache_gather_host` or the head zero.
   Needs no `MOE_EXPERT_CACHE_MIB`.
+- **Never write `std::min`/`std::max` on `int64_t` in `moe-expert-cache.cu` (r124, issue #217).**  With HIP on
+  Windows (clang + the MSVC STL) clang's force-included `cuda_wrappers/algorithm` and the MSVC STL
+  `<utility>` both define an inline `std::min<long long>` under **one** mangled name, so a TU that
+  instantiates both fails to codegen (*"definition with same mangled name"*) — that broke r123's Windows
+  build.  Use the file's `moe_cache_min_i64`/`moe_cache_max_i64` (block 09); `std::min` on `int`/`size_t` is
+  fine.  Other HIP TUs still contain the int64_t pattern and compile on the reporter's toolchain, so sweeping
+  them is **not** sanctioned (TODO #95, accepted limitation — fix a named TU only from a Windows build log).
 - **A compute buffer that cannot grow must never abort; the MoE arena is what yields (r20).**
   `GGML_COMPUTE_BUFFER_MARGIN_PCT` (default **10**, `0` disables) pads each COMPUTE buffer allocation so a
   runtime graph's slightly larger layout (+3.3 % measured) does not force a free-then-allocate-larger

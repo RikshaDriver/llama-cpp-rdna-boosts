@@ -1,5 +1,40 @@
 # WORKLOG - dated delivery records
 
+## 261024.004 (r124) -- the Windows HIP build: int64_t `std::min`/`std::max` in the expert cache collide on one mangled name (blocks 09 + 10)
+
+**Change:** **blocks 09 and 10**.  `release.json` tip `355417a72`, tree `221bc7dda4`;
+`scripts/validate-set.sh` green (fresh tarball, strict 14/14 `git am`, applied tree == recorded tree).  No
+kernel, no allocation and no default change: a build fix for a toolchain this box does not run.
+
+**The report (issue #217).**  On Windows with HIP (clang 23 from TheRock + MSVC STL 14.51.36231 / VS 18),
+r123 fails to compile `ggml/src/ggml-cuda/moe-expert-cache.cu` in the host pass with `definition with same
+mangled name '??$min@_J@std@@YAAEB_JAEB_J0@Z'`.  `_J` is `__int64`, so *both* clang's force-included
+`cuda_wrappers/algorithm` (a `__host__ __device__` template selected by `enable_if(true, "")`) and the MSVC
+STL `<utility>` define an inline `std::min<long long>`, and the MSVC ABI does not encode the `enable_if`:
+a TU that instantiates both carries two definitions under one name.  The calls here (`std::min<int64_t>`
+since r112; r92 has none) pick clang's version, the STL's own templates use theirs, and the linker/CodeGen
+rejects the second definition.  Other CUDA TUs that use `std::min`/`std::max` compile on that toolchain --
+the collision only fires where the STL's own instantiation is also emitted -- but ~10 of them still carry
+the int64_t pattern (argmax, cpy-batch, fattn, mmvf, fattn-common, gated_delta_net, top-k, ssm-scan,
+ggml-cuda, hc-mix), so the same failure can reappear in another TU (TODO #95, accepted limitation).
+
+**The fix.**  Two `static inline` helpers at the top of `moe-expert-cache.cu` (`moe_cache_min_i64` /
+`moe_cache_max_i64`, plain ternaries -- behaviour identical to `std::min`/`std::max` for `int64_t`) and the
+three int64_t sites converted: the auto-arena floor in `alloc_all_locked` and the heat-coverage bound in
+`moe_cache_report` (block 09, which owns the file and the helpers) and the tables-registration slack guard
+in `moe_cache_tables_complete_locked` (block 10, which introduced it).  `std::min`/`std::max` stay where the
+type is `int`/`size_t`.  Nothing else changed; the reporter's tested diff is what ships.
+
+**Gates** (gfx1201, ROCm 10.1.0, `~/bin/build-llama-rocm`, the tree re-cut as `rdna-boosts` at
+`release.json.tip`, so the release build is the one measured).  Semantics-identical by construction, and
+measured: same-seed greedy text is byte-identical to r123 on the dense 4B (`-sm tensor`, 3 GPU,
+`1c5d32ac537d`) and on the host-expert arm (35B-A3B UD Q4_K_M `-sm tensor -ncmoe 40`, `627b2ebd7792`), both
+with `ROCBLAS_USE_HIPBLASLT=0`; `scripts/gate-prefill-logits.sh` **PASS** (mean KLD 0.000000, same-top-p
+100.000 %); Protocol A MTP on the MoE 35B-A3B (UD Q4_K_M, 1 GPU, prose, `--reasoning off`, `-n 3000`):
+plain **81.0 t/s**, `draft-mtp` **171.2 t/s** (2.11x), acceptance **0.73881**, mean len 3.22 -- identical to
+r123.  Only the Linux build was run here; the Windows compile is the reporter's, against the diff that
+ships.
+
 ## 261024.003 (no release) -- TODO #80 retired: the Meta split-state lookup-count headroom sits below the delivery's re-allocation rate
 
 **No source change, no release.**  `TODO.md` **#80** ("Meta split-state cache: 30+ lookups per node per
