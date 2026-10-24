@@ -79,6 +79,17 @@ band rule it satisfies starts here.
   initialised (issue #170), return NULL from a failed per-device allocation instead of asserting (a
   clean OOM exit), and keep the split-state hot path at its pre-#170 shape with the #170 resolution in a
   `noinline, cold` helper.
+* **The loader honours `--lazy-mode off` under a mapped load, and the Meta split uses the chunked async
+  upload ring** (r122): an explicit `off` makes a `TENSOR_READ_LAZY` tensor (the PLE/engram tables) load
+  into its own host buffer instead of being served from the `--load-mode mmap` mapping, so mmap keeps its
+  fast mapped load for the bulk while the table is really resident (`auto` below 4 GiB and `none` are
+  unchanged).  The stale `ggml_backend_dev_is_meta(dev) -> nullptr` bail is gone: the Meta async setter
+  serves a mid-row chunk with `write_partial_row` (and falls back to the sync setter for a
+  segmented/PARTIAL table), and the event proxy fans the staging-ring backpressure out to the simple
+  devices.  Staging slots are 4 MiB (`LLAMA_LOAD_STAGE_MB`), the non-DIO default.  Cold Flash-Next 3-GPU
+  `-sm tensor` load: `--load-mode none --lazy-mode off` **32.2 s -> 13.6 s**, and
+  `--load-mode mmap --lazy-mode off` keeps the 27 GiB PLE resident at 23.8 s (vs `mmap` + `auto` 18.9 s
+  with the PLE lazy); same-seed greedy text is byte-identical on Gemma4-E4B and Flash-Next.
 * **`ggml-alloc`**: release view sources whose views are never consumed (a real leak), and fingerprint the
   graph layout by node order + output marking so a *different* graph cannot reuse a layout computed for
   another (issue #183).
@@ -91,10 +102,11 @@ band rule it satisfies starts here.
 
 **Files.**  `ggml/src/ggml-cuda/fattn-common.cuh`, `ggml-cuda/mmid.cu`/`mmf.cu`/`mmq.cu`,
 `ggml-backend-meta.cpp`, `ggml-alloc.c`, `ggml-cpu/llamafile/sgemm.cpp`,
-`ggml-vulkan/vulkan-shaders/flash_attn*.comp`, `src/llama-{graph,context,model,kv-cache}.cpp`,
-`src/CMakeLists.txt`, `src/models/*` (the shadow rename), `src/llama-grammar.cpp`, `common/speculative.cpp`.
+`ggml-vulkan/vulkan-shaders/flash_attn*.comp`, `src/llama-{graph,context,model,kv-cache,model-loader}.cpp`,
+`src/llama-model-loader.h`, `include/llama.h`, `common/arg.cpp`, `tools/*/README.md`, `src/CMakeLists.txt`,
+`src/models/*` (the shadow rename), `src/llama-grammar.cpp`, `common/speculative.cpp`.
 
-**Knobs.**  `GGML_READBACK_SYNC` (diagnostic).  The rest are behaviour, not switches.
+**Knobs.**  `GGML_READBACK_SYNC` (diagnostic), `LLAMA_LOAD_STAGE_MB` (tuning, default `4`).  The rest are behaviour, not switches.
 
 **Notes.**  Block 00 is the *only* block whose changes are not gated on RDNA: it fixes code paths every
 backend shares.  A re-base conflict here is usually an upstream fix arriving for the same bug — keep
@@ -456,6 +468,12 @@ whatever VRAM is left.
 * `ggml-cuda.cu`: the **op-offload H2D staging ring** (three invariants: prefill is never graph-captured,
   the width gate is floored at 64 tokens, the arena lives outside the compute-graph reserve), the pinned
   `ROCm_Host` master, the per-device host buffer types, and the base of the async graph-input ring.
+* **The Meta split uses the loader's chunked async ring** (r122, with block 00): the
+  `ggml_backend_dev_is_meta(dev) -> nullptr` bail is gone; the Meta async setter serves a mid-row chunk
+  with `write_partial_row` (and falls back to the sync setter for a segmented/PARTIAL table), and the
+  event proxy fans the staging-ring backpressure out to the simple devices, so `--load-mode none` under
+  `-sm tensor` streams through the 4 MiB pinned slots instead of the whole-tensor pageable `read_buf`
+  (cold Flash-Next load 32.2 s -> 13.6 s).
 * `ggml-backend.cpp`: the scheduler's staged cross-backend upload (including the cross-device
   `wait_before_overwrite` ordering that fixed issue #103), routed-expert rebalancing and env-read caching.
 * **A second consumer of a staged expert table gets its own split** (r96, PR #186): a cache-managed

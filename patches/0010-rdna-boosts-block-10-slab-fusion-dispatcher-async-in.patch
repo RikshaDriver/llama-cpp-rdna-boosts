@@ -1,4 +1,4 @@
-From 264f5f32398aaf98dd83cc11a1fbcee4285fdaf1 Mon Sep 17 00:00:00 2001
+From 78b0fbc332f3b1b36b76c347ef39a6e6107900d3 Mon Sep 17 00:00:00 2001
 From: Stew Forster <ci@rdna-boosts.invalid>
 Date: Thu, 22 Oct 2026 07:24:38 -0500
 Subject: [PATCH 10/13] rdna-boosts: block 10: slab, fusion dispatcher, async
@@ -19606,7 +19606,7 @@ index 0a12fc537..76b0b7102 100644
              return false;
          }
 diff --git a/src/llama-model.cpp b/src/llama-model.cpp
-index d94a3cc05..43e2d1314 100644
+index 248e877fc..2d143ca12 100644
 --- a/src/llama-model.cpp
 +++ b/src/llama-model.cpp
 @@ -385,7 +385,46 @@ llama_model * llama_model_create(llama_model_loader & ml, const llama_model_para
@@ -19657,7 +19657,7 @@ index d94a3cc05..43e2d1314 100644
      const bool is_dsv4 = ud->model->arch == LLM_ARCH_DEEPSEEK4 ||
          (ud->model->arch == LLM_ARCH_DFLASH && hparams.dsv4_hc_mult > 0);
  
-@@ -2449,6 +2488,26 @@ std::map<ggml_backend_buffer_type_t, size_t> llama_model::memory_breakdown() con
+@@ -2453,6 +2492,26 @@ std::map<ggml_backend_buffer_type_t, size_t> llama_model::memory_breakdown() con
      return ret;
  }
  
@@ -19684,7 +19684,7 @@ index d94a3cc05..43e2d1314 100644
  uint64_t llama_model::n_elements() const {
      return pimpl->n_elements;
  }
-@@ -4031,23 +4090,3 @@ uint32_t llama_model_get_tok_embd(const struct llama_model * model, float * out)
+@@ -4035,23 +4094,3 @@ uint32_t llama_model_get_tok_embd(const struct llama_model * model, float * out)
  
      return (uint32_t) nelements;
  }

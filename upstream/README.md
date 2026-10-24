@@ -36,6 +36,7 @@ delivery then carries only the fork-local remainder.
 | [`sched-cross-device-input-order/`](sched-cross-device-input-order/README.md) | ggml-backend: order a cross-device split-input copy after the destination backend's queued work | **block 09** (issue #103 / PR #104) | fork form validated; upstream form applies clean, not built upstream |
 | [`ggml-sched-probe/`](ggml-sched-probe/README.md) | ggml sched: probe the stored layout before the alloc-fallback's full device sync (single-device fast path) | **block 11** (qwen4exp) | single-GPU validated |
 | [`kv-cache-keys-only/`](kv-cache-keys-only/README.md) | llama: keys-only KV caches — `llama_kv_cache` gains `v_enabled` (no V tensor, no V-side op) | **block 11** (+ the plumbing in **block 08**) | verified on master: indexer KV 72.00 → 24.00 MiB at ctx 8192 |
+| [`lazy-mode-off-resident/`](lazy-mode-off-resident/README.md) | llama: make `--lazy-mode off` keep `TENSOR_READ_LAZY` tensors resident under `--load-mode mmap` (the help text promised it; the mapping won) | **block 00** (r122) | applies clean to `097cf33d9`; validated in the delivery tree |
 
 ## Backlog (not written up yet)
 

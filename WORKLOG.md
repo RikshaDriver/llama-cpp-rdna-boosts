@@ -1,5 +1,64 @@
 # WORKLOG - dated delivery records
 
+## 261024.001 (r122) -- the loader honours `--lazy-mode off` under `--load-mode mmap`, and the `-sm tensor` load uses the chunked async ring (block 00); 4 MiB staging slots
+
+**Shipped:** `v14-097cf33d9-r122` (**block 00**; the Meta uploader edits the block-09 Meta path but is
+owned by block 00).  `release.json` tip `3a16b4305`, tree `cb3648871`.  `scripts/validate-set.sh` green
+(fresh tarball, strict 14/14 `git am`, applied tree == recorded tree).  No kernel change; same-seed greedy
+text is byte-identical on Gemma4-E4B and Flash-Next.  Upstream candidate:
+[`upstream/lazy-mode-off-resident/`](upstream/lazy-mode-off-resident/README.md).
+
+**1. `--lazy-mode off` was defeated by `--load-mode mmap`.**  `lazy_read::add()` returns false for OFF,
+so the tensor is created like any other; with `use_mmap`, `load_tensors()` gives its context a host-pointer
+buffer over the model mapping and `load_data()` takes `from_mapping = use_mmap || lazy.has(cur)` — so the
+PLE/engram table stayed file-backed and was faulted in on access.  The tooltip said "always keep them
+resident"; the mapping won.  Measured on Gemma4-E4B (2,856 MiB `per_layer_token_embd`): max RSS 5.90 GB
+with `mmap` + `auto` vs 10.03 GB with `none` + `off`; `mmap` + `off` was also 5.90 GB.
+
+**The fix (block 00).**  Explicit `off` + `TENSOR_READ_LAZY` + `use_mmap` records the tensor in
+`lazy_read::add_resident()` and gives it a dedicated `ctx_key{buft, lazy=false, resident=true}` context;
+`load_tensors()` does **not** turn that context into a host-pointer buffer, and `load_data()` reads it with
+the direct `read_raw` path (the `ranges` set is deliberately not used — that set gets `MADV_RANDOM`, which
+measured 0.22 GB/s for a fault-in + copy).  Only the explicit OFF does this: `auto` below its 4 GiB
+threshold and `on` are unchanged, so default loads do not change.  Log:
+`add_resident: tensor per_layer_token_embd.weight (size = 27465 MiB) kept resident (--lazy-mode off, not mapped)`.
+
+**2. `--load-mode none` under `-sm tensor` paid a whole-tensor pageable read.**  The loader's
+`upload_backend` bailed on the Meta device (`ggml_backend_dev_is_meta(dev) -> nullptr`), so the chunked
+pinned async ring was never used: the fallback allocated a whole-tensor `no_init` buffer, `read_raw`'d it,
+then called `set_tensor` — no overlap (the verbose log said `device Meta() is a Meta device; using
+whole-tensor uploads`).  That bail predated the Meta async setter's partial-row arm; the setter already
+serves a mid-row chunk with `write_partial_row` and falls back to the sync setter for a segmented/PARTIAL
+table, and the event proxy was added to fan the ring's backpressure out to the simple devices.  Removed the
+bail.  Cold Flash-Next `-sm tensor` load: `none` + `off` **32.2 s -> 13.6 s**; log
+`using async uploads for device Meta(), buffer type Meta(), backend Meta(ROCm0,ROCm1,ROCm2)`.
+
+**3. Staging slots 1 MiB -> 4 MiB** (`LLAMA_LOAD_STAGE_MB`, default 4; 4 slots, so 16 MiB pinned).  Cold
+curve on the Flash-Next load: **1 MiB 15.7 s, 2 MiB 13.7, 4 MiB 13.7**, 8 MiB 14.8, 16 MiB 15.2, 32 MiB
+16.3, 64 MiB 16.8.  4 MiB is the plateau and scales better on a faster disk; DIO keeps its 64 MiB buffer.
+
+**4. Load measurements** (cold page cache, load-only probe, 3x R9700, no `-ncmoe`):
+
+| arm | load | host RSS | PLE resident |
+|---|---:|---:|---|
+| `--load-mode none --lazy-mode off` | **13.6 s** | 29.8 GB | yes |
+| `--load-mode mmap --lazy-mode off` | 23.8 s | 29.1 GB | yes |
+| `--load-mode mmap --lazy-mode auto` (old) | 18.9 s | 1.6 GB | no |
+
+Host-read-only (`-ngl 0`): `mmap` + `off` 15.7 s vs `none` + `off` 18.3 s.  On this box `none` + `off` is now
+the fastest resident option; the point of the fix is that `mmap` + `off` also keeps the PLE resident, so
+either load mode can be chosen for the bulk.
+
+**5. Correctness.**  Gemma4-E4B (single GPU): `mmap`+`off`, `none`+`off` and `mmap`+`auto` all emit
+`363188840c…` (67 chars).  Flash-Next 3-GPU `-sm tensor`, both with and without `-ncmoe 48`: `none`+`off`
+and `mmap`+`off` both emit `d13cf4cf…`, identical to the pre-change sync path.  `test-lazy-reader` passes.
+No kernel change, so the prefill-logit gate does not apply.
+
+**6. Docs/knobs.**  `LLAMA_LOAD_STAGE_MB` in `ENVIRONMENT.md`; the `--lazy-mode` help text and the
+`LLAMA_LAZY_MODE_OFF` comment now state the precedence; `patches/README.md` block 00/09; `AGENTS.md`
+critical fact.  The tag, fork `rdna-boosts` refresh and container images are the normal release steps;
+`release.json` names `r122`.
+
 ## 261023.006 (r121) -- TODO #94: DFlash2 drafting on Qwen3.8-Flash-Next (qwen4exp exports the HC-averaged layer input, block 11); a slab peer copy into an ungranted range aborted `-sm layer` + `-ncmoe` (block 10)
 
 **Shipped:** `v14-097cf33d9-r121` (**block 11** for the qwen4exp layer-input export, **block 10** for the

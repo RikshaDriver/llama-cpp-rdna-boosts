@@ -1,4 +1,4 @@
-From 1f535cdaa5f824124f9be0e1590b59818d49d7a8 Mon Sep 17 00:00:00 2001
+From ffb3f293c95a9be2343202daa813ebca3bf5f31b Mon Sep 17 00:00:00 2001
 From: Stew Forster <ci@rdna-boosts.invalid>
 Date: Wed, 21 Oct 2026 10:40:32 -0500
 Subject: [PATCH 09/13] rdna-boosts: block 09: host-resident MoE (iface,
@@ -216,7 +216,7 @@ this site over along with the two it already owns.  `gate-per-block-build.sh` se
  src/llama-kv-cache.cpp                        |    7 +-
  src/llama-mmap.cpp                            |   37 +-
  src/llama-mmap.h                              |    5 +
- src/llama-model-loader.cpp                    |  305 +-
+ src/llama-model-loader.cpp                    |  300 +-
  src/llama-model-loader.h                      |   37 +-
  src/llama-model.cpp                           |  120 +-
  src/llama-model.h                             |    4 +
@@ -224,7 +224,7 @@ this site over along with the two it already owns.  `gate-per-block-build.sh` se
  src/llama.cpp                                 |   16 +-
  tools/cli/cli.cpp                             |    6 +
  tools/llama-bench/llama-bench.cpp             |   65 +-
- 65 files changed, 14702 insertions(+), 534 deletions(-)
+ 65 files changed, 14697 insertions(+), 534 deletions(-)
  create mode 100644 common/draft-reserve.cpp
  create mode 100644 common/draft-reserve.h
  create mode 100644 ggml/src/ggml-cuda/cpy-batch.cu
@@ -248,7 +248,7 @@ index 2b307c59d..395cb43fd 100644
      fit.h
      hf-cache.cpp
 diff --git a/common/arg.cpp b/common/arg.cpp
-index f5b40e985..aecf5f70b 100644
+index dec14da86..56902dc09 100644
 --- a/common/arg.cpp
 +++ b/common/arg.cpp
 @@ -2707,6 +2707,20 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
@@ -272,7 +272,7 @@ index f5b40e985..aecf5f70b 100644
      add_opt(common_arg(
          {"-lzm", "--lazy-mode"}, "MODE",
          "on-demand reading of certain tensors, for example per-layer embeddings (default: auto)\n"
-@@ -2766,11 +2780,13 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
+@@ -2767,11 +2781,13 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
      ).set_env("LLAMA_ARG_CPU_MOE"));
      add_opt(common_arg(
          {"-ncmoe", "--n-cpu-moe"}, "N",
@@ -287,7 +287,7 @@ index f5b40e985..aecf5f70b 100644
              llm_add_n_cpu_ffn_overrides(value, LLM_FFN_EXPS_REGEX, params.tensor_buft_overrides);
          }
      ).set_env("LLAMA_ARG_N_CPU_MOE"));
-@@ -4145,11 +4161,12 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
+@@ -4146,11 +4162,12 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
      ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_DRAFT_CPU_MOE"));
      add_opt(common_arg(
          {"--spec-draft-n-cpu-moe", "--spec-draft-ncmoe", "-ncmoed", "--n-cpu-moe-draft"}, "N",
@@ -16287,7 +16287,7 @@ index ec7ce2331..a3d9f00da 100644
  };
  
 diff --git a/include/llama.h b/include/llama.h
-index 0eab7fec5..0c99fa0d5 100644
+index 90046651b..09c0046b0 100644
 --- a/include/llama.h
 +++ b/include/llama.h
 @@ -222,6 +222,14 @@ extern "C" {
@@ -17290,7 +17290,7 @@ index 6c6393d57..8cce74993 100644
  
      void seek(size_t offset, int whence) const;
 diff --git a/src/llama-model-loader.cpp b/src/llama-model-loader.cpp
-index 238ab0ba1..f40f2c1b0 100644
+index 5b5dcd4f9..26a9287ca 100644
 --- a/src/llama-model-loader.cpp
 +++ b/src/llama-model-loader.cpp
 @@ -10,10 +10,18 @@
@@ -17351,8 +17351,8 @@ index 238ab0ba1..f40f2c1b0 100644
      if (!fname.empty()) {
          // Load the main GGUF
          struct ggml_context * ctx = NULL;
-@@ -1113,6 +1139,60 @@ bool llama_model_loader::lazy_read::add(const std::string & name, const ggml_ten
-     return true;
+@@ -1124,6 +1150,60 @@ void llama_model_loader::lazy_read::add_resident(const std::string & name, const
+             __func__, name.c_str(), ggml_nbytes(w.tensor)/1024/1024);
  }
  
 +// wip/fit-slab-accounting: account a host-resident MoE expert tensor's bytes per REAL device, so the
@@ -17412,7 +17412,7 @@ index 238ab0ba1..f40f2c1b0 100644
  struct ggml_tensor * llama_model_loader::create_tensor(
          const llama_hparams & hparams, const buft_list_t * buft_list_cpu, const buft_list_t * buft_list_input, const buft_list_t * buft_list_output,
          const buft_list_t * buft_list_layer, const LLM_TN_IMPL & tn, const std::initializer_list<int64_t> & ne, int flags) {
-@@ -1216,7 +1296,10 @@ struct ggml_tensor * llama_model_loader::create_tensor(
+@@ -1228,7 +1308,10 @@ struct ggml_tensor * llama_model_loader::create_tensor(
          const buft_list_t * buft_list;
          switch (info.layer) {
              case LLM_TENSOR_LAYER_INPUT:
@@ -17424,7 +17424,7 @@ index 238ab0ba1..f40f2c1b0 100644
                  break;
              case LLM_TENSOR_LAYER_OUTPUT:
                  buft_list = buft_list_output;
-@@ -1231,15 +1314,103 @@ struct ggml_tensor * llama_model_loader::create_tensor(
+@@ -1243,15 +1326,103 @@ struct ggml_tensor * llama_model_loader::create_tensor(
  
          ggml_backend_buffer_type_t buft = nullptr;
  
@@ -17532,7 +17532,7 @@ index 238ab0ba1..f40f2c1b0 100644
                          if (use_mmap) {
                              static std::once_flag once;
                              std::call_once(once, [] {
-@@ -1267,8 +1438,14 @@ struct ggml_tensor * llama_model_loader::create_tensor(
+@@ -1279,8 +1450,14 @@ struct ggml_tensor * llama_model_loader::create_tensor(
          }
  
          // avoid using a host buffer when using mmap
@@ -17548,7 +17548,7 @@ index 238ab0ba1..f40f2c1b0 100644
              auto * cpu_dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
              if (!cpu_dev) {
                  throw std::runtime_error("no CPU backend found");
-@@ -1326,7 +1503,12 @@ struct ggml_tensor * llama_model_loader::create_tensor(
+@@ -1338,7 +1515,12 @@ struct ggml_tensor * llama_model_loader::create_tensor(
          ggml_set_name(&t_meta, tn.str().c_str());
  
          ggml_backend_buffer_type_t buft = buft_for_tensor(&t_meta);
@@ -17562,7 +17562,7 @@ index 238ab0ba1..f40f2c1b0 100644
          ggml_context * ctx = ctx_for_buft(buft);
          ggml_tensor * ret = ggml_dup_tensor(ctx, &t_meta);
          ggml_set_name(ret, tn.str().c_str());
-@@ -1364,6 +1546,9 @@ struct ggml_tensor * llama_model_loader::create_tensor(
+@@ -1389,6 +1571,9 @@ struct ggml_tensor * llama_model_loader::create_tensor(
      if (buft == nullptr) {
          return nullptr;
      }
@@ -17572,7 +17572,7 @@ index 238ab0ba1..f40f2c1b0 100644
  
      ggml_context * ctx = ctx_for_buft(buft);
  
-@@ -1407,6 +1592,15 @@ void llama_model_loader::done_getting_tensors(bool partial) const {
+@@ -1432,6 +1617,15 @@ void llama_model_loader::done_getting_tensors(bool partial) const {
      }
  }
  
@@ -17588,7 +17588,7 @@ index 238ab0ba1..f40f2c1b0 100644
  void llama_model_loader::init_mappings(bool prefetch, llama_mlocks * mlock_mmaps) {
      // note: read_lazy also requires mmap; this condition make sure it's usable even when --load-mode is not set to mmap
      if (use_mmap || lazy.any()) {
-@@ -1426,11 +1620,14 @@ void llama_model_loader::init_mappings(bool prefetch, llama_mlocks * mlock_mmaps
+@@ -1451,11 +1645,14 @@ void llama_model_loader::init_mappings(bool prefetch, llama_mlocks * mlock_mmaps
                  }
              }
  
@@ -17605,7 +17605,7 @@ index 238ab0ba1..f40f2c1b0 100644
              if (mlock_mmaps) {
                  std::unique_ptr<llama_mlock> mlock_mmap(new llama_mlock());
                  mlock_mmap->init(mapping->addr());
-@@ -1446,6 +1643,13 @@ void llama_model_loader::init_mappings(bool prefetch, llama_mlocks * mlock_mmaps
+@@ -1471,6 +1668,13 @@ void llama_model_loader::init_mappings(bool prefetch, llama_mlocks * mlock_mmaps
      }
  }
  
@@ -17619,7 +17619,7 @@ index 238ab0ba1..f40f2c1b0 100644
  void llama_model_loader::get_mapping_range(size_t * first, size_t * last, void ** addr, int idx, ggml_context * ctx) const {
      GGML_ASSERT(!mappings.empty());
      const auto & mapping = mappings.at(idx);
-@@ -1504,6 +1708,8 @@ bool llama_model_loader::load_all_data(
+@@ -1529,6 +1733,8 @@ bool llama_model_loader::load_all_data(
      }
      GGML_ASSERT(size_data != 0 && "call init_mappings() first");
  
@@ -17627,29 +17627,24 @@ index 238ab0ba1..f40f2c1b0 100644
 +
      std::vector<std::future<std::pair<ggml_tensor *, bool>>> validation_result;
  
-     // 4 staging buffers for async uploads, each sized 1MB seems to be a good default for single NVMe drives.
-@@ -1542,6 +1748,20 @@ bool llama_model_loader::load_all_data(
+     // 4 staging buffers for async uploads, each sized `buffer_size` below (LLAMA_LOAD_STAGE_MB,
+@@ -1576,6 +1782,15 @@ bool llama_model_loader::load_all_data(
              return nullptr;
          }
  
-+        // The Meta device (under `-sm tensor`) splits a tensor across its simple devices.  Its async
-+        // uploader handles row-aligned writes (and the scheduler's <=512-byte MMQ tail pad) but a
-+        // mid-row write is either accumulated in full (segmented tensors) or dispatched per device; the
-+        // chunked pinned-upload pipeline below reads fixed 1 MiB pieces that are NOT row-aligned for a
-+        // quantized tensor (e.g. blk.0.ssm_out.weight, q8_0, row stride 4352 B).  A non-mmap load
-+        // (`--load-mode none`) therefore aborted in `ggml_backend_meta_buffer_set_tensor`.  For a Meta
-+        // device read the whole tensor and write it once (always aligned); the async overlap is lost
-+        // only on the non-mmap `-sm tensor` path.
-+        if (ggml_backend_dev_is_meta(dev)) {
-+            LLAMA_LOG_DEBUG("%s: device %s is a Meta device; using whole-tensor uploads\n", func,
-+                ggml_backend_dev_name(dev));
-+            return nullptr;
-+        }
-+
++        // NOTE: a Meta device (under `-sm tensor`) is deliberately NOT excluded here.  Its async
++        // setter (`ggml_backend_meta_set_tensor_async`) splits a chunk to each simple device and
++        // handles a mid-row head/tail chunk with `write_partial_row`, so the loader's fixed-size
++        // chunks (NOT row-aligned for a quantized tensor, e.g. a q8_0 row stride of 4352 B) are
++        // safe.  A segmented tensor whose chunk starts mid-row, and a PARTIAL split tensor, fall
++        // back to the synchronous setter inside the Meta backend.  The event proxy fans a record
++        // out to every simple device, so the staging ring below still gets its backpressure.
++        // (The old `ggml_backend_dev_is_meta(dev) -> nullptr` bail predated that and forced the
++        // whole-tensor pageable `read_buf` path, which is several times slower on `--load-mode none`.)
          if (buft != ggml_backend_dev_buffer_type(dev)) {
              LLAMA_LOG_DEBUG("%s: buffer type %s is not the default buffer type for device %s for async uploads\n", func,
                  ggml_backend_buft_name(buft), ggml_backend_dev_name(dev));
-@@ -1557,6 +1777,21 @@ bool llama_model_loader::load_all_data(
+@@ -1591,6 +1806,21 @@ bool llama_model_loader::load_all_data(
          }
  
          auto * host_buft = ggml_backend_dev_host_buffer_type(dev);
@@ -17671,7 +17666,7 @@ index 238ab0ba1..f40f2c1b0 100644
          if (!host_buft) {
              LLAMA_LOG_DEBUG("%s: no host buffer type found for device %s\n", func,
                  ggml_backend_dev_name(dev));
-@@ -1662,11 +1897,31 @@ bool llama_model_loader::load_all_data(
+@@ -1696,11 +1926,31 @@ bool llama_model_loader::load_all_data(
                      lmlock->grow_to(weight->offs + n_size);
                  }
  
@@ -17706,7 +17701,7 @@ index 238ab0ba1..f40f2c1b0 100644
              }
          } else {
              const auto & file = files.at(weight->idx);
-@@ -1746,6 +2001,15 @@ bool llama_model_loader::load_all_data(
+@@ -1780,6 +2030,15 @@ bool llama_model_loader::load_all_data(
              }
          }
  
@@ -17722,7 +17717,7 @@ index 238ab0ba1..f40f2c1b0 100644
          size_done += n_size;
      }
  
-@@ -1777,11 +2041,20 @@ bool llama_model_loader::load_all_data(
+@@ -1811,11 +2070,20 @@ bool llama_model_loader::load_all_data(
          // unmap offloaded tensors and metadata
          if (use_mmap) {
              for (uint32_t idx = 0; idx < mappings.size(); idx++) {
@@ -17748,7 +17743,7 @@ index 238ab0ba1..f40f2c1b0 100644
              }
          }
 diff --git a/src/llama-model-loader.h b/src/llama-model-loader.h
-index 9e51d0ce7..493782111 100644
+index ce7ff35e0..ac64c32b4 100644
 --- a/src/llama-model-loader.h
 +++ b/src/llama-model-loader.h
 @@ -80,6 +80,8 @@ struct llama_model_loader {
@@ -17760,7 +17755,7 @@ index 9e51d0ce7..493782111 100644
      bool check_tensors;
      bool no_alloc;
      bool load_mtp;
-@@ -126,6 +128,13 @@ struct llama_model_loader {
+@@ -142,6 +144,13 @@ struct llama_model_loader {
      std::map<std::string, llama_tensor_weight, weight_name_comparer> weights_map;
      std::unordered_map<std::string, llama_model_kv_override> kv_overrides;
      const llama_model_tensor_buft_override * tensor_buft_overrides;
@@ -17774,7 +17769,7 @@ index 9e51d0ce7..493782111 100644
  
      gguf_context_ptr metadata_ptr;
      struct gguf_context * metadata; // either metadata_ptr.get() or externally set
-@@ -138,7 +147,14 @@ struct llama_model_loader {
+@@ -154,7 +163,14 @@ struct llama_model_loader {
  
      size_t size_done = 0;
      size_t size_data = 0;
@@ -17790,9 +17785,9 @@ index 9e51d0ce7..493782111 100644
  
      // define a comparator for the buft -> ctx map to ensure that the order is well-defined:
      struct ggml_backend_buft_comparator {
-@@ -158,7 +174,18 @@ struct llama_model_loader {
-             if (lhs.lazy != rhs.lazy) {
-                 return lhs.lazy < rhs.lazy;
+@@ -178,7 +194,18 @@ struct llama_model_loader {
+             if (lhs.resident != rhs.resident) {
+                 return lhs.resident < rhs.resident;
              }
 -            return strcmp(ggml_backend_buft_name(lhs.buft), ggml_backend_buft_name(rhs.buft)) < 0;
 +            const int c = strcmp(ggml_backend_buft_name(lhs.buft), ggml_backend_buft_name(rhs.buft));
@@ -17810,7 +17805,7 @@ index 9e51d0ce7..493782111 100644
          }
      };
  
-@@ -179,9 +206,12 @@ struct llama_model_loader {
+@@ -199,9 +226,12 @@ struct llama_model_loader {
          std::vector<std::string> & splits, // optional, only need if the split does not follow naming scheme
          FILE * file,
          llama_load_mode load_mode,
@@ -17823,7 +17818,7 @@ index 9e51d0ce7..493782111 100644
          const llama_model_kv_override * param_overrides_p,
          const llama_model_tensor_buft_override * param_tensor_buft_overrides_p);
  
-@@ -244,6 +274,9 @@ struct llama_model_loader {
+@@ -264,6 +294,9 @@ struct llama_model_loader {
  
      void get_mapping_range(size_t * first, size_t * last, void ** addr, int idx, ggml_context * ctx) const;
  
@@ -17834,7 +17829,7 @@ index 9e51d0ce7..493782111 100644
      void unmap_weight(const llama_tensor_weight & w) const;
  
 diff --git a/src/llama-model.cpp b/src/llama-model.cpp
-index 9d17db67a..d94a3cc05 100644
+index 683641708..248e877fc 100644
 --- a/src/llama-model.cpp
 +++ b/src/llama-model.cpp
 @@ -1662,9 +1662,21 @@ bool llama_model_base::load_tensors(llama_model_loader & ml_l) {
@@ -17872,7 +17867,7 @@ index 9d17db67a..d94a3cc05 100644
      // per-tensor activation precision policy
      prec_policy.load(ml_l, *this);
  
-@@ -1931,6 +1946,16 @@ bool llama_model_base::load_tensors(llama_model_loader & ml_l) {
+@@ -1935,6 +1950,16 @@ bool llama_model_base::load_tensors(llama_model_loader & ml_l) {
                  }
                  bufs.emplace_back(buf);
                  buf_map.emplace(idx, buf);
@@ -17889,7 +17884,7 @@ index 9d17db67a..d94a3cc05 100644
              }
          } else {
              ggml_backend_buffer_t buf;
-@@ -3335,7 +3360,9 @@ llama_model_params llama_model_default_params() {
+@@ -3339,7 +3364,9 @@ llama_model_params llama_model_default_params() {
          /*.split_mode                  =*/ LLAMA_SPLIT_MODE_LAYER,
          /*.load_mode                   =*/ LLAMA_LOAD_MODE_AUTO,
          /*.lazy_mode                   =*/ LLAMA_LAZY_MODE_AUTO,
@@ -17899,7 +17894,7 @@ index 9d17db67a..d94a3cc05 100644
          /*.tensor_split                =*/ nullptr,
          /*.progress_callback           =*/ nullptr,
          /*.progress_callback_user_data =*/ nullptr,
-@@ -3346,6 +3373,7 @@ llama_model_params llama_model_default_params() {
+@@ -3350,6 +3377,7 @@ llama_model_params llama_model_default_params() {
          /*.no_host                     =*/ false,
          /*.no_alloc                    =*/ false,
          /*.load_mtp                    =*/ false,
@@ -17907,7 +17902,7 @@ index 9d17db67a..d94a3cc05 100644
      };
  
      return result;
-@@ -3769,6 +3797,72 @@ const std::vector<std::pair<std::string, ggml_tensor *>> & llama_internal_get_te
+@@ -3773,6 +3801,72 @@ const std::vector<std::pair<std::string, ggml_tensor *>> & llama_internal_get_te
      return model->tensors_by_name;
  }
  
@@ -17980,7 +17975,7 @@ index 9d17db67a..d94a3cc05 100644
  int32_t llama_model_n_expert(const struct llama_model * model) {
      return model->hparams.n_expert;
  }
-@@ -3937,3 +4031,23 @@ uint32_t llama_model_get_tok_embd(const struct llama_model * model, float * out)
+@@ -3941,3 +4035,23 @@ uint32_t llama_model_get_tok_embd(const struct llama_model * model, float * out)
  
      return (uint32_t) nelements;
  }

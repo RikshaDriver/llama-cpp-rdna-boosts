@@ -188,6 +188,15 @@ stub alive to serve them, and treat a `wip/` path in an old record as a historic
   probe.  **Keep hipBLASLt enabled in the delivery** (disabling it costs up to -15 % decode; the switch is
   for reproducible runs and bisection only).  `GREEDY-PURITY.md` §44,
   `archive/work/fix-gemma-4/evidence/MEASUREMENTS-2026-10-21d.md`.
+- **`--lazy-mode off` overrides a mapped load, and `-sm tensor` + `--load-mode none` uses the chunked async ring (r122, block 00).**
+  An explicit `off` loads the `TENSOR_READ_LAZY` PLE/engram table into its own host buffer instead of
+  serving it from the `--load-mode mmap` mapping (`auto` below 4 GiB stays mapped, so default loads are
+  unchanged); `--load-mode mmap --lazy-mode off` is the "fast mapped bulk + resident PLE" combination.
+  The stale `ggml_backend_dev_is_meta(dev) -> nullptr` loader bail is gone: the Meta async setter serves a
+  mid-row chunk (`write_partial_row`) and the event proxy fans the 4-slot staging ring
+  (`LLAMA_LOAD_STAGE_MB`, default 4 MiB) out to the simple devices, so `--load-mode none` under `-sm tensor`
+  is ~2x faster (cold Flash-Next load 32.2 -> 13.6 s).  Both are **block 00**; do not reintroduce either
+  workaround.  Same-seed greedy text is byte-identical across the load modes on Gemma4-E4B and Flash-Next.
 - **A layer-input tap needs the HC-averaged state on qwen4exp (`build_hc_mean`, r121, TODO #94 closed).**
   `qwen4exp` runs `hc` parallel residual streams, so `res_hc` is `hc * n_embd` wide (10240 on Flash-Next)
   while `extract_layer_inp()` demands exactly `n_embd` per row: exporting the wide residual made any

@@ -1,4 +1,4 @@
-From d183f70223b872a2337a8b7514a3ad4b8e8c4cb7 Mon Sep 17 00:00:00 2001
+From 6aa5eaf5d8cde4578d2c27aada7d41ac15596411 Mon Sep 17 00:00:00 2001
 From: Stew Forster <ci@rdna-boosts.invalid>
 Date: Wed, 21 Oct 2026 10:40:32 -0500
 Subject: [PATCH 12/13] rdna-boosts: block 12: campaign remainder (CPU wins,
@@ -98,7 +98,7 @@ unchanged.
  33 files changed, 2960 insertions(+), 680 deletions(-)
 
 diff --git a/common/arg.cpp b/common/arg.cpp
-index c7606ca31..fac39ec0d 100644
+index f19285602..41c1bfc32 100644
 --- a/common/arg.cpp
 +++ b/common/arg.cpp
 @@ -2711,7 +2711,10 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
@@ -4244,7 +4244,7 @@ index 9bd71e504..45a9618ff 100644
  
  static struct ggml_tensor * ggml_add_impl(
 diff --git a/include/llama.h b/include/llama.h
-index 0c99fa0d5..8ba97b8ab 100644
+index 09c0046b0..c3b5f65e1 100644
 --- a/include/llama.h
 +++ b/include/llama.h
 @@ -227,7 +227,12 @@ extern "C" {
@@ -4857,7 +4857,7 @@ index c5c738783..2881d2b1f 100644
      // env: LLAMA_GRAPH_REUSE_DISABLE
      bool graph_reuse_disable = false;
 diff --git a/src/llama-model-loader.cpp b/src/llama-model-loader.cpp
-index e445afa36..7017bc7b0 100644
+index 21e66bd5c..16876ea5b 100644
 --- a/src/llama-model-loader.cpp
 +++ b/src/llama-model-loader.cpp
 @@ -39,11 +39,32 @@ static void llama_host_experts_mode_apply(llama_host_experts_mode host_experts_m
@@ -4916,7 +4916,7 @@ index e445afa36..7017bc7b0 100644
  
      if (!fname.empty()) {
          // Load the main GGUF
-@@ -1406,8 +1436,7 @@ struct ggml_tensor * llama_model_loader::create_tensor(
+@@ -1418,8 +1448,7 @@ struct ggml_tensor * llama_model_loader::create_tensor(
                          // the device this layer is assigned to.
                          if (op == GGML_OP_MUL_MAT_ID && buft_list_layer != nullptr && !buft_list_layer->empty()) {
                              ggml_backend_dev_t layer_dev = buft_list_layer->front().first;
@@ -4926,7 +4926,7 @@ index e445afa36..7017bc7b0 100644
                              if (layer_host_buft != nullptr &&
                                      weight_buft_supported(hparams, t_meta, op, layer_host_buft, layer_dev)) {
                                  buft = layer_host_buft;
-@@ -1427,7 +1456,7 @@ struct ggml_tensor * llama_model_loader::create_tensor(
+@@ -1439,7 +1468,7 @@ struct ggml_tensor * llama_model_loader::create_tensor(
                          if (buft == nullptr && tensor_host_buft && op == GGML_OP_MUL_MAT_ID) {
                              for (size_t i = 0; i < ggml_backend_dev_count(); i++) {
                                  ggml_backend_dev_t dev = ggml_backend_dev_get(i);
@@ -4936,7 +4936,7 @@ index e445afa36..7017bc7b0 100644
                                      continue;
                                  }
 diff --git a/src/llama-model-loader.h b/src/llama-model-loader.h
-index 0cf69c201..9616569eb 100644
+index 75ea25555..1a6b9268a 100644
 --- a/src/llama-model-loader.h
 +++ b/src/llama-model-loader.h
 @@ -81,8 +81,16 @@ struct llama_model_loader {
@@ -4959,14 +4959,14 @@ index 0cf69c201..9616569eb 100644
      bool no_alloc;
      bool load_mtp;
 diff --git a/src/llama-model.cpp b/src/llama-model.cpp
-index aa0dfeb3d..eea86893c 100644
+index 23689a4eb..f4569fd7e 100644
 --- a/src/llama-model.cpp
 +++ b/src/llama-model.cpp
-@@ -1965,7 +1965,48 @@ bool llama_model_base::load_tensors(llama_model_loader & ml_l) {
-         // a lazy context is mapped whatever the load mode, but the memory-fit pass maps nothing
+@@ -1969,7 +1969,48 @@ bool llama_model_base::load_tensors(llama_model_loader & ml_l) {
          const bool is_lazy_mapped = ctx_key.lazy && !ml_l.no_alloc;
+         const bool is_resident    = ctx_key.resident;
  
--        if ((ml_l.use_mmap || is_lazy_mapped) && use_mmap_buffer && buffer_from_host_ptr_supported && is_default_buft) {
+-        if ((ml_l.use_mmap || is_lazy_mapped) && use_mmap_buffer && buffer_from_host_ptr_supported && is_default_buft && !is_resident) {
 +        // wip/host-expert-master-drop (TODO #55): a POOL-BACKED host expert master keeps its tensors in
 +        // the read-only model mapping instead of a full pinned allocation (`--host-experts pool`).  The
 +        // mapping is the source of truth (page cache / GGUF on disk, reclaimable), the bounded pinned
@@ -5008,11 +5008,11 @@ index aa0dfeb3d..eea86893c 100644
 +                throw std::runtime_error(format("host expert master: no mapped range covers the %s expert tensors",
 +                                                ggml_backend_buft_name(buft)));
 +            }
-+        } else if ((ml_l.use_mmap || is_lazy_mapped) && use_mmap_buffer && buffer_from_host_ptr_supported && is_default_buft) {
++        } else if ((ml_l.use_mmap || is_lazy_mapped) && use_mmap_buffer && buffer_from_host_ptr_supported && is_default_buft && !is_resident) {
              GGML_ASSERT(!ml_l.no_alloc);
              for (uint32_t idx = 0; idx < ml_l.files.size(); idx++) {
                  // only the mmap region containing the tensors in the model is mapped to the backend buffer
-@@ -2508,6 +2549,42 @@ size_t llama_model::max_host_weight_tensor_bytes() const {
+@@ -2512,6 +2553,42 @@ size_t llama_model::max_host_weight_tensor_bytes() const {
      return max_bytes;
  }
  
