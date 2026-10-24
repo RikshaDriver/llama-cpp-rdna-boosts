@@ -1,11 +1,15 @@
 # ngram-mod-host-experts — `ngram-mod` + `draft-mtp-adaptive` roughly halves decode when the MoE experts are host-resident
 
-**Status: OPEN (seeded 2026-10-14), scoping + measurement.**  Not part of the delivery.  Nothing here may
-be applied to the fork without the maintainer's go-ahead.
+**Status: CLOSED (r123, 2026-10-24) — FIXED in block 09, TODO #59 closed.**  The cause is the MoE expert
+cache's **verify band**, not `ngram-mod` and not MTP: the draftless n-gram speculators default to a 48-64
+token draft (`--spec-ngram-mod-n-max` 64, `n_min` 48), so every verify batch was wider than the arena's
+16-token decode band (8 on RDNA3) and the routed experts were streamed from the pinned host master on every
+step.  `common` now clamps an enabled n-gram speculator to `band - 1`
+(`LLAMA_SPEC_NGRAM_MOD_BAND_CLAMP=0` opts out).  The documented combo went **73.9 -> 168.3 t/s** on the
+measured cell.  Rule: `GREEDY-PURITY.md` §50; block reference: `patches/README.md` (block 09); record:
+[`EVIDENCE-2026-10-24.md`](EVIDENCE-2026-10-24.md); release note: `WORKLOG.md` 261024.002.
 
-> **Cold start.**  Read `AGENTS.md` ("WIP and promotion rules", the `-ncmoe`/expert-cache invariants under
-> "Critical facts"), then the README "Recommended configuration — adaptive MTP + `ngram-mod`" section and
-> the adaptive-MTP baseline gate (`benchmarks/mtp-adaptive-methodology.md`).
+This directory is the campaign's gate record.  Nothing here is part of the delivery.
 
 ## 0. The symptom
 
@@ -70,4 +74,6 @@ recommended pick.  The README documents this; this campaign finds out why it hap
 
 ## 5. Evidence
 
-- (to be filled in.)
+All tables, the controls and the rejected alternatives: [`EVIDENCE-2026-10-24.md`](EVIDENCE-2026-10-24.md).
+The harness is [`run-arm.sh`](run-arm.sh) (one arm per log file under `logs/`; text-purity runs want
+`LV=none` and `ROCBLAS_USE_HIPBLASLT=0`).

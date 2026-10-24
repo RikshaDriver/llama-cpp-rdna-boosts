@@ -411,6 +411,17 @@ stub alive to serve them, and treat a `wip/` path in an old record as a historic
   Record: `archive/work/spec-draft-mtp-vocab/VALIDATION-2026-10-22.md`.
 - **`--spec-draft-n-max` is capped at 15** (the recurrent snapshot bound); purity is promised only to
   **7** (the kernel-family switch at 8 rows). `LLAMA_SPEC_DRAFT_N_MAX_CLAMP=0` escapes the clamp.
+- **A draft length is a verify width *and* a memory-tier parameter (r123, TODO #59 closed).**  With host
+  experts served by the expert-cache arena, a verify batch wider than the band (`moe_cache_max_tok()`: **16**
+  on RDNA4/RDNA2, **8** on RDNA3/NVIDIA) leaves the arena and streams the routed experts from the pinned
+  host master on *every* step — one extra row measured **159.2 -> 55.0 t/s** on 2x R9700 `-ncmoe 36`, and the
+  README's `draft-mtp-adaptive,ngram-mod` pick 73.9 -> 168.3 t/s once the draft fits.  `common` clamps the
+  **draftless** n-gram speculators (`ngram_mod.n_max` 64 / `n_min` 48 default, the ngram-map `size_m`) to
+  `band - 1` whenever the arena is active — `LLAMA_SPEC_NGRAM_MOD_BAND_CLAMP=0` opts out, and a
+  `draft.n_max` above the band warns (not clamped: its 15 is a correctness bound).  A device-resident model
+  or the CPU expert path reports band 0 and is **never** clamped (wide drafts are the win there: 144.7 ->
+  378.7 t/s; a naked `--spec-ngram-mod-n-max` below `n_min` silently disables ngram-mod instead).  Rule:
+  `GREEDY-PURITY.md` §50; record: `archive/work/ngram-mod-host-experts/EVIDENCE-2026-10-24.md`.
 - **The mmvq band-uniform knobs are a purity requirement *and* a perf trap.** `nwarps` and the vec_dot
   VDR participate in the mmvq K-split order, so one value must hold across the whole band (`W=1..8`)
   and must be tuned at the **verify widths**. RDNA4 dense `nwarps=1`; dense VDR=2, MoE-expert VDR=4.

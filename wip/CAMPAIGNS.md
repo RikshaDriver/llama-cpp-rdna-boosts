@@ -22,7 +22,14 @@ is the signature of a stub, not of a campaign.
 |---|---|---|
 | [`fp8-support/`](fp8-support/README.md) | native FP8 E4M3 for RDNA4 | PARKED (2026-09-26) — rebased and building, fully RDNA4-gated, but **gate 2 failed** (the fp8 4B is 0.69x Q8_0 where cllm had 1.16x, because the delivery's MMB/GEMM work made Q8_0 +32 % and the fp8 WMMA path did not follow).  Resume actions are in `PLAN.md`.  Not closed — paused behind the delivery work |
 | [`moe-cpu-overlap/`](moe-cpu-overlap/README.md) | genuine CPU/GPU overlap for the expert misses (the Strata shape) | OPEN / scoping (TODO #36) — **work in flight**: the note refutes the earlier "cannot be done" verdict for the interleaved shape and sets out the pipeline to try |
-| [`ngram-mod-host-experts/`](ngram-mod-host-experts/README.md) | `ngram-mod` + `draft-mtp-adaptive` roughly halves decode when the MoE experts are host-resident (`-ncmoe`/`-cmoe`, expert cache active); plain `draft-mtp-adaptive` restores the expected rate | **OPEN (seeded 2026-10-14), scoping + measurement** |
+
+**Promoted (r123, 2026-10-24, block 09).**  `ngram-mod-host-experts/` left `wip/` for
+[`archive/work/ngram-mod-host-experts/`](../archive/work/ngram-mod-host-experts/EVIDENCE-2026-10-24.md):
+the "`ngram-mod` halves decode with host-resident experts" report (TODO #59) is the **expert-cache verify
+band** — the draftless n-gram speculators default to a 48-64 token draft, so every verify batch was wider
+than the 16-token RDNA4 band and the routed experts streamed from host memory on every step.  `common` now
+clamps an enabled n-gram speculator to `band - 1` (block 09, kill switch
+`LLAMA_SPEC_NGRAM_MOD_BAND_CLAMP=0`); the documented combo went 73.9 -> 168.3 t/s on the measured cell.
 
 **Promoted (r121, 2026-10-23, blocks 11 + 10).**  `qwen4exp-dflash2/` left `wip/` for
 [`archive/work/qwen4exp-dflash2/`](../archive/work/qwen4exp-dflash2/RESOLUTION.md): the qwen4exp graph now

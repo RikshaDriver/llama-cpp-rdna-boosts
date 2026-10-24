@@ -452,6 +452,26 @@ whatever VRAM is left.
   session's routed mass, the global-top-f static bound at the same slot count, and (already there)
   expert MiB/token.  `moe_cache_observe` (dead, superseded by `moe_cache_heat_observe`) is removed.  No
   numerics change: same-seed text is byte-identical.  `WORKLOG.md` 261022.005.
+* **The verify-width band clamp (r123, TODO #59).**  The arena serves a routed `MUL_MAT_ID` from VRAM only
+  up to its decode/verify band (`moe_cache_max_tok_dev()`; 16 tokens on RDNA4, 8 on RDNA3/NVIDIA); above it
+  `moe_cache_update_host()` returns false and the routed experts are streamed from the pinned host master on
+  every step.  A speculative verify batch is `n_draft + 1` rows, and while `--spec-draft-n-max` is bounded to
+  15 (a 16-row verify) by `LLAMA_SPEC_DRAFT_N_MAX_CLAMP`, the **draftless** n-gram speculators had no width
+  bound at all (`ngram_mod.n_max` 64 / `n_min` 48 by default, the ngram-map family's `size_m` 48) — so the
+  README's own `draft-mtp-adaptive,ngram-mod` pick put every ngram step outside the band on a host-expert
+  config and lost 2.3x decode.  This block adds the `moe_cache_band` device query (appended to
+  `ggml_backend_device_i`; CUDA answers `moe_cache_enabled() ? moe_cache_max_tok_dev(device) : 0`),
+  `llama_model_moe_cache_band()` (the smallest band over the host-expert devices), and
+  `common_speculative_clamp_ngram_n_max()`: `common_init_from_params` clamps an **enabled** n-gram
+  speculator to `band - 1` after the model load (the preflight's decision is known there), lowers `n_min`
+  with it, and refreshes `cparams.n_rs_batch` so the slab's narrow verify floor and the GDN rollback bound
+  see the capped depth (the uncapped default also cost ~5 GiB of arena: 32938 -> 27814 MiB).  Clamped vs
+  unclamped, 2x R9700 Flash-Next IQ4_NL `-sm tensor -ncmoe 36`, `prompts/recall.txt`, `-n 2000`: 168.3 vs
+  73.9 t/s (`draft-mtp-adaptive,ngram-mod`), 160.2 vs 74.1 (`draft-mtp,ngram-mod`); the cliff is one row
+  wide (159.2 t/s at a 16-row verify, 55.0 at 17).  **Not** applied to a device-resident model or the CPU
+  expert path (band 0): there the wide draft is the win (378.7 vs 144.7 t/s).  `LLAMA_SPEC_NGRAM_MOD_BAND_CLAMP=0`
+  restores the uncapped draft; a `draft.n_max` above the band warns instead of clamping (the 15 bound is a
+  correctness one).  `GREEDY-PURITY.md` §50, `ENVIRONMENT.md` §3, `WORKLOG.md` 261024.002.
 * **Whole-table identity placement (r117, TODO #93).**  A table takes the decode band's identity fast
   path only at its FULL slot count (`t.slots == t.n_experts`); one slot short is not "almost" — it takes
   the remap path and pays the per-token routing readback like a table with no arena at all.  Each table's
@@ -661,14 +681,16 @@ whatever VRAM is left.
 `GGML_COMPUTE_BUFFER_MARGIN_PCT`/`_CHUNK_MIB`, `GGML_CUDA_ASYNC_INPUT`, `GGML_SCHED_STAGE*`,
 `GGML_STAGE_*`, `LLAMA_LOAD_RELEASE_MMAP`, `LLAMA_DROP_COMPUTE_BUFFERS`, `LLAMA_DROP_EXTRA_RESERVE_MIB`,
 `GGML_CPU_MOE_OFFLOAD_THREADS`, `GGML_CPU_DISABLE_TINY_GRAPH_SINGLE_THREAD`, `LLAMA_TENSOR_HOST_BUFT`,
-`GGML_HIP_GRAPH_FORCE_UPDATE`, `GGML_META_SS_VERIFY`, `GGML_META_SS_SCRATCH`, `GGML_SCHED_MOE_DUP_SPLIT`.
+`GGML_HIP_GRAPH_FORCE_UPDATE`, `GGML_META_SS_VERIFY`, `GGML_META_SS_SCRATCH`, `GGML_SCHED_MOE_DUP_SPLIT`,
+`LLAMA_SPEC_NGRAM_MOD_BAND_CLAMP`.
 
 **Invariants.**  Host experts are always pinned; a partially failed cache **falls back wholesale**; no
 arena is freed while a kernel carrying its address is in flight; the slab is **MoE-only** (armed solely by
 the MoE preflight — never enable it for a dense model); a `-ncmoe` host table is split per device, not
 mirrored (`GGML_META_SPLIT_COPY=1`); a staged expert table gets **one consumer per split** (a second
 `MUL_MAT_ID` consumer of the same weights starts its own split, because the cache arena can only hold one
-routing's slots — `GREEDY-PURITY.md` §43).
+routing's slots — `GREEDY-PURITY.md` §43); a verify batch must stay inside the arena band when the arena
+serves the host experts (`GREEDY-PURITY.md` §50).
 
 **Gates.**  Host-expert coherence (`-ncmoe`/`-cmoe`, and `cache-on == cache-off` text), `test-llama-archs`,
 `MOE_EXPERT_CACHE_VALIDATE=1`, `scripts/check-gpu-faults.sh` on the run's journal + log.

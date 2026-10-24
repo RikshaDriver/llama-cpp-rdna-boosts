@@ -1,0 +1,110 @@
+
+
+Loading model... |0.00.018.485 I cmn  common_param: common_params_print_info: verbosity = 3 (adjust with the `-lv N` CLI arg)
+0.00.018.757 W srv  llama_server: security: no API key is set and CORS allows all origins (see https://github.com/ggml-org/llama.cpp/pull/25655)
+0.00.020.550 I srv    load_model: loading model '/llm/models/Qwen3.8/Flash-Next/IQ4_NL/Qwen3.8-Flash-Next-IQ4_NL-PROJFIX-00001-of-00009.gguf'
+0.00.050.280 I common_draft_reserve_estimate: draft reserve estimate for '/llm/models/Qwen3.8/Flash-Next/IQ4_NL/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf': weights 2647 + kv 70 (1 x 1 layers, 2 kv heads, 256/256 head dims, indexer yes) + compute 512 + slack 192 = 3421 MiB (n_ctx 16384)
+-\|/-\|/-\|/0.01.265.060 W operator(): the extra model cannot be measured during fitting (failed to create llama_context from model); reserving the DERIVED 3421 MiB as a per-device-split reserve instead -- this is the MTP case, which needs ctx_other while fitting has no target context yet
+0.01.265.094 W common_fit_params: failed to fit params to free device memory: n_gpu_layers already set by user to 99, abort
+-\0.01.437.591 W llama_model_loader: tensor overrides to CPU are used with mmap enabled - consider using --load-mode none for better performance
+|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-0.21.376.736 W common_init_result: slab draft reserve derived from '/llm/models/Qwen3.8/Flash-Next/IQ4_NL/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf': draft CONTEXT 774 MiB (kv 70 + compute 512 + slack 192); the draft's 2647 MiB of weights are loaded BEFORE this slab and are measured from the free VRAM instead of reserved.  The reserve is headroom + this.
+0.21.376.756 I common_speculative_load_model: loading draft model '/llm/models/Qwen3.8/Flash-Next/IQ4_NL/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf'
+\|/-\|/-\|/-\|/0.22.837.890 W resolve_fused_ops: derived kq mask flash attention was not used in the probe graph, set to disabled
+0.22.837.892 W resolve_fused_ops: derived kq mask flash attention not supported, set to disabled
+0.22.837.893 W resolve_fused_ops: note: the derived kq mask is implemented by the MMA and the tile flash attention kernels; it is disabled here because neither served this graph (or the node did not reach the GPU)
+0.22.854.272 W SLAB_INIT dev=0 free=20.54 GiB reserve=1.63 GiB headroom=0.88 GiB aux=0.76 GiB size(VA)=19.62 GiB mapped=18.88 GiB boundary=1.75 GiB va_spare=0.75 GiB chunk=64.0 MiB ring_req=2.11 GiB
+0.22.854.276 W ggml_cuda_slab_init_locked: device 0: slab 18.88 GiB (chunk 64.0 MiB): work 1.75 GiB + arena 17.12 GiB (1.63 GiB reserve, 0.75 GiB VA spare for `ggml_cuda_slab_extend`; ring region pending (above the narrow floor))
+0.22.860.931 W SLAB_INIT dev=1 free=19.51 GiB reserve=1.63 GiB headroom=0.88 GiB aux=0.76 GiB size(VA)=18.62 GiB mapped=17.88 GiB boundary=1.75 GiB va_spare=0.75 GiB chunk=64.0 MiB ring_req=2.11 GiB
+0.22.860.934 W ggml_cuda_slab_init_locked: device 1: slab 17.88 GiB (chunk 64.0 MiB): work 1.75 GiB + arena 16.12 GiB (1.63 GiB reserve, 0.75 GiB VA spare for `ggml_cuda_slab_extend`; ring region pending (above the narrow floor))
+0.22.865.100 I cmn          init: llama threadpool init, n_threads = 8
+-\|/-\|/-0.23.812.485 W alloc_all_locked: MoE expert cache (auto): arena 33561.7 MiB of 48600.0 MiB host experts (69.1% residency).  MOE_EXPERT_CACHE_MIB=0 disables the cache; set a positive value to size it explicitly.
+\|/-\|/-\|/-\|/-\|/-\|/0.26.056.737 W ggml_cuda_slab_narrow2_commit_locked: device 0: narrow-2 (draft compute) pinned at [19.12, 19.62] GiB (0.50 GiB, unmapped VA spare); the arena now tops out at 17.12 GiB
+0.26.057.189 W ggml_cuda_slab_narrow2_commit_locked: device 1: narrow-2 (draft compute) pinned at [18.12, 18.62] GiB (0.50 GiB, unmapped VA spare); the arena now tops out at 16.12 GiB
+0.26.057.537 I srv    load_model: initializing, n_slots = 1, n_ctx_slot = 16384, kv_unified = 'false'
+0.26.060.789 W set_sampler: backend sampling not supported with SPLIT_MODE_TENSOR; using CPU
+0.26.060.790 W spec common_specu: backend offload failed for seq_id=0; using CPU sampler
+0.26.078.602 W srv          init: chat template supports preserving reasoning, it is enabled by default (may use more tokens, disable via --no-reasoning-preserve)
+0.26.078.624 I srv  llama_server: model loaded
+0.26.078.625 I srv  llama_server: listening on http://127.0.0.1:40595
+ 0.26.117.750 I slot get_availabl: id  0 | task -1 | selected slot by LRU, t_last = -1
+0.26.117.791 I slot launch_slot_: id  0 | task 0 | processing task, is_child = 0
+0.28.156.379 W moe_cache_evict_slab_range: evicted 3184.0 MiB of arena tables from the taken slab chunks (arena now 29766.1 MiB)
+0.28.156.388 W moe_cache_evict_slab_range: evicted 3794.0 MiB of arena tables from the taken slab chunks (arena now 25984.3 MiB)
+0.28.273.572 W moe_cache_evict_slab_range: evicted 122.0 MiB of arena tables from the taken slab chunks (arena now 25862.3 MiB)
+0.28.276.637 W moe_cache_evict_slab_range: evicted 122.0 MiB of arena tables from the taken slab chunks (arena now 25740.4 MiB)
+0.30.531.584 I slot print_timing: id  0 | task 0 | prompt processing, n_tokens =    558, progress = 0.99, t =   4.38 s / 127.50 tokens per second
+0.30.635.122 W moe_cache_rearm: re-armed 54 stood-down expert-cache tables after a compute-buffer drop (arena now 32937.9 MiB)
+
+
+▄▄ ▄▄
+██ ██
+██ ██  ▀▀█▄ ███▄███▄  ▀▀█▄    ▄████ ████▄ ████▄
+██ ██ ▄█▀██ ██ ██ ██ ▄█▀██    ██    ██ ██ ██ ██
+██ ██ ▀█▄██ ██ ██ ██ ▀█▄██ ██ ▀████ ████▀ ████▀
+                                    ██    ██
+                                    ▀▀    ▀▀
+
+build      : b11585-960c1ddc6
+model      : /llm/models/Qwen3.8/Flash-Next/IQ4_NL/Qwen3.8-Flash-Next-IQ4_NL-PROJFIX-00001-of-00009.gguf
+ftype      : IQ4_NL - 4.5 bpw
+modalities : text
+
+available commands:
+  /exit or Ctrl+C     stop or exit
+  /regen              regenerate the last response
+  /clear              clear the chat history
+  /read <file>        add a text file
+  /glob <pattern>     add text files using globbing pattern
+
+
+
+> Reproduce the passage below exactly, character for character, including every punctuation mark and line
+break. Do not summarise it, do not explain it, and do not stop before the end. Start your reply with the
+word "---" and nothing else.
+
+---
+
+The Kestrel Valley radio observatory was commissioned on 14 March 1971, at a cost of 6,204,881 pounds,
+and its first director was Dr Eleanor Voss, who held the post for nineteen years. The primary dish
+measures 76.4 metres across and weighs 3,180 tonnes, a ... (truncated)
+---
+
+The Kestrel Valley radio observatory was commissioned on 14 March 1971, at a cost of 6,204,881 pounds,
+and its first director was Dr Eleanor Voss, who held the post for nineteen years. The primary dish
+measures 76.4 metres across and weighs 3,180 tonnes, and it sits on a turntable that can complete a full
+rotation in 11 minutes and 40 seconds. The site records 214 clear nights per year on average, which is
+why it was chosen over the two rival locations at Pendle Ridge and Marrow's Cross.
+
+In 1983 the receivers were upgraded to a 22.8 GHz front end, and the correlator was rebuilt around
+fourteen custom boards, each carrying 512 megabytes of delay memory. The upgrade cost 1,977,450 pounds
+and reduced the minimum detectable flux by a factor of 4.6. A second upgrade in 1996 added a 43.1 GHz
+channel and a hydrogen maser frequency standard, accurate to one part in 10^14 over a single day.
+
+The0.33.775.120 I slot print_timing: id  0 | task 0 | n_gen =    270, tg =  89.64 t/s, tg_3s =  89.98 t/s
+ observatory's most cited result is the 1988 survey of the Cygnus arm, which catalogued 8,431 sources
+in 617 hours of integration time. The survey's principal author was Dr Marcus Oyelaran, working with a
+team of eleven. A follow-up survey in 2004 re-observed 2,209 of those sources and found that 38 had
+faded below the detection threshold, while 214 had brightened by more than a factor of two.
+
+The decommissioning review of 2011 recommended a further decade of operation, subject to three
+conditions: the replacement of the azimuth bearings, a new cryogenic system for the 22.8 GHz channel,
+and an annual contribution of 240,000 pounds from the consortium. All three conditions were met by the
+autumn of 2012, and the bearings were finally replaced during a nine-week shutdown that began on
+2 July 2013. The observatory remains in operation today.0.35.914.428 I slot print_timing: id  0 | task 0 | prompt eval time =    4656.52 ms /   562 tokens (    8.29 ms per token,   120.69 tokens per second)
+0.35.914.430 I slot print_timing: id  0 | task 0 |        eval time =    5140.09 ms /   498 tokens (   10.34 ms per token,    96.69 tokens per second)
+0.35.914.431 I slot print_timing: id  0 | task 0 |       total time =    9796.61 ms /  1060 tokens
+0.35.914.432 I slot print_timing: id  0 | task 0 |    graphs reused =         98
+0.35.914.433 I slot print_timing: id  0 | task 0 |   graph reallocs =          3    /     1        (same size) / (changed size)
+0.35.914.436 I slot print_timing: id  0 | task 0 | draft acceptance = 0.99496 (  395 accepted /   397 generated), mean len =  4.87
+0.35.914.452 I slot print_timing: id  0 | task 0 |   MoE arena = 0.9774 (1061936 hit / 1086540 reaches this turn), arena 32937.9 MiB
+0.35.914.488 I slot      release: id  0 | task 0 | stop processing: n_tokens = 1059, truncated = 0
+
+
+---
+0.35.916.097 I srv    operator(): operator(): cleaning up before exit...
+0.36.073.000 W ~llama_context:        CPU compute buffer size of   0.2568 MiB, does not match expectation of   0.2519 MiB
+
+[ Prompt: 120.7 t/s | Generation: 96.7 t/s ]
+
+
+Exiting...

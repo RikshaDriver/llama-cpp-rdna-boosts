@@ -111,6 +111,7 @@ numbers are **stable** — dozens of docs cite them — so they are never renumb
 | **§47** | an exact F32 GEMM in a different summation order is a family switch too; own the path in-code and judge it against the same-kernel control (12/12 fresh starts determinism, +4.2 % prefill) | fix (r104, TODO #82 closed; default extended to RDNA3_5 in r105) |
 | **§48** | a draft-side vocabulary restriction cannot change an accepted token, but the verify *schedule* can change the text: gate it inside `n_max <= 7` | doctrine (r107, block 13) |
 | **§49** | a fused chain's launch geometry comes from the *flat* projection, never from a consumer's `[…, n_seq_tokens, n_seqs]` view: gate the multi-sequence batch, not just `W = 1..8` single-stream | fix (r108, issue #204) |
+| **§50** | a draft length is a verify width *and* a memory-tier parameter: with host experts served by the arena, a verify batch wider than the cache band leaves VRAM and streams the routed experts from host on every step | doctrine (r123, TODO #59 closed) |
 
 ---
 
@@ -1196,3 +1197,51 @@ rows** on the r107 build, **PASS (11/11 fused, 0 failed)** on r108.  Single-stre
 35B-A3B greedy text identical pre/post, and the prefill-logit A/B against the pre-fix build measures mean
 KLD **0.000000** at `-ub 8` and `-ub 512` (27B Q8_0) — mmvf is the decode/verify band only.  Full family
 sweep (7 switches × the models that fire each arm): every other arm was already multi-sequence-clean.
+
+## 50. A draft length is a verify width *and* a memory-tier parameter
+
+**Claim.**  On a config with host-resident MoE experts served by the expert-cache arena, a verify batch
+wider than the arena's decode/verify band leaves the arena **entirely**: `moe_cache_update_host()` returns
+false for `n_tok > MOE_EXPERT_CACHE_MAX_TOK` (`moe_cache_max_tok_dev()`; 16 tokens on RDNA4, 8 on
+RDNA3/NVIDIA), so the routed `MUL_MAT_ID` is served by the per-op upload path and its experts are streamed
+from the pinned host master on **every** step.  The transition is a cliff, not a slope, and it is one row
+wide.
+
+**Rule.**  Every speculator's draft length is a verify width (`n_tok = n_draft + 1`).  With the arena
+active, keep every draft **inside** the band, and never generalise a wide-draft throughput number from a
+run whose experts are not served through the arena:
+
+* `--spec-draft-n-max` is clamped to 15 by `LLAMA_SPEC_DRAFT_N_MAX_CLAMP` — a 16-row verify, i.e. exactly
+  the RDNA4 band (the bound itself is correctness: §27's `n_rs_batch`).
+* The **draftless** n-gram speculators had no width bound at all (`ngram-mod` `n_max` 64 / `n_min` 48 by
+  default), so `common` now clamps an enabled n-gram speculator to `band - 1` once the model (and the
+  cache preflight's decision) is known, lowering `n_min` with it and refreshing `cparams.n_rs_batch`
+  (r123, block 09; `LLAMA_SPEC_NGRAM_MOD_BAND_CLAMP=0` is the A/B).  A deep draft also cost ~5 GiB of
+  arena, because the slab's narrow verify floor is measured at `n_rs_batch` (32938 -> 27814 MiB).
+* A model with **no active arena** — fully device-resident, or the CPU expert path
+  (`MOE_EXPERT_CACHE_MIB=0`) — reports no band and is never clamped.
+
+**Evidence (gfx1201, 2x R9700, Flash-Next IQ4_NL + MTP head, `-sm tensor -ncmoe 36`, `-c 16384`,
+`prompts/recall.txt`, `-n 2000 --temp 0 --seed 42`, `draft-mtp,ngram-mod` with the ngram cap swept).**
+
+| `--spec-ngram-mod-n-max` | widest verify | gen t/s | arena hit | counted cache `reaches` |
+|---:|---:|---:|---:|---:|
+| 12 | 13 | 154.8 | 0.977 | 1086540 |
+| **15** | **16 (in band)** | **159.2** | 0.978 | 1093862 |
+| **16** | **17** | **55.0** | 0.898 | 129660 |
+| 32 | 33 | 48.1 | 0.893 | 103740 |
+| default (64/48) | 65 | 74.1 | 0.893 | 103740 |
+
+The README's own `draft-mtp-adaptive,ngram-mod --spec-draft-n-max 9` recommendation measured **73.9 ->
+168.3 t/s** with the clamp (+128 %), and the plain-MTP baseline is untouched (101.4 -> 101.0 t/s, no clamp).
+
+**Why the same combination is fine elsewhere (do not "fix" it globally).**  Device-resident (3 GPU,
+`-ncmoe 0`): MTP n3 144.7 -> ngram default **378.7** vs 244.6 clamped — the wide draft is the product.
+CPU-compute experts (`MOE_EXPERT_CACHE_MIB=0`): 38.5 -> 67.6 (wide) vs 52.2 clamps — the weights are
+local, so extra rows cost compute and the wide batch amortises the per-token overhead.  That is upstream's
+shape, which is why a reporter on a 12 GB card with `-ncmoe 24` sees `ngram-mod` win on a rewrite workload
+(issue #214) while the same flags on an arena config halve decode.  Purity is unaffected in every arm
+(the clamp changes the verify *schedule*, §48): `plain` / `draft-mtp n3` / ngram hand-capped /
+ngram auto-clamped all hash `9d914f47aebb` with `ROCBLAS_USE_HIPBLASLT=0` (§44).
+
+Record: `archive/work/ngram-mod-host-experts/EVIDENCE-2026-10-24.md`.

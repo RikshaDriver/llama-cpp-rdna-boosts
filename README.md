@@ -281,17 +281,31 @@ code/prose-neutral with the same recall win.  The small reasoning cost is the pr
 `n-max 9`; a workload with no verbatim recall is marginally better served by plain
 `draft-mtp-adaptive`.
 
-> **Do not combine `ngram-mod` with host-resident MoE experts.**  When MoE experts are partially or
-> fully host-resident (`-ncmoe`/`-cmoe`, i.e. the MoE expert cache or the pinned `ROCm_Host` path is
-> active), adding `ngram-mod` to `draft-mtp-adaptive` **roughly halves decode throughput**.  Dropping
-> `ngram-mod` and keeping plain `--spec-type draft-mtp-adaptive` restores the expected decode rate.
-> The adaptive controller is itself a good fallback for replayed/verbatim content: it drafts deeper
-> when the content is predictable, so it handles replay quickly (not as fast as `ngram-mod`, but far
-> ahead of a halved decode).  On a host-expert config, plain `--spec-type draft-mtp-adaptive` is
-> therefore the recommended pick.  The cause of the interaction is not yet understood; it is tracked
-> in [`wip/ngram-mod-host-experts/`](wip/ngram-mod-host-experts/README.md).  This applies only to
-> host-resident experts: on a fully device-resident model the combo above is still the best general
-> pick.
+> **With host-resident MoE experts (`-ncmoe`/`-cmoe`), keep every draft inside the expert cache's verify
+> band.**  A verify batch is `n_draft + 1` rows and the expert cache serves it from its VRAM arena only up to
+> its decode/verify band (16 tokens on RDNA4, 8 on RDNA3).  Above the band the routed experts are streamed
+> from host memory on **every** step, which on a host-expert config costs far more than the extra accepted
+> tokens buy — the interaction this README used to warn about.  This is now handled for you:
+>
+> * `--spec-draft-n-max` is clamped to 15 (a 16-row verify) by the delivery.
+> * The **draftless** n-gram speculators (`ngram-mod`, `ngram-simple`, `ngram-map-k*`), which default to a
+>   48-64 token draft, are clamped to the band automatically (r123, `LLAMA_SPEC_NGRAM_MOD_BAND_CLAMP=0`
+>   opts out).  Measured on 2× R9700 with Flash-Next IQ4_NL `-sm tensor -ncmoe 36`: the combo below goes
+>   **73.9 -> 168.3 t/s** and `draft-mtp,ngram-mod` **74.1 -> 160.2 t/s**.
+>
+> So `--spec-type draft-mtp-adaptive,ngram-mod --spec-ngram-mod-n-match 45 --spec-draft-n-max 9` remains a
+> good pick on a host-expert config; no extra flags are needed.  Two things it does **not** fix:
+>
+> * A model with **no active arena** (fully device-resident, or the CPU expert path
+>   `MOE_EXPERT_CACHE_MIB=0`) is never clamped — there the wide draft is the win (144.7 -> 378.7 t/s on the
+>   same model fully resident), so keep the defaults.
+> * If you deliberately set `--spec-ngram-mod-n-max` above the band (issue #214's `256`, for instance), it
+>   is clamped too; note that a naked `--spec-ngram-mod-n-max 15` **without** lowering
+>   `--spec-ngram-mod-n-min` (default 48) silently disables `ngram-mod` rather than shortening it.
+>
+> Mechanism and measurements: [`GREEDY-PURITY.md`](GREEDY-PURITY.md) §50,
+> [`ENVIRONMENT.md`](ENVIRONMENT.md) §3, and
+> [`archive/work/ngram-mod-host-experts/EVIDENCE-2026-10-24.md`](archive/work/ngram-mod-host-experts/EVIDENCE-2026-10-24.md).
 
 Guidance:
 
@@ -301,9 +315,10 @@ Guidance:
 * **`n_match`.**  Keep it `>= 40` **and an integer multiple of the cap** — `9/45`, `8/48`, `6/42`.
   Too short (`nm24`) makes ngram fire on incidental code repeats and lose code throughput; a
   non-multiple (e.g. `nm42` at cap 12) degrades acceptance.
-* **Host-resident experts.**  On a config with host-resident MoE experts (`-ncmoe`/`-cmoe`), skip
-  `ngram-mod` entirely (see the caveat above): the combination roughly halves decode, and plain
-  `--spec-type draft-mtp-adaptive` is the better pick.
+* **Host-resident experts.**  Use the combo above (it is clamped to the verify band automatically).  If
+  you run with the expert cache disabled (`MOE_EXPERT_CACHE_MIB=0`, the CPU expert path) or on RDNA3
+  (where the band is 8 tokens), a draft deeper than the band is a warning, not a clamp for the MTP family:
+  lower `--spec-draft-n-max` yourself if the decode rate disappoints.
 * The combo changes the draft strategy, so it is **opt-in** — the controller default stays plain
   `--spec-type draft-mtp-adaptive`.
 

@@ -12,7 +12,7 @@ Details never live here: they live in `AGENTS.md`, `patches/README.md`, `MANIFES
 still means the same subject after that item is closed and removed from this file.  New items append.
 
 **Current state:** the **14-block V2.1 set** (block 00 + blocks 01-13) at fork point **`097cf33d9`**,
-release **`v14-097cf33d9-r122`**.  `release.json` is the source of truth for the tip/tree and hashes; the
+release **`v14-097cf33d9-r123`**.  `release.json` is the source of truth for the tip/tree and hashes; the
 top of `WORKLOG.md` is the newest record.
 
 | # | subject | kind | status |
@@ -20,7 +20,6 @@ top of `WORKLOG.md` is the newest record.
 | **80** | Meta split-state cache: 30+ lookups per node per re-allocation | performance | parked (see the section at the end; the lever is the lookup COUNT, not the comparison) |
 | **79** | RDNA3_0 verify-band fusions: no multi-device measurement, and gfx1101/gfx1102 untested | platform validation | open (shipped default-on in r95; needs a 2+ card gfx1100 box).  `ssh fingon` is single-RDNA3 (`ROCm0`; its second rocm-smi entry is an iGPU and is not a HIP device), so it does **not** cover the multi-device arm — it validates single-GPU gfx1100 only.  gfx1101/gfx1102 still have no hardware |
 | **70** | harden the expert-cache re-arm / wide-aux growth against a starved arena | robustness | open |
-| **59** | `ngram-mod` + `draft-mtp-adaptive` halves decode with host-resident experts | performance | open (`wip/ngram-mod-host-experts/`) |
 | **36** | genuine CPU/GPU overlap for the MoE misses | performance | open, scoping (`wip/moe-cpu-overlap/`) |
 
 Accepted limitations that are deliberately **not** fixed are listed at the end — do not re-report them.
@@ -88,19 +87,6 @@ r86 in `WORKLOG.md` 261019.002; validation arm `MOE_EXPERT_CACHE_VALIDATE=1`.
 graph is now invalidated when the slab work boundary shrinks (block 10, `WORKLOG.md` 261020.004).  That
 covers the observed #187 fault; it does **not** discharge this item, because a re-arm can still change a
 table's arena placement under a graph that is not being dropped.  Keep #70 open.
-
-## 59. `ngram-mod` + `draft-mtp-adaptive` halves decode with host-resident MoE experts — PERFORMANCE
-
-
-Opened 2026-10-14; scoping.  With partially or fully host-resident MoE experts (`-ncmoe`/`-cmoe`, the
-expert cache or op-offload path active), the README's recommended
-`--spec-type draft-mtp-adaptive,ngram-mod` combo roughly **halves decode throughput**; dropping
-`ngram-mod` and using plain `draft-mtp-adaptive` restores the expected rate.  The combo is the measured
-best on a fully device-resident model, so the interaction is with the host-expert serve path.  Documented
-in the README "Recommended configuration" section.  Working home
-[`wip/ngram-mod-host-experts/`](wip/ngram-mod-host-experts/README.md) (hypotheses: verify width against the
-per-op host-expert upload, the MoE cache band and verify graph recapture, the staging-ring width; bisect
-plan in that README).
 
 ## 36. Genuine CPU/GPU overlap for the MoE misses (Strata's pipeline shape) — PERFORMANCE (scoping)
 

@@ -1,5 +1,60 @@
 # WORKLOG - dated delivery records
 
+## 261024.002 (r123) -- a draft length is a verify width: clamp the draftless n-gram speculators to the MoE expert cache's band (block 09, TODO #59 closed)
+
+**Change:** **block 09**.  `release.json` tip `ee842ded4`, tree `e91b266d4`; `scripts/validate-set.sh`
+green (fresh tarball, strict 14/14 `git am`, applied tree == recorded tree).  No kernel, no allocation and
+no default change outside a config whose host experts are served by the expert-cache arena.
+
+**The bug (TODO #59).**  `ngram-mod` + `draft-mtp-adaptive` "halves decode with host-resident experts".
+Root cause: the expert cache serves a routed `MUL_MAT_ID` from its VRAM arena only up to its decode/verify
+band (`moe_cache_max_tok_dev()`; **16 tokens on RDNA4**, 8 on RDNA3/NVIDIA).  Above it
+`moe_cache_update_host()` returns false and the routed experts are streamed from the pinned host master on
+**every** verify step.  A verify batch is `n_draft + 1` rows: `--spec-draft-n-max` is already bounded to 15
+(a 16-row verify) by `LLAMA_SPEC_DRAFT_N_MAX_CLAMP`, but the **draftless** n-gram speculators had no width
+bound at all — `ngram_mod.n_max` defaults to **64** with `n_min 48`, and the ngram-map family's `size_m` to
+48 — so the README's own recommended combo put every ngram step outside the band.  It is a cliff, not a
+slope: on 2x R9700 / Flash-Next IQ4_NL `-sm tensor -ncmoe 36` (`prompts/recall.txt`, `-n 2000 --temp 0
+--seed 42`) 159.2 t/s at a 16-row verify, **55.0 t/s at 17** (repeat 55.2), 48.1 at 33; the arena hit rate
+drops 0.978 -> 0.898 and the cache's counted `reaches` collapse 1086540 -> 129660 (wide steps never reach
+the arena).  A deep draft also cost ~5 GiB of arena (the slab's narrow verify floor is measured at
+`n_rs_batch`): 32938 -> 27814 MiB.  Measured on the documented pick: `draft-mtp-adaptive,ngram-mod
+--spec-draft-n-max 9 --spec-ngram-mod-n-match 45` **73.9 t/s** uncapped vs **168.3 t/s** clamped (+128 %);
+`draft-mtp,ngram-mod` 74.1 -> 160.2.
+
+**The fix.**  A new `moe_cache_band` device query (appended to `ggml_backend_device_i`; CUDA answers
+`moe_cache_enabled() ? moe_cache_max_tok_dev(device) : 0`), `llama_model_moe_cache_band()` (the smallest band
+over the model's host-expert devices), and `common_speculative_clamp_ngram_n_max()`:
+`common_init_from_params` clamps an **enabled** n-gram speculator to `band - 1` after the model load (where
+the cache preflight's decision is known), lowers `n_min` with it (ngram-mod discards a draft shorter than
+`n_min`, so a naked `n_max` clamp would silently disable it) and refreshes `cparams.n_rs_batch`.  Kill
+switch `LLAMA_SPEC_NGRAM_MOD_BAND_CLAMP=0` (reproduces 74.1 t/s exactly).  A `draft.n_max` above the band
+warns instead of clamping — the 15 bound is a correctness one (`GREEDY-PURITY.md` §27) and equals the RDNA4
+band.
+
+**Why not global.**  Device-resident (3 GPU, `-ncmoe 0`): MTP n3 144.7 -> ngram default **378.7** t/s vs
+244.6 clamped — the wide draft is the product.  CPU-compute experts (`MOE_EXPERT_CACHE_MIB=0`): 38.5 ->
+67.6 (wide) vs 52.2 capped — the weights are local, so extra rows buy amortisation; that is upstream's
+shape and why the issue-#214 reporter (12 GB card, `-ncmoe 24`) sees `ngram-mod` win on a rewrite.  Both
+report band 0 and are never clamped (verified: 380.2 and 68.1 t/s, no clamp line).
+
+**Gates.**  Text purity with `ROCBLAS_USE_HIPBLASLT=0` (`GREEDY-PURITY.md` §44, and the reason the first
+cross-run comparison looked like a text change): on the host-expert cell `plain` / `draft-mtp n3` /
+ngram hand-capped at 15 / ngram **auto**-clamped all hash **`9d914f47aebb`** (1793 chars), identical to the
+pre-amend build; the arm without the env var differs run-to-run as documented.  No prefill kernel or
+default-on approximate path is touched, so the prefill-logit gate does not apply; the MTP controller path is
+untouched by construction (the clamp only fires for an enabled n-gram type, and the MTP-only arms log no
+clamp).  `GREEDY-PURITY.md` §50 added; `README.md` recommended-configuration rewritten;
+`ENVIRONMENT.md` §3 catalogues the kill switch; `patches/README.md` (block 09) updated.
+
+**Campaign.**  `archive/work/ngram-mod-host-experts/` (README, evidence tables, the `run-arm.sh` harness and
+its logs).  TODO **#59 closed**.  Upstream (CPU-compute host experts) has no such cliff, so no `upstream/`
+candidate.
+
+**Pending:** the personal-fork `rdna-boosts` branch refresh, the tag and the container images (the
+release-time steps) are **not** done yet.
+
+
 ## 261024.001 (r122) -- the loader honours `--lazy-mode off` under `--load-mode mmap`, and the `-sm tensor` load uses the chunked async ring (block 00); 4 MiB staging slots
 
 **Shipped:** `v14-097cf33d9-r122` (**block 00**; the Meta uploader edits the block-09 Meta path but is

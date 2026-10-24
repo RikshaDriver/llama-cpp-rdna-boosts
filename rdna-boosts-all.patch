@@ -152,7 +152,7 @@ index 6bc4a84e2..9168d9b3f 100644
          {"--spec-synth-len"}, "L",
          "target mean synthetic acceptance length, including the target token (benchmarking only)",
 diff --git a/common/common.cpp b/common/common.cpp
-index 9d2578424..8d6cb557c 100644
+index 9d2578424..3095b84c0 100644
 --- a/common/common.cpp
 +++ b/common/common.cpp
 @@ -7,6 +7,7 @@
@@ -235,7 +235,15 @@ index 9d2578424..8d6cb557c 100644
          };
  
          common_fit_params(params.model.path.c_str(), &mparams, &cparams,
-@@ -1367,7 +1394,110 @@ common_init_result::common_init_result(common_params & params, bool model_only)
+@@ -1280,7 +1307,6 @@ common_init_result::common_init_result(common_params & params, bool model_only)
+     }
+ 
+     pimpl->model.reset(model);
+-
+     if (model_only) {
+         return;
+     }
+@@ -1367,7 +1393,151 @@ common_init_result::common_init_result(common_params & params, bool model_only)
          cparams.n_samplers = pimpl->samplers_seq_config.size();
      }
  
@@ -341,12 +349,53 @@ index 9d2578424..8d6cb557c 100644
 +        }
 +    }
 +
++
++    // TODO #59: bound the DRAFTLESS (n-gram) draft length by the MoE expert cache's verify band.
++    //
++    // `ngram-mod` (and the ngram-map family) draft as far as their n-gram match reaches -- 48..64 tokens by
++    // default, `--spec-ngram-mod-n-max` verbatim -- and every one of those tokens is a row of the verify
++    // batch.  The expert cache serves a routed `MUL_MAT_ID` from its arena only up to its decode/verify band
++    // (`MOE_EXPERT_CACHE_MAX_TOK`: 16 tokens on RDNA4, 8 on RDNA3/NVIDIA); above it the op leaves the arena
++    // and the routed experts are streamed from the pinned host master on EVERY verify step.  Measured on
++    // 2x R9700 `-ncmoe 36` (Flash-Next IQ4_NL, `prompts/recall.txt`, `-n 2000`): 159.2 t/s with a 16-row
++    // verify vs 55.0 t/s at 17 rows, and the README's `draft-mtp-adaptive,ngram-mod` recommendation
++    // 73.9 -> 168.3 t/s with the clamp.  The MTP/draft family is already bounded to 15 (i.e. a 16-row
++    // verify) by `LLAMA_SPEC_DRAFT_N_MAX_CLAMP` above.
++    //
++    // The band is only known once the model is loaded (the expert-cache preflight decides there whether the
++    // cache is active at all), so the clamp lands here and refreshes `cparams.n_rs_batch` -- the width the
++    // slab's narrow verify floor and the chunked-GDN rollback bound are computed from.  A device-resident
++    // model, or one whose host experts are computed on the CPU, reports no band and is never clamped: there
++    // the wide draft is the win (144.7 -> 378.7 t/s measured on the same model fully resident).
++    // LLAMA_SPEC_NGRAM_MOD_BAND_CLAMP=0 keeps the uncapped draft (A/B and bisect only).
++    if (const int moe_band = llama_model_moe_cache_band(model); moe_band > 1) {
++        static const bool band_clamp_enabled = []() {
++            const char * env = getenv("LLAMA_SPEC_NGRAM_MOD_BAND_CLAMP");
++            return env == nullptr || atoi(env) != 0;
++        }();
++        if (band_clamp_enabled) {
++            if (common_speculative_clamp_ngram_n_max(&params.speculative, moe_band - 1)) {
++                cparams.n_rs_batch = std::max(1, common_speculative_n_max(&params.speculative) + 1);
++            }
++        }
++        // The draft-based speculators (MTP / MTP-adaptive / draft-simple / eagle3) are bounded to 15 rather
++        // than to the band: that bound is a correctness one (the recurrent rollback snapshot set), and on
++        // RDNA4 the band happens to be 16.  On a part whose band is narrower (8 on RDNA3) a deep draft is
++        // the same performance trap, so say so once and leave the choice to the user.
++        if (params.speculative.has_aux() && params.speculative.draft.n_max > moe_band - 1) {
++            LOG_WRN("--spec-draft-n-max %d is wider than this device's MoE expert-cache verify band "
++                    "(%d tokens, i.e. n_max <= %d): with host-resident experts served through the arena, a "
++                    "deeper verify batch streams the routed experts from host memory on every step.\n",
++                    params.speculative.draft.n_max, moe_band, moe_band - 1);
++        }
++    }
++
      llama_context * lctx = llama_init_from_model(model, cparams);
 +    llama_model_set_embeddings_layer_inp_preset(model, nullptr, 0); // only this context: not an MTP draft context made later
      if (lctx == NULL) {
          COM_ERR("failed to create context with model '%s'\n", params.model.path.c_str());
          return;
-@@ -1384,6 +1514,14 @@ llama_model * common_init_result::model() {
+@@ -1384,6 +1554,14 @@ llama_model * common_init_result::model() {
      return pimpl->model.get();
  }
  
@@ -361,7 +410,7 @@ index 9d2578424..8d6cb557c 100644
  llama_context * common_init_result::context() {
      return pimpl->context.get();
  }
-@@ -1413,8 +1551,109 @@ static void common_batch_set_zero_state(common_batch & batch, const llama_model
+@@ -1413,8 +1591,109 @@ static void common_batch_set_zero_state(common_batch & batch, const llama_model
      }
  }
  
@@ -473,7 +522,7 @@ index 9d2578424..8d6cb557c 100644
  
      llama_model * model = res->model();
      if (model == NULL) {
-@@ -1679,6 +1918,14 @@ struct llama_model_params common_model_params_to_llama(common_params & params) {
+@@ -1679,6 +1958,14 @@ struct llama_model_params common_model_params_to_llama(common_params & params) {
      mparams.split_mode      = params.split_mode;
      mparams.load_mode       = params.load_mode;
      mparams.lazy_mode = params.lazy_mode;
@@ -488,7 +537,7 @@ index 9d2578424..8d6cb557c 100644
      mparams.tensor_split    = params.tensor_split;
      mparams.check_tensors   = params.check_tensors;
      mparams.use_extra_bufts = !params.no_extra_bufts;
-@@ -1701,7 +1948,8 @@ struct llama_model_params common_model_params_to_llama(common_params & params) {
+@@ -1701,7 +1988,8 @@ struct llama_model_params common_model_params_to_llama(common_params & params) {
      mparams.progress_callback           = params.load_progress_callback;
      mparams.progress_callback_user_data = params.load_progress_callback_user_data;
      mparams.no_alloc                    = params.no_alloc;
@@ -498,7 +547,7 @@ index 9d2578424..8d6cb557c 100644
  
      return mparams;
  }
-@@ -1712,6 +1960,9 @@ struct llama_context_params common_context_params_to_llama(const common_params &
+@@ -1712,6 +2000,9 @@ struct llama_context_params common_context_params_to_llama(const common_params &
      cparams.n_ctx             = params.n_ctx;
      cparams.n_seq_max         = params.n_parallel;
      cparams.n_rs_seq          = params.speculative.need_n_rs_seq();
@@ -508,7 +557,7 @@ index 9d2578424..8d6cb557c 100644
      cparams.n_outputs_max     = std::max(params.n_outputs_max, 0);
      cparams.n_outputs_max_per_seq = std::max(params.n_outputs_max_per_seq, 0);
      cparams.n_batch           = params.n_batch;
-@@ -1738,6 +1989,7 @@ struct llama_context_params common_context_params_to_llama(const common_params &
+@@ -1738,6 +2029,7 @@ struct llama_context_params common_context_params_to_llama(const common_params &
      cparams.op_offload        = !params.no_op_offload;
      cparams.swa_full          = params.swa_full;
      cparams.kv_unified        = params.kv_unified;
@@ -1952,7 +2001,7 @@ index 000000000..1f8e8a6b5
 +    }
 +};
 diff --git a/common/speculative.cpp b/common/speculative.cpp
-index c5043a4a8..bd59a2733 100644
+index c5043a4a8..4eb3d2913 100644
 --- a/common/speculative.cpp
 +++ b/common/speculative.cpp
 @@ -9,6 +9,7 @@
@@ -2653,8 +2702,58 @@ index c5043a4a8..bd59a2733 100644
  // TODO: support the case of more than one speculative implementations having a state
  bool common_speculative_get_state(common_speculative * spec, llama_seq_id seq_id, std::vector<uint8_t> & data) {
      if (spec == nullptr) {
+@@ -3068,3 +3452,49 @@ void common_speculative_print_stats(const common_speculative * spec) {
+                 str_perf.c_str());
+     }
+ }
++
++bool common_speculative_clamp_ngram_n_max(common_params_speculative * spec, int32_t cap) {
++    if (spec == nullptr || cap <= 0) {
++        return false;
++    }
++
++    // Only touch a speculator that is actually enabled: an unused type's draft length is inert, and
++    // clamping it would emit a notice for a config that never drafts with it.
++    const auto enabled = [spec](common_speculative_type type) {
++        return std::find(spec->types.begin(), spec->types.end(), type) != spec->types.end();
++    };
++
++    bool clamped = false;
++
++    // ngram-mod: `n_max` is the draft length; `n_min` is the floor below which a draft is discarded
++    // (see `common_speculative_impl_ngram_mod::draft_one`), so clamping only `n_max` would leave the
++    // default `n_min 48` and silently turn the speculator off.
++    if (enabled(COMMON_SPECULATIVE_TYPE_NGRAM_MOD) && spec->ngram_mod.n_max > cap) {
++        SPC_WRN("ngram-mod: draft length %d -> %d (the MoE expert cache serves a verify batch of at most %d "
++                "tokens from its arena; a wider one streams the routed experts from host memory every step). "
++                "Set LLAMA_SPEC_NGRAM_MOD_BAND_CLAMP=0 to keep %d, or raise the band with "
++                "GGML_MOE_CACHE_MAX_TOK if the device supports it.\n",
++                spec->ngram_mod.n_max, cap, cap + 1, spec->ngram_mod.n_max);
++        spec->ngram_mod.n_max = cap;
++        if (spec->ngram_mod.n_min > spec->ngram_mod.n_max) {
++            spec->ngram_mod.n_min = spec->ngram_mod.n_max;
++        }
++        clamped = true;
++    }
++
++    // The ngram-map family's draft length is `size_m` (uint16_t, 48 by default).
++    const auto clamp_map = [cap, &clamped, &enabled](common_speculative_type type, const char * name,
++                                                     common_params_speculative_ngram_map & m) {
++        if (enabled(type) && (int32_t) m.size_m > cap) {
++            SPC_WRN("%s: draft length %u -> %d (MoE expert-cache verify band, see the ngram-mod note).\n",
++                    name, (unsigned) m.size_m, cap);
++            m.size_m = (uint16_t) cap;
++            clamped = true;
++        }
++    };
++    clamp_map(COMMON_SPECULATIVE_TYPE_NGRAM_SIMPLE,  "ngram-simple",  spec->ngram_simple);
++    clamp_map(COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K,   "ngram-map-k",   spec->ngram_map_k);
++    clamp_map(COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K4V, "ngram-map-k4v", spec->ngram_map_k4v);
++
++    return clamped;
++}
 diff --git a/common/speculative.h b/common/speculative.h
-index a59846829..df3604a3e 100644
+index a59846829..575e347b5 100644
 --- a/common/speculative.h
 +++ b/common/speculative.h
 @@ -89,12 +89,21 @@ void common_speculative_begin(common_speculative * spec, llama_seq_id seq_id, co
@@ -2679,7 +2778,30 @@ index a59846829..df3604a3e 100644
  // (optional) get/set internal state
  bool common_speculative_get_state(common_speculative * spec, llama_seq_id seq_id, std::vector<uint8_t> & data);
  void common_speculative_set_state(common_speculative * spec, llama_seq_id seq_id, const std::vector<uint8_t> & data);
-@@ -108,8 +117,17 @@ struct common_speculative_deleter {
+@@ -102,14 +111,40 @@ void common_speculative_set_state(common_speculative * spec, llama_seq_id seq_id
+ // print statistics about the speculative decoding
+ void common_speculative_print_stats(const common_speculative * spec);
+ 
++// TODO #59: clamp the draft length of every DRAFTLESS (n-gram) speculator to `cap` tokens, so a verify
++// batch (`n_draft + 1` rows) can stay inside the MoE expert cache's decode/verify band.
++//
++// `--spec-ngram-mod-n-max` and the ngram-map family's `size_m` are unbounded width controls (48..64 by
++// default); the MTP/draft family is already bounded to 15 by `LLAMA_SPEC_DRAFT_N_MAX_CLAMP`.  Above the
++// arena band the cache stops serving the routed `MUL_MAT_ID` from VRAM and the routed experts are
++// streamed from the pinned host master on every verify step, which on a host-expert config costs far
++// more than the extra accepted tokens buy (measured 2x R9700 `-ncmoe 36`, Flash-Next IQ4_NL, `-n 2000`:
++// 159.2 t/s at a 16-row verify vs 55.0 t/s at 17 rows).  `common_init_from_params` calls this with
++// `band - 1` when the target model's cache is active; a device-resident or CPU-expert config reports no
++// band and is never clamped (there the wide draft IS the win: 144.7 -> 378.7 t/s measured).
++//
++// `ngram-cache` has a fixed 8-token draft and no knob, so it is left alone.  `n_min` is lowered with
++// `n_max` (ngram-mod discards a draft shorter than `n_min`, so a naked `n_max` clamp would silently
++// disable it on the default `n_min 48`).  Returns true when anything was clamped.
++bool common_speculative_clamp_ngram_n_max(common_params_speculative * spec, int32_t cap);
++
+ struct common_speculative_deleter {
+     void operator()(common_speculative * s) { common_speculative_free(s); }
+ };
  
  typedef std::unique_ptr<common_speculative, common_speculative_deleter> common_speculative_ptr;
  
@@ -2698,7 +2820,7 @@ index a59846829..df3604a3e 100644
      ~common_speculative_init_result();
  
      llama_model   * model();
-@@ -122,4 +140,5 @@ private:
+@@ -122,4 +157,5 @@ private:
  
  using common_speculative_init_result_ptr = std::unique_ptr<common_speculative_init_result>;
  
@@ -2864,10 +2986,10 @@ index 81cce2e2a..b7ec31448 100644
  // returns false if using multiple buffers and a re-allocation is needed (call ggml_gallocr_reserve_n first to set the node buffers)
  GGML_API bool ggml_gallocr_alloc_graph(ggml_gallocr_t galloc, struct ggml_cgraph * graph);
 diff --git a/ggml/include/ggml-backend.h b/ggml/include/ggml-backend.h
-index 7a65d8121..436e1a905 100644
+index 7a65d8121..53ce09a97 100644
 --- a/ggml/include/ggml-backend.h
 +++ b/ggml/include/ggml-backend.h
-@@ -44,6 +44,87 @@ extern "C" {
+@@ -44,6 +44,94 @@ extern "C" {
      GGML_API bool                  ggml_backend_buft_is_host         (ggml_backend_buffer_type_t buft);
      GGML_API ggml_backend_dev_t    ggml_backend_buft_get_device      (ggml_backend_buffer_type_t buft);
  
@@ -2884,6 +3006,13 @@ index 7a65d8121..436e1a905 100644
 +    // WIP r42: aggregate the MoE expert cache arena's cumulative hit/miss counters (per-turn logging).
 +    // Returns false when the backend has no cache or it is disabled.
 +    GGML_API bool                  ggml_backend_dev_moe_cache_stats(ggml_backend_dev_t dev, int64_t * hits, int64_t * misses, int64_t * arena_bytes);
++
++    // TODO #59: the MoE expert cache's decode/verify band, in tokens: the widest routed `MUL_MAT_ID` batch
++    // the arena serves from VRAM on this device.  A batch wider than this leaves the arena entirely (the
++    // routed experts are then streamed from the host master), so a speculative verify batch
++    // (`n_draft + 1` rows) must stay within it.  Returns 0 when the backend has no cache or it is
++    // disabled (no band to respect).  Only meaningful after the preflight has decided.
++    GGML_API int                   ggml_backend_dev_moe_cache_band(ggml_backend_dev_t dev);
 +
 +    // OPEN 2 (TODO #42): re-arm the MoE expert cache arena after a compute-buffer drop returned the VRAM.
 +    // Called at the prefill -> decode transition, after the wide compute layout is released and the narrow
@@ -2955,7 +3084,7 @@ index 7a65d8121..436e1a905 100644
      //
      // Backend buffer
      //
-@@ -191,6 +272,20 @@ extern "C" {
+@@ -191,6 +279,20 @@ extern "C" {
      GGML_API ggml_backend_buffer_type_t    ggml_backend_dev_host_buffer_type(ggml_backend_dev_t device);
      GGML_API ggml_backend_buffer_t         ggml_backend_dev_buffer_from_host_ptr(ggml_backend_dev_t device, void * ptr, size_t size, size_t max_tensor_size);
  
@@ -2976,7 +3105,7 @@ index 7a65d8121..436e1a905 100644
      GGML_API bool                          ggml_backend_dev_supports_op(ggml_backend_dev_t device, const struct ggml_tensor * op);
      GGML_API bool                          ggml_backend_dev_supports_buft(ggml_backend_dev_t device, ggml_backend_buffer_type_t buft);
      GGML_API bool                          ggml_backend_dev_offload_op(ggml_backend_dev_t device, const struct ggml_tensor * op);
-@@ -342,6 +437,11 @@ extern "C" {
+@@ -342,6 +444,11 @@ extern "C" {
      GGML_API void                 ggml_backend_sched_reserve_size(ggml_backend_sched_t sched, struct ggml_cgraph * measure_graph, size_t * sizes);
      GGML_API bool                 ggml_backend_sched_reserve(ggml_backend_sched_t sched, struct ggml_cgraph * measure_graph); // returns success
  
@@ -2988,7 +3117,7 @@ index 7a65d8121..436e1a905 100644
      GGML_API int                  ggml_backend_sched_get_n_backends(ggml_backend_sched_t sched);
      GGML_API ggml_backend_t       ggml_backend_sched_get_backend(ggml_backend_sched_t sched, int i);
  
-@@ -430,6 +530,27 @@ extern "C" {
+@@ -430,6 +537,27 @@ extern "C" {
      GGML_API ggml_backend_dev_t ggml_backend_meta_device(
          ggml_backend_dev_t * devs, size_t n_devs, ggml_backend_meta_get_split_state_t get_split_state, void * get_split_state_ud);
  
@@ -3646,7 +3775,7 @@ index b0c067b49..89b85fbce 100644
          struct ggml_tensor * node = graph->nodes[i];
          struct node_alloc * node_alloc = &galloc->node_allocs[i];
 diff --git a/ggml/src/ggml-backend-impl.h b/ggml/src/ggml-backend-impl.h
-index dc7367dec..f8415dd8c 100644
+index dc7367dec..72139dd15 100644
 --- a/ggml/src/ggml-backend-impl.h
 +++ b/ggml/src/ggml-backend-impl.h
 @@ -30,6 +30,26 @@ extern "C" {
@@ -3812,7 +3941,7 @@ index dc7367dec..f8415dd8c 100644
      };
  
      struct ggml_backend {
-@@ -216,6 +349,110 @@ extern "C" {
+@@ -216,6 +349,118 @@ extern "C" {
          ggml_backend_event_t (*event_new)         (ggml_backend_dev_t dev);
          void                 (*event_free)        (ggml_backend_dev_t dev, ggml_backend_event_t event);
          void                 (*event_synchronize) (ggml_backend_dev_t dev, ggml_backend_event_t event);
@@ -3920,6 +4049,14 @@ index dc7367dec..f8415dd8c 100644
 +        // already initialize the fields above positionally -- inserting in the middle would alias their
 +        // entries.  Zero-initialized for backends that do not set it.
 +        ggml_backend_buffer_type_t (*moe_host_master_buft)(ggml_backend_dev_t dev);
++
++        // (optional) TODO #59: the MoE expert cache's decode/verify band in tokens (the widest routed
++        // `MUL_MAT_ID` batch the arena serves from VRAM), or 0 when the cache is disabled.  `common` clamps
++        // the draftless (n-gram) speculators' draft length to `band - 1` so a speculative verify batch never
++        // leaves the band.  APPENDED at the very end (not next to the other moe_cache fields) because
++        // several backends initialize the fields above positionally -- inserting in the middle would alias
++        // their entries.  Zero-initialized for backends that do not set it.
++        int (*moe_cache_band)(ggml_backend_dev_t dev);
      };
  
      struct ggml_backend_device {
@@ -6566,7 +6703,7 @@ index 86748b689..e76fb184a 100644
  
  bool ggml_backend_is_meta(ggml_backend_t backend) {
 diff --git a/ggml/src/ggml-backend.cpp b/ggml/src/ggml-backend.cpp
-index ffbcba366..928f09651 100644
+index ffbcba366..a1ba79cc0 100644
 --- a/ggml/src/ggml-backend.cpp
 +++ b/ggml/src/ggml-backend.cpp
 @@ -21,8 +21,21 @@
@@ -6629,7 +6766,7 @@ index ffbcba366..928f09651 100644
  size_t ggml_backend_buft_get_alloc_size(ggml_backend_buffer_type_t buft, const struct ggml_tensor * tensor) {
      GGML_ASSERT(buft);
      // get_alloc_size is optional, defaults to ggml_nbytes
-@@ -231,6 +275,188 @@ ggml_backend_dev_t ggml_backend_buft_get_device(ggml_backend_buffer_type_t buft)
+@@ -231,6 +275,196 @@ ggml_backend_dev_t ggml_backend_buft_get_device(ggml_backend_buffer_type_t buft)
      return buft->device;
  }
  
@@ -6653,6 +6790,14 @@ index ffbcba366..928f09651 100644
 +        return false;
 +    }
 +    return dev->iface.moe_cache_stats(dev, hits, misses, arena_bytes);
++}
++
++int ggml_backend_dev_moe_cache_band(ggml_backend_dev_t dev) {
++    // TODO #59: see ggml_backend_dev_moe_cache_stats.
++    if (dev == nullptr || dev->iface.moe_cache_band == nullptr) {
++        return 0;
++    }
++    return dev->iface.moe_cache_band(dev);
 +}
 +
 +bool ggml_backend_dev_moe_cache_rearm(ggml_backend_dev_t dev) {
@@ -6818,7 +6963,7 @@ index ffbcba366..928f09651 100644
  // backend buffer
  
  ggml_backend_buffer_t ggml_backend_buffer_init(
-@@ -567,7 +793,6 @@ void ggml_backend_synchronize(ggml_backend_t backend) {
+@@ -567,7 +801,6 @@ void ggml_backend_synchronize(ggml_backend_t backend) {
      if (backend->iface.synchronize == NULL) {
          return;
      }
@@ -6826,7 +6971,7 @@ index ffbcba366..928f09651 100644
      backend->iface.synchronize(backend);
  }
  
-@@ -923,6 +1148,11 @@ struct ggml_backend_sched_split {
+@@ -923,6 +1156,11 @@ struct ggml_backend_sched_split {
      struct ggml_cgraph graph;
  };
  
@@ -6838,7 +6983,7 @@ index ffbcba366..928f09651 100644
  struct ggml_backend_sched {
      bool is_reset; // true if the scheduler has been reset since the last graph split
      bool is_alloc;
-@@ -977,6 +1207,28 @@ struct ggml_backend_sched {
+@@ -977,6 +1215,28 @@ struct ggml_backend_sched {
  
      bool op_offload;
  
@@ -6867,7 +7012,7 @@ index ffbcba366..928f09651 100644
      int debug;
  
      // graph size of the current and the previous scheduling, used by the realloc callback and for debugging
-@@ -1066,6 +1318,19 @@ static char causes[GGML_DEFAULT_GRAPH_SIZE*16 + GGML_SCHED_MAX_SPLITS_DEBUG*GGML
+@@ -1066,6 +1326,19 @@ static char causes[GGML_DEFAULT_GRAPH_SIZE*16 + GGML_SCHED_MAX_SPLITS_DEBUG*GGML
  #endif
  
  // returns the backend that should be used for the node based on the current locations
@@ -6887,7 +7032,7 @@ index ffbcba366..928f09651 100644
  static int ggml_backend_sched_backend_id_from_cur(ggml_backend_sched_t sched, struct ggml_tensor * tensor) {
      // assign pre-allocated nodes to their backend
      int cur_backend_id = ggml_backend_sched_backend_from_buffer(sched, tensor, tensor);
-@@ -1106,6 +1371,15 @@ static int ggml_backend_sched_backend_id_from_cur(ggml_backend_sched_t sched, st
+@@ -1106,6 +1379,15 @@ static int ggml_backend_sched_backend_id_from_cur(ggml_backend_sched_t sched, st
      // skip FLASH_ATTN_EXT since the sinks tensor is too small to choose a based based on it
      allow = allow && tensor->op != GGML_OP_FLASH_ATTN_EXT;
  
@@ -6903,7 +7048,7 @@ index ffbcba366..928f09651 100644
      if (allow) {
          for (int i = 0; i < GGML_MAX_SRC; i++) {
              const struct ggml_tensor * src = tensor->src[i];
-@@ -1116,7 +1390,22 @@ static int ggml_backend_sched_backend_id_from_cur(ggml_backend_sched_t sched, st
+@@ -1116,7 +1398,22 @@ static int ggml_backend_sched_backend_id_from_cur(ggml_backend_sched_t sched, st
                  int src_backend_id = ggml_backend_sched_backend_from_buffer(sched, src, tensor);
                  // check if a backend with higher prio wants to offload the op
                  if (sched->op_offload && src_backend_id == sched->n_backends - 1 && ggml_backend_buffer_is_host(src->buffer)) {
@@ -6926,7 +7071,7 @@ index ffbcba366..928f09651 100644
                          if (ggml_backend_supports_op(sched->backends[b], tensor) && ggml_backend_offload_op(sched->backends[b], tensor)) {
                              SET_CAUSE(tensor, "1.off");
                              return b;
-@@ -1182,6 +1471,18 @@ static void ggml_backend_sched_print_assignments(ggml_backend_sched_t sched, str
+@@ -1182,6 +1479,18 @@ static void ggml_backend_sched_print_assignments(ggml_backend_sched_t sched, str
      }
  }
  
@@ -6945,7 +7090,7 @@ index ffbcba366..928f09651 100644
  static bool ggml_backend_sched_buffer_supported(ggml_backend_sched_t sched, struct ggml_tensor * t, int backend_id) {
      ggml_backend_buffer_t buf = t->view_src ? t->view_src->buffer : t->buffer;
      ggml_backend_buffer_type_t buft = NULL;
-@@ -1200,6 +1501,21 @@ static bool ggml_backend_sched_buffer_supported(ggml_backend_sched_t sched, stru
+@@ -1200,6 +1509,21 @@ static bool ggml_backend_sched_buffer_supported(ggml_backend_sched_t sched, stru
          }
      }
  
@@ -6967,7 +7112,7 @@ index ffbcba366..928f09651 100644
      return buft != NULL && ggml_backend_supports_buft(sched->backends[backend_id], buft);
  }
  
-@@ -1211,6 +1527,38 @@ static void ggml_backend_sched_set_if_supported(ggml_backend_sched_t sched, stru
+@@ -1211,6 +1535,38 @@ static void ggml_backend_sched_set_if_supported(ggml_backend_sched_t sched, stru
  }
  
  // assigns backends to ops and splits the graph into subgraphs that can be computed on the same backend
@@ -7006,7 +7151,7 @@ index ffbcba366..928f09651 100644
  void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgraph * graph) {
      // reset splits
      sched->n_splits = 0;
-@@ -1410,6 +1758,86 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
+@@ -1410,6 +1766,86 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
          }
      }
  
@@ -7093,7 +7238,7 @@ index ffbcba366..928f09651 100644
      // pass 4: assign backends to remaining src from dst and view_src
      for (int i = 0; i < graph->n_nodes; i++) {
          struct ggml_tensor * node = graph->nodes[i];
-@@ -1458,6 +1886,10 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
+@@ -1458,6 +1894,10 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
          split->i_start = 0;
          split->n_inputs = 0;
          int cur_backend_id = split->backend_id;
@@ -7104,7 +7249,7 @@ index ffbcba366..928f09651 100644
          for (; i < graph->n_nodes; i++) {
              struct ggml_tensor * node = graph->nodes[i];
  
-@@ -1471,6 +1903,7 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
+@@ -1471,6 +1911,7 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
  
              // check if we should start a new split based on the sources of the current node
              bool need_new_split = false;
@@ -7112,7 +7257,7 @@ index ffbcba366..928f09651 100644
              if (node_backend_id == cur_backend_id && split->n_inputs > 0) {
                  for (int j = 0; j < GGML_MAX_SRC; j++) {
                      struct ggml_tensor * src = node->src[j];
-@@ -1482,7 +1915,46 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
+@@ -1482,7 +1923,46 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
                      if (src->buffer != NULL && src->buffer->usage == GGML_BACKEND_BUFFER_USAGE_WEIGHTS) {
                          int src_backend_id = tensor_backend_id(src);
                          if (src_backend_id != cur_backend_id && !ggml_backend_sched_buffer_supported(sched, src, cur_backend_id)) {
@@ -7160,7 +7305,7 @@ index ffbcba366..928f09651 100644
                              break;
                          }
                      }
-@@ -1507,6 +1979,7 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
+@@ -1507,6 +1987,7 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
                  split->i_start = i;
                  split->n_inputs = 0;
                  cur_backend_id = node_backend_id;
@@ -7168,7 +7313,7 @@ index ffbcba366..928f09651 100644
              }
  
              // find inputs that are not on the same backend
-@@ -1530,6 +2003,8 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
+@@ -1530,6 +2011,8 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
                              if (sched->n_copies > 1) {
                                  ggml_set_input(tensor_copy);
                                  ggml_set_output(tensor_copy); // prevent ggml-alloc from overwriting the tensor
@@ -7177,7 +7322,7 @@ index ffbcba366..928f09651 100644
                              }
                              tensor_id_copy(src_id, cur_backend_id, c) = tensor_copy;
                              SET_CAUSE(tensor_copy, "4.cpy");
-@@ -1539,6 +2014,29 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
+@@ -1539,6 +2022,29 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
                              ggml_backend_sched_split_inputs_grow(split);
                          }
                          split->inputs[n_inputs] = src;
@@ -7207,7 +7352,7 @@ index ffbcba366..928f09651 100644
                      }
                      node->src[j] = tensor_id_copy(src_id, cur_backend_id, sched->cur_copy);
                  }
-@@ -1617,6 +2115,10 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
+@@ -1617,6 +2123,10 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
              }
          },
          /* .user_data     = */ &alloc_deps,
@@ -7218,7 +7363,7 @@ index ffbcba366..928f09651 100644
      };
  
      for (int i = 0; i < sched->n_splits; i++) {
-@@ -1795,15 +2297,49 @@ static bool ggml_backend_sched_alloc_splits(ggml_backend_sched_t sched) {
+@@ -1795,15 +2305,49 @@ static bool ggml_backend_sched_alloc_splits(ggml_backend_sched_t sched) {
              }
          }
  
@@ -7274,7 +7419,7 @@ index ffbcba366..928f09651 100644
          }
          if (!ggml_gallocr_alloc_graph(sched->galloc, &sched->graph)) {
              GGML_LOG_ERROR("%s: failed to allocate graph\n", __func__);
-@@ -1814,19 +2350,382 @@ static bool ggml_backend_sched_alloc_splits(ggml_backend_sched_t sched) {
+@@ -1814,19 +2358,382 @@ static bool ggml_backend_sched_alloc_splits(ggml_backend_sched_t sched) {
      return true;
  }
  
@@ -7659,7 +7804,7 @@ index ffbcba366..928f09651 100644
          // inputs from the user must be copied immediately to prevent the user overwriting the data before the copy is done
          if (sched->events[split_backend_id][sched->cur_copy] != NULL) {
              ggml_backend_event_synchronize(sched->events[split_backend_id][sched->cur_copy]);
-@@ -1834,31 +2733,294 @@ static void ggml_backend_sched_copy_input(ggml_backend_sched_t sched, struct ggm
+@@ -1834,31 +2741,294 @@ static void ggml_backend_sched_copy_input(ggml_backend_sched_t sched, struct ggm
              ggml_backend_synchronize(split_backend);
          }
          ggml_backend_tensor_copy(input, input_cpy);
@@ -7974,7 +8119,7 @@ index ffbcba366..928f09651 100644
      }
  }
  
-@@ -1867,12 +3029,15 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
+@@ -1867,12 +3037,15 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
      struct ggml_backend_sched_split * splits = sched->splits;
  
      int prev_backend_id = -1;
@@ -7990,7 +8135,7 @@ index ffbcba366..928f09651 100644
          // ensure the previous split's async work has completed before we start
          // this split, the allocator may have reused buffer regions across splits
          if (split->n_inputs == 0 && prev_backend_id >= 0 && prev_backend_id != split_backend_id) {
-@@ -1887,12 +3052,12 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
+@@ -1887,12 +3060,12 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
          // the weights in host memory are copied last, so that the copy callback can read the other inputs of the split
          for (int input_id = 0; input_id < split->n_inputs; input_id++) {
              if (!ggml_backend_sched_is_host_weight(split->inputs[input_id])) {
@@ -8005,7 +8150,7 @@ index ffbcba366..928f09651 100644
              }
          }
  
-@@ -1940,6 +3105,14 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
+@@ -1940,6 +3113,14 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
              ggml_backend_event_record(sched->events[split_backend_id][sched->cur_copy], split_backend);
          }
  
@@ -8020,7 +8165,7 @@ index ffbcba366..928f09651 100644
          prev_backend_id = split_backend_id;
      }
  
-@@ -1959,14 +3132,14 @@ ggml_backend_sched_t ggml_backend_sched_new(
+@@ -1959,14 +3140,14 @@ ggml_backend_sched_t ggml_backend_sched_new(
  
      struct ggml_backend_sched * sched = (ggml_backend_sched *) calloc(1, sizeof(struct ggml_backend_sched));
  
@@ -8037,7 +8182,7 @@ index ffbcba366..928f09651 100644
      sched->debug_realloc = GGML_SCHED_DEBUG_REALLOC ? atoi(GGML_SCHED_DEBUG_REALLOC) : sched->debug_realloc;
  
      sched->n_backends = n_backends;
-@@ -2003,7 +3176,14 @@ ggml_backend_sched_t ggml_backend_sched_new(
+@@ -2003,7 +3184,14 @@ ggml_backend_sched_t ggml_backend_sched_new(
          sched->bufts[b] = bufts ? bufts[b] : ggml_backend_get_default_buffer_type(backends[b]);
          GGML_ASSERT(ggml_backend_supports_buft(backends[b], sched->bufts[b]));
  
@@ -8053,7 +8198,7 @@ index ffbcba366..928f09651 100644
              for (int c = 0; c < sched->n_copies; c++) {
                  sched->events[b][c] = ggml_backend_event_new(backends[b]->device);
              }
-@@ -2012,6 +3192,65 @@ ggml_backend_sched_t ggml_backend_sched_new(
+@@ -2012,6 +3200,65 @@ ggml_backend_sched_t ggml_backend_sched_new(
  
      sched->galloc = ggml_gallocr_new_n(sched->bufts, n_backends);
      sched->op_offload = op_offload;
@@ -8119,7 +8264,7 @@ index ffbcba366..928f09651 100644
  
      ggml_backend_sched_reset(sched);
  
-@@ -2026,6 +3265,10 @@ void ggml_backend_sched_free(ggml_backend_sched_t sched) {
+@@ -2026,6 +3273,10 @@ void ggml_backend_sched_free(ggml_backend_sched_t sched) {
          for (int c = 0; c < sched->n_copies; c++) {
              ggml_backend_event_free(sched->events[b][c]);
          }
@@ -8130,7 +8275,7 @@ index ffbcba366..928f09651 100644
      }
      ggml_gallocr_free(sched->galloc);
      ggml_free(sched->ctx);
-@@ -2090,6 +3333,17 @@ bool ggml_backend_sched_reserve(ggml_backend_sched_t sched, struct ggml_cgraph *
+@@ -2090,6 +3341,17 @@ bool ggml_backend_sched_reserve(ggml_backend_sched_t sched, struct ggml_cgraph *
      return true;
  }
  
@@ -8148,7 +8293,7 @@ index ffbcba366..928f09651 100644
  bool ggml_backend_sched_alloc_graph(ggml_backend_sched_t sched, struct ggml_cgraph * graph) {
      GGML_ASSERT(sched);
      GGML_ASSERT((int)sched->hash_set.size >= graph->n_nodes + graph->n_leafs);
-@@ -2127,6 +3381,8 @@ enum ggml_status ggml_backend_sched_graph_compute_async(ggml_backend_sched_t sch
+@@ -2127,6 +3389,8 @@ enum ggml_status ggml_backend_sched_graph_compute_async(ggml_backend_sched_t sch
          }
      }
  
@@ -8157,7 +8302,7 @@ index ffbcba366..928f09651 100644
      return ggml_backend_sched_compute_splits(sched);
  }
  
-@@ -2221,6 +3477,8 @@ ggml_backend_t ggml_backend_sched_get_tensor_backend(ggml_backend_sched_t sched,
+@@ -2221,6 +3485,8 @@ ggml_backend_t ggml_backend_sched_get_tensor_backend(ggml_backend_sched_t sched,
  bool ggml_op_alloc_size_may_expand(enum ggml_op op) {
      switch (op) {
          case GGML_OP_FLASH_ATTN_EXT:
@@ -8166,7 +8311,7 @@ index ffbcba366..928f09651 100644
          case GGML_OP_MUL_MAT:
          case GGML_OP_MUL_MAT_ID:
          case GGML_OP_CUMSUM:
-@@ -2591,6 +3849,9 @@ ggml_backend_buffer_type_t ggml_backend_cpu_buffer_type(void) {
+@@ -2591,6 +3857,9 @@ ggml_backend_buffer_type_t ggml_backend_cpu_buffer_type(void) {
              /* .get_alloc_size      = */ NULL, // defaults to ggml_nbytes
              /* .get_alloc_size_n    = */ NULL,
              /* .is_host             = */ ggml_backend_cpu_buffer_type_is_host,
@@ -8176,7 +8321,7 @@ index ffbcba366..928f09651 100644
          },
          /* .device  = */ NULL, // FIXME ggml_backend_reg_dev_get(ggml_backend_cpu_reg(), 0),
          /* .context = */ NULL,
-@@ -2616,6 +3877,9 @@ static ggml_backend_buffer_type_t ggml_backend_cpu_buffer_from_ptr_type(void) {
+@@ -2616,6 +3885,9 @@ static ggml_backend_buffer_type_t ggml_backend_cpu_buffer_from_ptr_type(void) {
              /* .get_alloc_size      = */ NULL, // defaults to ggml_nbytes
              /* .get_alloc_size_n    = */ NULL,
              /* .is_host             = */ ggml_backend_cpu_buffer_type_is_host,
@@ -29012,7 +29157,7 @@ index 000000000..7570a3b06
 +void   ggml_cuda_slab_reserve_wide(int device, size_t bytes);
 +size_t ggml_cuda_slab_seed_floor(int device);
 diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
-index 957908f65..7c6c441ba 100644
+index 957908f65..b06f526f0 100644
 --- a/ggml/src/ggml-cuda/ggml-cuda.cu
 +++ b/ggml/src/ggml-cuda/ggml-cuda.cu
 @@ -1,5 +1,6 @@
@@ -33164,7 +33309,8 @@ index 957908f65..7c6c441ba 100644
 -            // Loop over all srcs of all nodes in the fusion. If the src overlaps
 -            // the destination and the src is not an intermediate node that's being
 -            // elided, then disable fusion.
--
++    graph->uid = cgraph->uid;
+ 
 -            for (int src_idx = 0; src_idx < GGML_MAX_SRC; ++src_idx) {
 -                const ggml_tensor * src = cgraph->nodes[j]->src[src_idx];
 -
@@ -34343,8 +34489,7 @@ index 957908f65..7c6c441ba 100644
 -    if (fused_mul_mat_vec) {
 -        return fused_node_count - 1;
 -    }
-+    graph->uid = cgraph->uid;
- 
+-
 -    if (ggml_cuda_can_fuse(cgraph, i, { GGML_OP_RMS_NORM, GGML_OP_MUL, GGML_OP_ROPE, GGML_OP_VIEW, GGML_OP_SET_ROWS }, {})) {
 -        ggml_cuda_op_rms_norm_mul_rope_fused(*cuda_ctx, node, cgraph->nodes[i + 1], cgraph->nodes[i + 2], cgraph->nodes[i + 4]);
 -        return 4;
@@ -34462,9 +34607,9 @@ index 957908f65..7c6c441ba 100644
 -    return 0;
  }
 +#endif // USE_CUDA_GRAPH
-+
  
 -static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgraph, const bool use_cuda_graph, const bool cuda_graph_update_required, const void * graph_key) {
++
 +static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgraph, const bool use_cuda_graph, const bool cuda_graph_update_required, const ggml_cuda_graph_key & graph_key) {
 +    int64_t t_ev = g_cgc_on ? ggml_time_us() : 0;
      bool graph_evaluated_or_captured = false;
@@ -34788,8 +34933,8 @@ index 957908f65..7c6c441ba 100644
 +                    static const bool mem_gen_check = !getenv("GGML_CUDA_GRAPH_MEM_GEN") || atoi(getenv("GGML_CUDA_GRAPH_MEM_GEN")) != 0;
 +                    cuda_graph_update_required = graph->instance == nullptr ||
 +                        (mem_gen_check && graph->mem_gen != ggml_cuda_graph_mem_gen(cuda_ctx->device));
-                 }
-             }
++                }
++            }
 +
 +            if (use_cuda_graph && cuda_graph_update_required && band_armed) {
 +                // Defer the capture (or recapture): run directly this time.  Do NOT leave a stale instance
@@ -34797,7 +34942,7 @@ index 957908f65..7c6c441ba 100644
 +                GGML_LOG_DEBUG("%s: capture deferred, the slab wide band is armed\n", __func__);
 +                if (ggml_cuda_graph_trace()) {
 +                    GGML_LOG_WARN("%s: device %d: capture deferred, the slab wide band is armed\n", __func__, cuda_ctx->device);
-+                }
+                 }
 +                use_cuda_graph = false;
 +                cuda_graph_update_required = false;
 +                graph->warmup_complete = false;
@@ -34810,7 +34955,7 @@ index 957908f65..7c6c441ba 100644
 +                // warmup was already complete) and the very next run would otherwise capture immediately.
 +                graph->warmup_complete = false;
 +                graph->capture_deferred = true;
-+            }
+             }
 +            } // else: not prefill
          }
      }
@@ -35363,7 +35508,7 @@ index 957908f65..7c6c441ba 100644
      return get_op_batch_size(op) >= dev_ctx->op_offload_min_batch_size;
  }
  
-@@ -5897,6 +7271,198 @@ static void ggml_backend_cuda_device_event_synchronize(ggml_backend_dev_t dev, g
+@@ -5897,6 +7271,208 @@ static void ggml_backend_cuda_device_event_synchronize(ggml_backend_dev_t dev, g
      CUDA_CHECK(cudaEventSynchronize((cudaEvent_t)event->context));
  }
  
@@ -35420,6 +35565,16 @@ index 957908f65..7c6c441ba 100644
 +static bool ggml_backend_cuda_device_moe_cache_stats(ggml_backend_dev_t dev, int64_t * hits, int64_t * misses, int64_t * arena_bytes) {
 +    (void) dev;
 +    return moe_cache_get_stats(hits, misses, arena_bytes);
++}
++
++// TODO #59: the expert cache's decode/verify band for this device (0 = the cache is not active, so a
++// speculative verify batch has no band to respect).  `common` clamps the draftless speculators' draft
++// length to `band - 1` so every verify batch stays inside it: above the band the routed `MUL_MAT_ID`
++// leaves the arena and its experts are streamed from the pinned host master every step, which on a
++// host-expert config costs far more than the extra accepted tokens buy.
++static int ggml_backend_cuda_device_moe_cache_band(ggml_backend_dev_t dev) {
++    ggml_backend_cuda_device_context * ctx = (ggml_backend_cuda_device_context *) dev->context;
++    return moe_cache_enabled() ? moe_cache_max_tok_dev(ctx->device) : 0;
 +}
 +
 +static bool ggml_backend_cuda_device_moe_cache_rearm(ggml_backend_dev_t dev) {
@@ -35562,7 +35717,7 @@ index 957908f65..7c6c441ba 100644
  static const ggml_backend_device_i ggml_backend_cuda_device_interface = {
      /* .get_name                = */ ggml_backend_cuda_device_get_name,
      /* .get_description         = */ ggml_backend_cuda_device_get_description,
-@@ -5913,6 +7479,25 @@ static const ggml_backend_device_i ggml_backend_cuda_device_interface = {
+@@ -5913,6 +7489,26 @@ static const ggml_backend_device_i ggml_backend_cuda_device_interface = {
      /* .event_new               = */ ggml_backend_cuda_device_event_new,
      /* .event_free              = */ ggml_backend_cuda_device_event_free,
      /* .event_synchronize       = */ ggml_backend_cuda_device_event_synchronize,
@@ -35585,10 +35740,11 @@ index 957908f65..7c6c441ba 100644
 +    /* .slab_enabled              = */ ggml_backend_cuda_device_slab_enabled,
 +    /* .slab_ring_slots           = */ ggml_backend_cuda_device_slab_ring_slots,
 +    /* .moe_host_master_buft      = */ ggml_backend_cuda_device_moe_host_master_buft,
++    /* .moe_cache_band            = */ ggml_backend_cuda_device_moe_cache_band,
  };
  
  // backend reg
-@@ -5994,8 +7579,21 @@ static ggml_backend_feature * ggml_backend_cuda_get_features(ggml_backend_reg_t
+@@ -5994,8 +7590,21 @@ static ggml_backend_feature * ggml_backend_cuda_get_features(ggml_backend_reg_t
      GGML_UNUSED(reg);
  }
  
@@ -35610,7 +35766,7 @@ index 957908f65..7c6c441ba 100644
      if (strcmp(name, "ggml_backend_comm_init") == 0) {
          return (void *)ggml_backend_cuda_comm_init;
      }
-@@ -6092,6 +7690,9 @@ ggml_backend_t ggml_backend_cuda_init(int device) {
+@@ -6092,6 +7701,9 @@ ggml_backend_t ggml_backend_cuda_init(int device) {
          return nullptr;
      }
  
@@ -65573,7 +65729,7 @@ index 882cdf4a5..45a9618ff 100644
              }
              view_src = view_src->view_src;
 diff --git a/include/llama.h b/include/llama.h
-index 6f76c819f..f9353fead 100644
+index 6f76c819f..93d6ff478 100644
 --- a/include/llama.h
 +++ b/include/llama.h
 @@ -217,11 +217,24 @@ extern "C" {
@@ -65670,7 +65826,7 @@ index 6f76c819f..f9353fead 100644
      LLAMA_API uint32_t llama_n_batch    (const struct llama_context * ctx);
      LLAMA_API uint32_t llama_n_ubatch   (const struct llama_context * ctx);
      LLAMA_API uint32_t llama_n_seq_max  (const struct llama_context * ctx);
-@@ -594,6 +633,32 @@ extern "C" {
+@@ -594,6 +633,39 @@ extern "C" {
      LLAMA_API  enum llama_pooling_type   llama_pooling_type(const struct llama_context * ctx); // TODO: rename to llama_get_pooling_type
  
      LLAMA_API const struct llama_vocab * llama_model_get_vocab(const struct llama_model * model);
@@ -65684,6 +65840,13 @@ index 6f76c819f..f9353fead 100644
 +    // WIP r42: aggregate the MoE expert cache arena's cumulative hit/miss counters for per-turn logging
 +    // (a before/after delta gives the turn's decode hit rate).  Returns false when no cache is active.
 +    LLAMA_API bool llama_moe_cache_stats(const struct llama_model * model, int64_t * hits, int64_t * misses, int64_t * arena_bytes);
++
++    // TODO #59: the MoE expert cache's decode/verify band, in tokens, for this model (0 when the cache is
++    // not active, i.e. there is no band to respect).  The arena serves a routed `MUL_MAT_ID` from VRAM up
++    // to this many tokens; a wider batch leaves the arena and streams its experts from the host master.
++    // A speculative verify batch is `n_draft + 1` rows, so a draft longer than `band - 1` takes the
++    // expensive path on every stepped verify.  `common` clamps the draftless (n-gram) speculators to it.
++    LLAMA_API int llama_model_moe_cache_band(const struct llama_model * model);
 +
 +    // Host-resident MoE expert bytes on the model's device `dev_index` (same order as
 +    // llama_model_get_device).  0 when no expert weight is host-resident on that device.
@@ -73278,7 +73441,7 @@ index 9e51d0ce7..1a6b9268a 100644
      void unmap_weight(const llama_tensor_weight & w) const;
  
 diff --git a/src/llama-model.cpp b/src/llama-model.cpp
-index 6872589fa..c3edcd9da 100644
+index 6872589fa..bb3feba3f 100644
 --- a/src/llama-model.cpp
 +++ b/src/llama-model.cpp
 @@ -23,6 +23,7 @@
@@ -74808,7 +74971,7 @@ index 6872589fa..c3edcd9da 100644
      };
  
      return result;
-@@ -3766,6 +4127,72 @@ const std::vector<std::pair<std::string, ggml_tensor *>> & llama_internal_get_te
+@@ -3766,6 +4127,98 @@ const std::vector<std::pair<std::string, ggml_tensor *>> & llama_internal_get_te
      return model->tensors_by_name;
  }
  
@@ -74854,6 +75017,32 @@ index 6872589fa..c3edcd9da 100644
 +    return false;
 +}
 +
++int llama_model_moe_cache_band(const llama_model * model) {
++    if (model == nullptr) {
++        return 0;
++    }
++    // TODO #59: the band is a per-device kernel property, so answer with the SMALLEST band across the
++    // model's host-expert devices: a verify batch is replicated over every device of a tensor split, so
++    // the narrowest band is the one that decides whether the batch is served from the arena.  Under
++    // `-sm tensor` the model's device list is a Meta wrapper, hence the host-expert devices first.
++    int band = 0;
++    const auto consider = [&band](ggml_backend_dev_t dev) {
++        const int b = ggml_backend_dev_moe_cache_band(dev);
++        if (b > 0 && (band == 0 || b < band)) {
++            band = b;
++        }
++    };
++    for (const auto & kv : model->moe_host_expert_bytes) {
++        consider(kv.first);
++    }
++    if (band == 0) {
++        for (size_t i = 0; i < model->devices.size(); i++) {
++            consider(llama_model_get_device(model, (uint32_t) i));
++        }
++    }
++    return band;
++}
++
 +size_t llama_model_moe_host_expert_bytes(const llama_model * model, uint32_t dev_index) {
 +    if (model == nullptr || dev_index >= model->devices.size()) {
 +        return 0;
@@ -74881,7 +75070,7 @@ index 6872589fa..c3edcd9da 100644
  int32_t llama_model_n_expert(const struct llama_model * model) {
      return model->hparams.n_expert;
  }
-@@ -3791,11 +4218,12 @@ llama_model_base::llama_model_base(const struct llama_model_params & params) : l
+@@ -3791,11 +4244,12 @@ llama_model_base::llama_model_base(const struct llama_model_params & params) : l
      TENSOR_SKIP           (llama_model_loader::TENSOR_SKIP),
      TENSOR_SKIP_IF_VIRTUAL(llama_model_loader::TENSOR_SKIP_IF_VIRTUAL),
      TENSOR_ALLOW_RESHAPE  (llama_model_loader::TENSOR_ALLOW_RESHAPE),
@@ -74897,7 +75086,7 @@ index 6872589fa..c3edcd9da 100644
  }
  
  void llama_model_base::create_tensor_gate_up_exps(llama_layer & layer, int bid, int64_t n_embd_, int64_t n_ff_, int64_t n_expert_, int flags) {
-@@ -3853,33 +4281,33 @@ void llama_model_base::create_tensor_qkv(llama_layer & layer, int bid,
+@@ -3853,33 +4307,33 @@ void llama_model_base::create_tensor_qkv(llama_layer & layer, int bid,
      }
  }
  
@@ -74938,7 +75127,7 @@ index 6872589fa..c3edcd9da 100644
      hparams.set_swa_pattern(n_pattern, dense_first);
  }
  
-@@ -3892,6 +4320,14 @@ uint32_t llama_model_target_layer_ids_n(const struct llama_model * model) {
+@@ -3892,6 +4346,14 @@ uint32_t llama_model_target_layer_ids_n(const struct llama_model * model) {
      return (uint32_t) model->target_layer_ids.size();
  }
  

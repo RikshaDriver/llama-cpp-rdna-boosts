@@ -1,4 +1,4 @@
-From 6aa5eaf5d8cde4578d2c27aada7d41ac15596411 Mon Sep 17 00:00:00 2001
+From 7dd56799850cfbde3ee97a363658360e3665a796 Mon Sep 17 00:00:00 2001
 From: Stew Forster <ci@rdna-boosts.invalid>
 Date: Wed, 21 Oct 2026 10:40:32 -0500
 Subject: [PATCH 12/13] rdna-boosts: block 12: campaign remainder (CPU wins,
@@ -402,7 +402,7 @@ index 564fa9c4d..da77044b7 100644
      // Check if a backend sampler has already sampled a token in which case we
      // return that token id directly.
 diff --git a/common/speculative.cpp b/common/speculative.cpp
-index 13c60e966..99cfd6239 100644
+index e6bcb7fe4..948fb4175 100644
 --- a/common/speculative.cpp
 +++ b/common/speculative.cpp
 @@ -996,6 +996,14 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
@@ -588,10 +588,10 @@ index 4a498b0c1..b7ec31448 100644
  GGML_API size_t ggml_gallocr_get_buffer_size(ggml_gallocr_t galloc, int buffer_id);
  
 diff --git a/ggml/include/ggml-backend.h b/ggml/include/ggml-backend.h
-index 0ff98e861..436e1a905 100644
+index e55ab8d24..53ce09a97 100644
 --- a/ggml/include/ggml-backend.h
 +++ b/ggml/include/ggml-backend.h
-@@ -272,6 +272,20 @@ extern "C" {
+@@ -279,6 +279,20 @@ extern "C" {
      GGML_API ggml_backend_buffer_type_t    ggml_backend_dev_host_buffer_type(ggml_backend_dev_t device);
      GGML_API ggml_backend_buffer_t         ggml_backend_dev_buffer_from_host_ptr(ggml_backend_dev_t device, void * ptr, size_t size, size_t max_tensor_size);
  
@@ -786,14 +786,13 @@ index b47a1423e..89b85fbce 100644
 -    galloc->layout_valid = false;
 -}
 diff --git a/ggml/src/ggml-backend-impl.h b/ggml/src/ggml-backend-impl.h
-index 476d3a1a1..f8415dd8c 100644
+index 5156a4fb3..72139dd15 100644
 --- a/ggml/src/ggml-backend-impl.h
 +++ b/ggml/src/ggml-backend-impl.h
-@@ -444,6 +444,15 @@ extern "C" {
-         // when the backend has no ring.  `llama_context` needs it to size the ring region so one staged
+@@ -445,6 +445,15 @@ extern "C" {
          // table fits per slot.  Appended like the fields above.
          size_t (*slab_ring_slots)(ggml_backend_dev_t dev);
-+
+ 
 +        // (optional) wip/host-expert-master-drop (TODO #55): the host buffer type a POOL-BACKED host
 +        // expert master should use (device-carrying but NOT pinned), or NULL when the backend keeps its
 +        // pinned host master.  With `--host-experts pool` the loader then backs host expert tensors with
@@ -802,9 +801,10 @@ index 476d3a1a1..f8415dd8c 100644
 +        // already initialize the fields above positionally -- inserting in the middle would alias their
 +        // entries.  Zero-initialized for backends that do not set it.
 +        ggml_backend_buffer_type_t (*moe_host_master_buft)(ggml_backend_dev_t dev);
-     };
- 
-     struct ggml_backend_device {
++
+         // (optional) TODO #59: the MoE expert cache's decode/verify band in tokens (the widest routed
+         // `MUL_MAT_ID` batch the arena serves from VRAM), or 0 when the cache is disabled.  `common` clamps
+         // the draftless (n-gram) speculators' draft length to `band - 1` so a speculative verify batch never
 diff --git a/ggml/src/ggml-backend-meta.cpp b/ggml/src/ggml-backend-meta.cpp
 index 06c12225c..60e5233e8 100644
 --- a/ggml/src/ggml-backend-meta.cpp
@@ -1078,10 +1078,10 @@ index 06c12225c..60e5233e8 100644
              bool backend_allreduce_success = false;
              if (backend_ctx->comm_ctx) {
 diff --git a/ggml/src/ggml-backend.cpp b/ggml/src/ggml-backend.cpp
-index 0fc93141f..928f09651 100644
+index f7c34262a..a1ba79cc0 100644
 --- a/ggml/src/ggml-backend.cpp
 +++ b/ggml/src/ggml-backend.cpp
-@@ -319,6 +319,40 @@ void ggml_backend_dev_moe_cache_set_host_source(ggml_backend_dev_t dev, const vo
+@@ -327,6 +327,40 @@ void ggml_backend_dev_moe_cache_set_host_source(ggml_backend_dev_t dev, const vo
      dev->iface.moe_cache_set_host_source(dev, tensor_data, path, offs, n_experts, host_bytes, total_bytes);
  }
  
@@ -1592,7 +1592,7 @@ index 83aeba014..38aaf5c49 100644
          // Establish the fixed narrow floor: the first reserve smaller than the boundary (the
          // prefill -> decode drop re-reserves the decode/verify layout there).  Its ring region then sits
 diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
-index 72540fdba..7c6c441ba 100644
+index e5d908be6..b06f526f0 100644
 --- a/ggml/src/ggml-cuda/ggml-cuda.cu
 +++ b/ggml/src/ggml-cuda/ggml-cuda.cu
 @@ -3115,6 +3115,77 @@ ggml_backend_buffer_type_t ggml_backend_cuda_host_buffer_type() {
@@ -1718,7 +1718,7 @@ index 72540fdba..7c6c441ba 100644
          case GGML_OP_ARGMAX:
          case GGML_OP_COUNT_EQUAL:
              {
-@@ -7255,6 +7350,19 @@ static void ggml_backend_cuda_device_moe_cache_set_host_source(ggml_backend_dev_
+@@ -7265,6 +7360,19 @@ static void ggml_backend_cuda_device_moe_cache_set_host_source(ggml_backend_dev_
      moe_cache_set_host_source(tensor_data, path, offs, n_experts, host_bytes, total_bytes);
  }
  
@@ -1738,14 +1738,14 @@ index 72540fdba..7c6c441ba 100644
  static size_t ggml_backend_cuda_device_slab_work_size(ggml_backend_dev_t dev) {
      // OPEN 2 (TODO #42): the movable-boundary slab WORK region's current size (the boundary), or 0 when this
      // device has no slab.  `llama_context` compares it against the narrow size it last settled on to decide
-@@ -7389,6 +7497,7 @@ static const ggml_backend_device_i ggml_backend_cuda_device_interface = {
+@@ -7399,6 +7507,7 @@ static const ggml_backend_device_i ggml_backend_cuda_device_interface = {
      /* .slab_set_ring_cap         = */ ggml_backend_cuda_device_slab_set_ring_cap,
      /* .slab_enabled              = */ ggml_backend_cuda_device_slab_enabled,
      /* .slab_ring_slots           = */ ggml_backend_cuda_device_slab_ring_slots,
 +    /* .moe_host_master_buft      = */ ggml_backend_cuda_device_moe_host_master_buft,
+     /* .moe_cache_band            = */ ggml_backend_cuda_device_moe_cache_band,
  };
  
- // backend reg
 diff --git a/ggml/src/ggml-cuda/moe-expert-cache.cu b/ggml/src/ggml-cuda/moe-expert-cache.cu
 index 81241f7c1..d8ea6bdcf 100644
 --- a/ggml/src/ggml-cuda/moe-expert-cache.cu
@@ -4244,7 +4244,7 @@ index 9bd71e504..45a9618ff 100644
  
  static struct ggml_tensor * ggml_add_impl(
 diff --git a/include/llama.h b/include/llama.h
-index 09c0046b0..c3b5f65e1 100644
+index 9c2688f3a..dfb6acd01 100644
 --- a/include/llama.h
 +++ b/include/llama.h
 @@ -227,7 +227,12 @@ extern "C" {
@@ -4959,7 +4959,7 @@ index 75ea25555..1a6b9268a 100644
      bool no_alloc;
      bool load_mtp;
 diff --git a/src/llama-model.cpp b/src/llama-model.cpp
-index 23689a4eb..f4569fd7e 100644
+index 8c088e04f..71d464c20 100644
 --- a/src/llama-model.cpp
 +++ b/src/llama-model.cpp
 @@ -1969,7 +1969,48 @@ bool llama_model_base::load_tensors(llama_model_loader & ml_l) {

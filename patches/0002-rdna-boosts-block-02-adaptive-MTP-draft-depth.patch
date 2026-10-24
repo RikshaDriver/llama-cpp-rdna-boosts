@@ -1,4 +1,4 @@
-From 6d4209d15ef765cbf208ef8a9646066a3383269f Mon Sep 17 00:00:00 2001
+From 96747f2d7b547be1f4906b8f5aca1902409501f4 Mon Sep 17 00:00:00 2001
 From: Stew Forster <ci@rdna-boosts.invalid>
 Date: Wed, 21 Oct 2026 10:40:31 -0500
 Subject: [PATCH 02/13] rdna-boosts: block 02: adaptive MTP draft depth

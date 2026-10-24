@@ -1,4 +1,4 @@
-From 78b0fbc332f3b1b36b76c347ef39a6e6107900d3 Mon Sep 17 00:00:00 2001
+From 6cf6f5ffb0899f65263944b04fe822d058e0cbb3 Mon Sep 17 00:00:00 2001
 From: Stew Forster <ci@rdna-boosts.invalid>
 Date: Thu, 22 Oct 2026 07:24:38 -0500
 Subject: [PATCH 10/13] rdna-boosts: block 10: slab, fusion dispatcher, async
@@ -98,7 +98,7 @@ to block 11 with the matchers they call.
  ggml/src/ggml-cuda/ggml-cuda-try-fuse.cu      | 2661 ++++++++
  ggml/src/ggml-cuda/ggml-cuda-try-fuse.cuh     |   34 +
  ggml/src/ggml-cuda/ggml-cuda-vmm.h            |   60 +
- ggml/src/ggml-cuda/ggml-cuda.cu               | 5634 +++++------------
+ ggml/src/ggml-cuda/ggml-cuda.cu               | 5641 +++++------------
  ggml/src/ggml-cuda/mmb.cu                     |  275 +-
  ggml/src/ggml-cuda/mmb.cuh                    |   24 +
  ggml/src/ggml-cuda/mmid.cu                    |  240 +-
@@ -142,7 +142,7 @@ to block 11 with the matchers they call.
  tests/test-fusion-gate-beta-multiseq.cpp      |  278 +
  tests/test-logits-width-probe.cpp             |   44 +-
  tools/server/server-context.cpp               |   30 +-
- 75 files changed, 11975 insertions(+), 4755 deletions(-)
+ 75 files changed, 11975 insertions(+), 4762 deletions(-)
  create mode 100644 ggml/src/ggml-cuda/ggml-cuda-arena.cu
  create mode 100644 ggml/src/ggml-cuda/ggml-cuda-arena.cuh
  create mode 100644 ggml/src/ggml-cuda/ggml-cuda-moe-cache-hooks.cu
@@ -262,7 +262,7 @@ index d83b3fb76..b47a1423e 100644
  
  bool ggml_gallocr_reserve(ggml_gallocr_t galloc, struct ggml_cgraph *graph) {
 diff --git a/ggml/src/ggml-backend-impl.h b/ggml/src/ggml-backend-impl.h
-index 0ec066f58..476d3a1a1 100644
+index f24c39bb4..5156a4fb3 100644
 --- a/ggml/src/ggml-backend-impl.h
 +++ b/ggml/src/ggml-backend-impl.h
 @@ -162,6 +162,17 @@ extern "C" {
@@ -708,10 +708,10 @@ index e52a1a785..6fb26e615 100644
          off += simple_tensor->nb[ss.axis + 1];
      }
 diff --git a/ggml/src/ggml-backend.cpp b/ggml/src/ggml-backend.cpp
-index 77d85fb0e..bac6678c7 100644
+index 940ca37d6..0acfc7b0d 100644
 --- a/ggml/src/ggml-backend.cpp
 +++ b/ggml/src/ggml-backend.cpp
-@@ -328,6 +328,42 @@ void ggml_backend_dev_slab_ring_set(ggml_backend_dev_t dev, bool arm) {
+@@ -336,6 +336,42 @@ void ggml_backend_dev_slab_ring_set(ggml_backend_dev_t dev, bool arm) {
      dev->iface.slab_ring_set(dev, arm);
  }
  
@@ -754,7 +754,7 @@ index 77d85fb0e..bac6678c7 100644
  void ggml_backend_dev_slab_narrow_floor(ggml_backend_dev_t dev, size_t bytes) {
      // wip/slab-ring-region: pin the narrow (decode/verify) work floor.  Optional hook.
      if (dev == nullptr || dev->iface.slab_narrow_floor == nullptr) {
-@@ -336,6 +372,14 @@ void ggml_backend_dev_slab_narrow_floor(ggml_backend_dev_t dev, size_t bytes) {
+@@ -344,6 +380,14 @@ void ggml_backend_dev_slab_narrow_floor(ggml_backend_dev_t dev, size_t bytes) {
      dev->iface.slab_narrow_floor(dev, bytes);
  }
  
@@ -769,7 +769,7 @@ index 77d85fb0e..bac6678c7 100644
  void ggml_backend_dev_slab_narrow2_floor(ggml_backend_dev_t dev, size_t bytes) {
      // wip/moe-verify-fusions (narrow-2): pin the MTP draft's COMPUTE region.  Optional hook; a backend
      // without a slab (or that never set it) is a no-op.
-@@ -2210,15 +2254,49 @@ static bool ggml_backend_sched_alloc_splits(ggml_backend_sched_t sched) {
+@@ -2218,15 +2262,49 @@ static bool ggml_backend_sched_alloc_splits(ggml_backend_sched_t sched) {
              }
          }
  
@@ -825,7 +825,7 @@ index 77d85fb0e..bac6678c7 100644
          }
          if (!ggml_gallocr_alloc_graph(sched->galloc, &sched->graph)) {
              GGML_LOG_ERROR("%s: failed to allocate graph\n", __func__);
-@@ -2796,7 +2874,7 @@ static void ggml_backend_sched_copy_input(ggml_backend_sched_t sched, struct ggm
+@@ -2804,7 +2882,7 @@ static void ggml_backend_sched_copy_input(ggml_backend_sched_t sched, struct ggm
                  const bool took = split_backend->iface.moe_cache_update(
                          split_backend, input, input_cpy, ids.data(),
                          ids_tensor->ne[0], ids_tensor->ne[1],
@@ -7790,7 +7790,7 @@ index 8005b57b4..7570a3b06 100644
 +void   ggml_cuda_slab_reserve_wide(int device, size_t bytes);
 +size_t ggml_cuda_slab_seed_floor(int device);
 diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
-index 3561b397d..446f6aec1 100644
+index 0616bf85a..490d90b86 100644
 --- a/ggml/src/ggml-cuda/ggml-cuda.cu
 +++ b/ggml/src/ggml-cuda/ggml-cuda.cu
 @@ -1,5 +1,6 @@
@@ -14062,7 +14062,7 @@ index 3561b397d..446f6aec1 100644
      }
      return on;
  }
-@@ -9266,6 +7100,35 @@ static size_t ggml_backend_cuda_device_slab_work_size(ggml_backend_dev_t dev) {
+@@ -9276,6 +7110,35 @@ static size_t ggml_backend_cuda_device_slab_work_size(ggml_backend_dev_t dev) {
      return ggml_cuda_slab_active(ctx->device) ? ggml_cuda_slab_work_size(ctx->device) : 0;
  }
  
@@ -14098,7 +14098,7 @@ index 3561b397d..446f6aec1 100644
  static size_t ggml_backend_cuda_device_slab_headroom_bytes(ggml_backend_dev_t dev) {
      // wip/fit-slab-accounting (Phase 1, re-cut for r37): the configured slab headroom, reported even
      // though the slab is not armed yet.  `--fit` runs BEFORE the MoE preflight arms the slab, and r37
-@@ -9281,17 +7144,18 @@ static size_t ggml_backend_cuda_device_slab_headroom_bytes(ggml_backend_dev_t de
+@@ -9291,17 +7154,18 @@ static size_t ggml_backend_cuda_device_slab_headroom_bytes(ggml_backend_dev_t de
  }
  
  static void ggml_backend_cuda_device_slab_ring_set(ggml_backend_dev_t dev, bool arm) {
@@ -14127,7 +14127,7 @@ index 3561b397d..446f6aec1 100644
      ggml_backend_cuda_device_context * ctx = (ggml_backend_cuda_device_context *) dev->context;
      ggml_cuda_slab_ring_set(ctx->device, arm);
  }
-@@ -9302,6 +7166,12 @@ static void ggml_backend_cuda_device_slab_narrow_floor(ggml_backend_dev_t dev, s
+@@ -9312,6 +7176,12 @@ static void ggml_backend_cuda_device_slab_narrow_floor(ggml_backend_dev_t dev, s
      ggml_cuda_slab_set_narrow_floor(ctx->device, bytes);
  }
  
@@ -14140,7 +14140,7 @@ index 3561b397d..446f6aec1 100644
  static void ggml_backend_cuda_device_slab_narrow2_floor(ggml_backend_dev_t dev, size_t bytes) {
      // wip/moe-verify-fusions (narrow-2): pin (idempotently) the MTP draft's compute region from its
      // measured narrow size.  No-op when the slab is not live on this device.
-@@ -9314,16 +7184,12 @@ static void ggml_backend_cuda_device_slab_compute_narrow2(ggml_backend_dev_t dev
+@@ -9324,16 +7194,12 @@ static void ggml_backend_cuda_device_slab_compute_narrow2(ggml_backend_dev_t dev
      // Default: route them to the slab's pinned second narrow region.  `GGML_CUDA_SLAB_NARROW2=0` is the
      // A/B arm -- the draft bypasses the slab entirely (raw cudaMalloc), the session's quick fix.
      GGML_UNUSED(dev);
@@ -14163,7 +14163,7 @@ index 3561b397d..446f6aec1 100644
  }
  
  static const ggml_backend_device_i ggml_backend_cuda_device_interface = {
-@@ -9350,11 +7216,16 @@ static const ggml_backend_device_i ggml_backend_cuda_device_interface = {
+@@ -9360,18 +7226,16 @@ static const ggml_backend_device_i ggml_backend_cuda_device_interface = {
      /* .slab_headroom_bytes     = */ ggml_backend_cuda_device_slab_headroom_bytes,
      /* .slab_ring_set           = */ ggml_backend_cuda_device_slab_ring_set,
      /* .slab_narrow_floor       = */ ggml_backend_cuda_device_slab_narrow_floor,
@@ -14173,15 +14173,22 @@ index 3561b397d..446f6aec1 100644
      /* .slab_compute_narrow2    = */ ggml_backend_cuda_device_slab_compute_narrow2,
      /* .moe_cache_set_host_pool   = */ ggml_backend_cuda_device_moe_cache_set_host_pool,
      /* .moe_cache_set_host_source = */ ggml_backend_cuda_device_moe_cache_set_host_source,
+-    // the block-10 slab/ring entries, appended to the iface declaration by this block; their
+-    // implementations arrive with block 10, so they are zero here
+-    /* .slab_compute_plain        = */ nullptr,
+-    /* .slab_ring_region          = */ nullptr,
+-    /* .slab_set_ring_cap         = */ nullptr,
+-    /* .slab_enabled              = */ nullptr,
+-    /* .slab_ring_slots           = */ nullptr,
 +    /* .slab_compute_plain        = */ ggml_backend_cuda_device_slab_compute_plain,
 +    /* .slab_ring_region          = */ ggml_backend_cuda_device_slab_ring_region,
 +    /* .slab_set_ring_cap         = */ ggml_backend_cuda_device_slab_set_ring_cap,
 +    /* .slab_enabled              = */ ggml_backend_cuda_device_slab_enabled,
 +    /* .slab_ring_slots           = */ ggml_backend_cuda_device_slab_ring_slots,
+     /* .moe_cache_band            = */ ggml_backend_cuda_device_moe_cache_band,
  };
  
- // backend reg
-@@ -9436,8 +7307,21 @@ static ggml_backend_feature * ggml_backend_cuda_get_features(ggml_backend_reg_t
+@@ -9454,8 +7318,21 @@ static ggml_backend_feature * ggml_backend_cuda_get_features(ggml_backend_reg_t
      GGML_UNUSED(reg);
  }
  
@@ -19606,7 +19613,7 @@ index 0a12fc537..76b0b7102 100644
              return false;
          }
 diff --git a/src/llama-model.cpp b/src/llama-model.cpp
-index 248e877fc..2d143ca12 100644
+index 628decd4f..eb63b1996 100644
 --- a/src/llama-model.cpp
 +++ b/src/llama-model.cpp
 @@ -385,7 +385,46 @@ llama_model * llama_model_create(llama_model_loader & ml, const llama_model_para
@@ -19684,7 +19691,7 @@ index 248e877fc..2d143ca12 100644
  uint64_t llama_model::n_elements() const {
      return pimpl->n_elements;
  }
-@@ -4035,23 +4094,3 @@ uint32_t llama_model_get_tok_embd(const struct llama_model * model, float * out)
+@@ -4061,23 +4120,3 @@ uint32_t llama_model_get_tok_embd(const struct llama_model * model, float * out)
  
      return (uint32_t) nelements;
  }
