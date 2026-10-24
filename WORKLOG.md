@@ -4,8 +4,14 @@
 
 **Shipped:** `v14-097cf33d9-r122` (**block 00**; the Meta uploader edits the block-09 Meta path but is
 owned by block 00).  `release.json` tip `3a16b4305`, tree `cb3648871`.  `scripts/validate-set.sh` green
-(fresh tarball, strict 14/14 `git am`, applied tree == recorded tree).  No kernel change; same-seed greedy
-text is byte-identical on Gemma4-E4B and Flash-Next.  Upstream candidate:
+(fresh tarball, strict 14/14 `git am`, applied tree == recorded tree).  The fork branch `rdna-boosts` was
+refreshed from the set (strict 14/14, tree `cb3648871`) and force-pushed to the personal fork at
+`960c1ddc6`; tag `v14-097cf33d9-r122` was pushed (Validate delivery set + Release patch set green; GitHub
+Release assets published).  `scripts/gate-prefill-logits.sh` PASS (mean KLD 0.000000, same-top-p
+100.000 %); MTP Protocol A on the MoE 35B-A3B (UD Q4_K_M, 1 GPU, `-n 3000`, prose, `--reasoning off`):
+plain **77.1 t/s**, `draft-mtp` **162.8 t/s** (2.11x), acceptance **0.739** (0.867/0.739/0.610).  Container
+images are built/pushed off-host by the `radiance` watcher.  No kernel change; same-seed greedy text is
+byte-identical on Gemma4-E4B and Flash-Next.  Upstream candidate:
 [`upstream/lazy-mode-off-resident/`](upstream/lazy-mode-off-resident/README.md).
 
 **1. `--lazy-mode off` was defeated by `--load-mode mmap`.**  `lazy_read::add()` returns false for OFF,
@@ -57,7 +63,7 @@ No kernel change, so the prefill-logit gate does not apply.
 **6. Docs/knobs.**  `LLAMA_LOAD_STAGE_MB` in `ENVIRONMENT.md`; the `--lazy-mode` help text and the
 `LLAMA_LAZY_MODE_OFF` comment now state the precedence; `patches/README.md` block 00/09; `AGENTS.md`
 critical fact.  The tag, fork `rdna-boosts` refresh and container images are the normal release steps;
-`release.json` names `r122`.
+`release.json` names `r122` and the off-host `radiance` watcher builds the images from the pushed tag.
 
 ## 261023.006 (r121) -- TODO #94: DFlash2 drafting on Qwen3.8-Flash-Next (qwen4exp exports the HC-averaged layer input, block 11); a slab peer copy into an ungranted range aborted `-sm layer` + `-ncmoe` (block 10)
 
