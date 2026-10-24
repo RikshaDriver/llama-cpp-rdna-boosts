@@ -159,3 +159,13 @@ Verification: the folded tip TREE is byte-identical to the pre-fold tip tree
 (`f46264b1fe565a016940e6fc7858cf50e3b11a9d`), and `scripts/gate-per-block-build.sh` reports **14/14
 built**.  Backup of the pre-fold chain: branch `fold-backup` (7e54e6eb4); `rebase-ckpt-7/8` are the
 pre-fold rungs.
+
+### Session 2 addendum — the GDN RDNA3.5 decision, measured on the rung-9 build
+
+The rung-9 chain (`cd2c8f488`) was built on halo (gfx1151, `BUILD_DIR=build-r9`) and the GDN A/B
+re-run there.  This **confirms** the decision in the rung-9 table with the shipped chain's own numbers:
+
+| block | upstream | class | decision | evidence | follow-up |
+|---|---|---|---|---|---|
+| 03 | `62df1815b` upstream's MMA chunked kernel (`gated-delta-net-mma.cu`) is eligible on gfx1151 at `n_tokens >= 2048` (`H_k == 16`, `H in {16,32,48,64}` — qwen35 has `H_k = ssm.group_count = 16`, so it IS eligible) but our chunked branch returns before it | **CORDON (ours)** | keep ours; upstream's MMA stays reachable only where our path stands down (kda, `S_v` not in {16,32,64,128}, or `GGML_CUDA_GDN_CHUNKED=0` for A/B) | gfx1151, qwen35 4B Q8_0, pp2048, interleaved x3: ours **3232.0** vs MMA **3130.7** t/s (**+3.2 %**; r126 build: +3.5 %).  Prefill-logit A/B (qwen35 9B, ctx512 x 40): **KLD 0.000074 / same-top-p 99.637 %** vs the MMA arm (limits 0.005 / 98 %) | record the gfx1151 numbers and the "one chunked kernel per device class" statement in AGENTS' block-03 GDN bullet at ship time |
+

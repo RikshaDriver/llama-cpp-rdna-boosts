@@ -51,9 +51,22 @@ RDNA3.5 (ssh halo, gfx1151, single iGPU) — the campaign's first non-RDNA4 vali
     (+0.21 %) — the shipped sparse QSA path agrees with the dense masked path on RDNA3.5.
   * Flash-Next coherence on gfx1151: **plain == draft-mtp**, 312 chars sha=201502207fcb; 34.5 -> 48.7 t/s.
   * Op tests (gfx1151): FLASH_ATTN_QSA 26/26, GATED_DELTA_NET 48/48, FLASH_ATTN_EXT 6391/6391.
-  * NOTE: those halo numbers are from halo's **r126** build (`~/llama.cpp`, build-rocm).  The rung-9
-    chain was transferred (`git bundle 3f03b1772..cd2c8f488`, branch `rebase-r9`) and its gfx1151 build
-    is `BUILD_DIR=build-r9` (see the session log); re-run the same four checks there before shipping.
+  * NOTE: the four bullets above were first measured on halo's **r126** build.  The rung-9 chain was then
+    transferred (`git bundle 3f03b1772..cd2c8f488` -> halo branch `rebase-r9`, `BUILD_DIR=build-r9`,
+    `~/llama.cpp/build-r9`) and re-measured there — these are the numbers to quote:
+    - build: 0 errors (22 min, gfx1151)
+    - Flash-Next GSQ (`--load-mode none --lazy-mode off`, -md MTP head, -n 64, seed 42, temp 0):
+      **plain == draft-mtp**, 330 chars sha=2b61b08095a1; **34.8 -> 57.8 t/s** (+66 %)
+    - QSA sparse-vs-dense oracle (ctx4096 x 4): PPL **2.2399 vs 2.2429** (+0.13 %)
+    - GDN A/B (qwen35 4B Q8_0, pp2048, interleaved x3): ours **3232.0** vs MMA **3130.7** t/s -> **+3.2 %**
+    - GDN prefill-logit A/B (qwen35 9B Q8_0, ctx512 x 40): **mean KLD 0.000074 / same-top-p 99.637 %**
+      -> PASS (base recorded at `~/.cache/rdna-boosts/gates-r9/prefill-logit-gfx1151-Qwen3.5-9B-Q8_0.kld`)
+    - DFlash2 (35B-A3B Q4_K_M + qwen36-35b-a3b-dflash-Q8_0.gguf, `--spec-type draft-dflash`):
+      **plain == draft-dflash**, 206 chars sha=cf7f8b23f404; 61.6 -> 104.8 t/s (+70 %)
+    - op tests: FLASH_ATTN_QSA 26/26, GATED_DELTA_NET 55/55, FLASH_ATTN_EXT 6402/6402, HC_MIX 30/30,
+      TOP_K_MASK 28/28 (same counts as gfx1201)
+    - the 35B-A3B GGUF in halo's model tree carries no `nextn` head, so an MTP gate on that model is not
+      possible there; DFlash2 covers the MoE speculator path instead.
 
 Where the work lives (NOT in the delivery repo — see the campaign rules):
   * worktree/branch: `~/llama-rebase`, branch `rebase-work`, 14 block commits
