@@ -29,6 +29,9 @@ Band gate (llama-batched-bench -npl 1,4,8, 27B UD-Q4_K_XL 3 GPU tensor, 512/128)
   rung 3 pp 1589/1781/1823, tg 47.7/144.1/230.7  vs  r126 pp 1609/1791/1814, tg 47.7/143.0/230.4
   -> equal within noise (one first-run pp anomaly of 1151 t/s did not reproduce)
 Next rung: d454a204e (QSA mask op #30640, qwen4exp layer inputs #30927, MoE down-proj #30861)
+  RUNG 7 WAS STARTED AND ABORTED this session (13 conflict hunks, mostly mechanical op-table unions).
+  The chain is clean at rebase-ckpt-6; the live conflict survey + the resolution plan are in
+  `RUNG7-SURVEY.md`.
 Next action: `cd ~/llama-rebase && git rebase --onto d454a204e 13786fbb3 rebase-work`  (expect the
   heaviest block-11 collision of the campaign: upstream reworks the QSA mask into a fused op while the
 delivery's QSA path is the derived-visibility design; keep the QSA CPU oracle green)
