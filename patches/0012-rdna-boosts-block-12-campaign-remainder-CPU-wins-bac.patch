@@ -1,4 +1,4 @@
-From 005e0614cd5b5080dc0ae92a0c18f8f6977dc7d2 Mon Sep 17 00:00:00 2001
+From c6f07af8baf255a09d63f99b425696c429302963 Mon Sep 17 00:00:00 2001
 From: Stew Forster <ci@rdna-boosts.invalid>
 Date: Wed, 21 Oct 2026 10:40:32 -0500
 Subject: [PATCH 12/13] rdna-boosts: block 12: campaign remainder (CPU wins,
@@ -98,7 +98,7 @@ unchanged.
  33 files changed, 2960 insertions(+), 680 deletions(-)
 
 diff --git a/common/arg.cpp b/common/arg.cpp
-index f19285602..41c1bfc32 100644
+index 161c09dd9..8b210305b 100644
 --- a/common/arg.cpp
 +++ b/common/arg.cpp
 @@ -2711,7 +2711,10 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
@@ -402,7 +402,7 @@ index 564fa9c4d..da77044b7 100644
      // Check if a backend sampler has already sampled a token in which case we
      // return that token id directly.
 diff --git a/common/speculative.cpp b/common/speculative.cpp
-index e6bcb7fe4..948fb4175 100644
+index 815e8236d..d72f54296 100644
 --- a/common/speculative.cpp
 +++ b/common/speculative.cpp
 @@ -996,6 +996,14 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
@@ -529,7 +529,7 @@ index e6bcb7fe4..948fb4175 100644
          return true;
      }
  
-@@ -2818,7 +2901,10 @@ common_speculative_init_result::common_speculative_init_result(
+@@ -2826,7 +2909,10 @@ common_speculative_init_result::common_speculative_init_result(
      llama_context * ctx_tgt,
      llama_model * model_dft_pre) :
      pimpl(new impl{}) {
@@ -541,7 +541,7 @@ index e6bcb7fe4..948fb4175 100644
      const bool spec_mtp = params.speculative.has_mtp();
  
      auto mparams = common_model_params_to_llama(params);
-@@ -2844,6 +2930,20 @@ common_speculative_init_result::common_speculative_init_result(
+@@ -2852,6 +2938,20 @@ common_speculative_init_result::common_speculative_init_result(
      // the draft context holds as many tokens per sequence as the target context
      cparams.n_ctx = llama_n_ctx(ctx_tgt);
  

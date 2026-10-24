@@ -1,4 +1,4 @@
-From e0880c055e4a3519b493e86f9b56906367cb7506 Mon Sep 17 00:00:00 2001
+From c45ea853b5dee4da372238f4b09fec21be7870e9 Mon Sep 17 00:00:00 2001
 From: Stew Forster <ci@rdna-boosts.invalid>
 Date: Thu, 22 Oct 2026 07:24:50 -0500
 Subject: [PATCH 11/13] rdna-boosts: block 11: qwen4exp (model,
@@ -115,7 +115,7 @@ TU in block 10; only the code that needs this block's own symbols is here.
  create mode 100644 tests/test-lazy-reader.cpp
 
 diff --git a/common/arg.cpp b/common/arg.cpp
-index 56902dc09..f19285602 100644
+index 5c25c9f18..161c09dd9 100644
 --- a/common/arg.cpp
 +++ b/common/arg.cpp
 @@ -2725,7 +2725,8 @@ common_params_context common_params_parser_init(common_params & params, llama_ex

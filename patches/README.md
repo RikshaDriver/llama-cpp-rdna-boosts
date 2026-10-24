@@ -165,6 +165,29 @@ reserves its compute buffers (r94 moved it here, the block that calls it).
 for the readback skip, on by default; `0` restores the pre-r118 behaviour with the tail still set),
 `LLAMA_MTP_DRAFT_OP_OFFLOAD`.
 
+**The draft's KV cache type follows the main `-ctk` / `-ctv` (r125, issue #216).**  Upstream gives the
+speculative draft context its own KV type pair (`--spec-draft-type-k` / `-ctvd`, defaulting to **f16**)
+and applies it unconditionally, so `-ctk q4_0 -ctv q4_0` still built the draft context an f16 cache.
+For an MTP draft that is invisible waste: it is the *same* model, its context only carries the nextn
+layer, and at `-c 131072` on a dense 27B the single draft layer held **512 MiB** of f16 KV against
+**144 MiB** at q4_0.  `common_base_params_to_speculative()` (`common/speculative.cpp`) now takes the
+main model's type unless the draft's own type was set explicitly, so lowering the main KV type for VRAM
+takes the draft with it; `-ctkd` / `-ctvd` (and `LLAMA_ARG_SPEC_DRAFT_CACHE_TYPE_K` / `_V`) still pin
+the draft to whatever is asked for, f16 included (the parser records the explicit set in
+`common_params_speculative_draft::cache_type_k_set` / `_v_set`).  The change cannot alter a generated
+token: the draft only proposes and the target verifies, and the same-seed greedy text is byte-identical
+between the two draft KV types (and to plain decode) on the dense 27B, on all four protocol-A axes.
+Decode is unchanged within noise where the delivery is tuned: three alternating reps per arm gave
+56.4-56.6 (f16) vs 56.4-56.5 t/s (q4_0) at `-c 8192 -n 400`, and 80.8-80.9 vs 80.6-80.7 t/s at
+`-c 102400 -n 3000` (protocol A scale), with `ROCBLAS_USE_HIPBLASLT=0`; the MoE arm is 190.4 vs 190.8 t/s.
+The quantized draft cache simply takes the native quantized-KV FA arm (block 05) instead of the f16 one.
+A **fast small model** does pay for it: 4B Q8_0, 3 GPU `-sm tensor`, `-ctk q8_0 -ctv q8_0`, MTP n3 =
+239.0/239.6/240.9 t/s (f16 draft KV) vs 232.7/233.0/232.7 (q8_0 draft KV), **-2.9 %**, with identical text;
+`-ctkd f16 -ctvd f16` restores the f16 draft there.  A `-ctk`
+left at f16 changes nothing.  Measured with `llama-cli -c 8192 -ub 1024` and with
+the draft KV size read back from the loader (`llama_kv_cache: size = ... 1 layers ... K (q4_0)`) on both
+the dense 27B and the 35B-A3B host-expert arm.
+
 **Tail-readback purity (r118).**  Skipping the readback cannot change what the draft reads: an ingested row `p` reads `h(p - 1)`, and any ubatch holding a row at `pos >= ingest_from - 1` is never skipped, so that source row is always fresh.  A batch is skipped only when every row is below `ingest_from - 1`, which is why the threshold is `ingest_from - 1` and not `ingest_from`.  Vision rows are always read (M-RoPE jumps the text position after an image).  With the tail unset every threshold is `0`, so the skip cannot trigger and no existing path changes.  The gain has two halves: the MTP hook's early return, which stops `llama_get_embeddings_nextn()`'s `ctx->synchronize()` from draining both backends after every prompt ubatch (about +0.6 %), and the target's nextn readback skip (about +0.1 %); `LLAMA_MTP_TAIL_READBACK=0` disables both.  Verified: identical greedy text and identical draft counts (177/364, acc/pos 0.754/0.426/0.270) after a 31.5k prompt in every arm, prefill-logit gate mean KLD 0.000000 / same-top-p 100.000 %, and prefill 1488.6 -> 1509.8 t/s (+1.4 %, 95 % CI +0.9..+1.9) on 2x R9700.  Records: `archive/work/mtp-tail-readback/`,
 `benchmarks/2026-10-23-pr206-mtp-tail-readback-promotion.md`.
 
@@ -586,6 +609,21 @@ whatever VRAM is left.
   prints one WRN.  `-md X --spec-type none` is a working "plain baseline with the drafter loaded" and an
   unused drafter costs no VRAM.
 * `common/fit.cpp`: `--fit` reserves the arena and the slab headroom per device.
+* **The draft reserve is only computed, and only logged, for a model that has host-resident experts**
+  (r125, issue #216).  The reserve is the `MOE_EXPERT_CACHE_AUX_RESERVE_MIB` input to
+  `llama_model_moe_cache_preflight()`, and that preflight walks `model->moe_host_expert_bytes` — which is
+  empty for a dense model (no `-ncmoe` / `-cmoe`), so the call is a no-op there.  It was still derived
+  and printed on every speculator run, and the line
+  `common_init_result: keeping the flat 3584 MiB draft reserve (...)` then read as evidence that the
+  slab or the expert-cache arena was involved in a **dense** model's VRAM failure (it was not: nothing
+  consumed the value).  `common_init_result` now gates the whole block on
+  `llama_model_moe_host_expert_dev_count(model) > 0`.  No behaviour change where the reserve is used:
+  the derived value, the flat fallback and the `MOE_EXPERT_CACHE_AUX_RESERVE_MIB` override are identical.
+* **The draft reserve charges the draft CONTEXT at the main model's KV types** (r125, block 02's draft
+  KV change).  `common_draft_reserve_estimate()` is called with the main `-ctk` / `-ctv`, which is now
+  what the draft context allocates too, so `--fit`'s fallback reserve and the slab reserve match the
+  actual allocation by construction.  An explicitly pinned draft type (`-ctkd` / `-ctvd`) is the one case
+  the estimate does not see: it always assumes the main pair.
 * Host-side: mmap reclaim (`LLAMA_LOAD_RELEASE_MMAP`), rear-fill host layers
   (`LLAMA_HOST_EXPERTS_FROM_END`), `--host-experts pool` (`MOE_HOST_POOL_MIB`), a second draft scheduler
   (`LLAMA_DRAFT_SCHED2`), compute-buffer drop/re-reserve, and the CPU MoE-offload thread cap.

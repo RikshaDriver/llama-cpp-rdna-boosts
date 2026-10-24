@@ -1,4 +1,4 @@
-From 355417a72f2baa31959dd2de2674aa92c540c75c Mon Sep 17 00:00:00 2001
+From 55d421582b7b3eb53bcf0c731faac01362dbd0aa Mon Sep 17 00:00:00 2001
 From: Stew Forster <ci@rdna-boosts.invalid>
 Date: Thu, 22 Oct 2026 05:53:08 -0500
 Subject: [PATCH 13/13] rdna-boosts: block 13: MTP draft vocabulary subset
@@ -64,10 +64,10 @@ Co-authored-by: Martino B <martino2k6@users.noreply.github.com>
  create mode 100644 tests/test-mtp-draft-vocab.cpp
 
 diff --git a/common/arg.cpp b/common/arg.cpp
-index 41c1bfc32..9168d9b3f 100644
+index 8b210305b..8f984658d 100644
 --- a/common/arg.cpp
 +++ b/common/arg.cpp
-@@ -4194,6 +4194,14 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
+@@ -4196,6 +4196,14 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
              params.speculative.draft.n_max = value;
          }
      ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_LOOKUP, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_DRAFT_N_MAX"));
@@ -83,7 +83,7 @@ index 41c1bfc32..9168d9b3f 100644
          {"--spec-draft-n-min"}, "N",
          string_format("minimum number of draft tokens to use for speculative decoding (default: %d)", params.speculative.draft.n_min),
 diff --git a/common/common.cpp b/common/common.cpp
-index 55a49f82a..3095b84c0 100644
+index 786099f9c..2210c7300 100644
 --- a/common/common.cpp
 +++ b/common/common.cpp
 @@ -1279,7 +1279,8 @@ common_init_result::common_init_result(common_params & params, bool model_only,
@@ -97,12 +97,12 @@ index 55a49f82a..3095b84c0 100644
          cparams_dft.n_rs_seq = 0;
  
 diff --git a/common/common.h b/common/common.h
-index a68b807fb..a0611c2a0 100644
+index fe86bdb35..26d1c0e0f 100644
 --- a/common/common.h
 +++ b/common/common.h
-@@ -353,6 +353,9 @@ struct common_params_speculative_draft {
-     ggml_type cache_type_k = GGML_TYPE_F16; // KV cache data type for the K
-     ggml_type cache_type_v = GGML_TYPE_F16; // KV cache data type for the V
+@@ -359,6 +359,9 @@ struct common_params_speculative_draft {
+     bool cache_type_k_set = false;
+     bool cache_type_v_set = false;
  
 +    // MTP only: draft over token ids < N plus control tokens (0 = full vocabulary)
 +    int32_t mtp_vocab = 0;
@@ -111,10 +111,10 @@ index a68b807fb..a0611c2a0 100644
      common_cpu_params cpuparams_batch;
  
 diff --git a/common/speculative.cpp b/common/speculative.cpp
-index 948fb4175..4eb3d2913 100644
+index d72f54296..9f7008a4d 100644
 --- a/common/speculative.cpp
 +++ b/common/speculative.cpp
-@@ -2913,7 +2913,8 @@ common_speculative_init_result::common_speculative_init_result(
+@@ -2921,7 +2921,8 @@ common_speculative_init_result::common_speculative_init_result(
      auto cparams = common_context_params_to_llama(params);
  
      if (spec_mtp) {

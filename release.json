@@ -1,28 +1,28 @@
 {
-  "release": "v14-097cf33d9-r124",
+  "release": "v14-097cf33d9-r125",
   "base": "097cf33d9",
   "base_tree": "30c400ccea2e2fb47b663036a6cee08a4dc542d8",
   "n_blocks": 14,
-  "tip": "355417a72",
-  "tree": "221bc7dda4de0c071fda063a6a121fd19cfa64e9",
+  "tip": "55d421582",
+  "tree": "a3379b6d02ce64e1c146161b7e6fef0b94c5dbc7",
   "all_patch": {
     "name": "rdna-boosts-all.patch",
-    "sha256": "6164686d6cc98783b20efd3e4c074036a1e924ec6b6775d28ea06426c6d77691"
+    "sha256": "d178ff8a6940f9111fb42b02ee6dfe56d93b250c4cf7cff09c4cb6d3f452d897"
   },
   "patches": {
-    "0000-rdna-boosts-block-00-foundation-band-uniformity-Meta.patch": "1a1cbd265d78a2a1fc2303417fb9a1f8f0e32bb26bb8e85278dcf5f9037763d3",
-    "0001-rdna-boosts-block-01-hybrid-HIP-all-reduce-RDNA4-gat.patch": "b705996b4ff5e4d284f5699d220ea51c31f44a4da5b73355cbd5f97f828c52fb",
-    "0002-rdna-boosts-block-02-adaptive-MTP-draft-depth.patch": "6295f3cf9331c1f872a099adfe677218f25df75464bcdfca940a2137fc98f7e1",
-    "0003-rdna-boosts-block-03-chunked-gated-delta-net-prefill.patch": "af156fc31877ba29d1f6302b263b6362f377988daad4c46554e08e63fab857d9",
-    "0004-rdna-boosts-block-04-BF16-KV-cache-and-native-BF16-f.patch": "79c2a917e47518e0bf4d550beaeccbaca6850d4c23acfb7f13ab4f57673f53e1",
-    "0005-rdna-boosts-block-05-flash-attention-band-native-qua.patch": "1de0d8cbad59ed8728a54b1030e863df1224391a06664e52fe3a09dfc4018b2d",
-    "0006-rdna-boosts-block-06-MMB-quantized-prefill-GEMM.patch": "39b65dccf397fbe267f89cfe69c0156255d3a6c2de5a28e53e54a00245b37c6c",
-    "0007-rdna-boosts-block-07-k-quant-boosts-mmvq-VDR-Q6_K-MM.patch": "87186562eccd2e84235a13fb2898e5c5ee8b472c3a0c9ca412e7ed809a3c15ec",
-    "0008-rdna-boosts-block-08-fused-kernels-old-08-fusions-ol.patch": "d2a6daebeb9fb3d1360b59c8b6169dbac83b02c9b83e64b9f9a7903d4669297e",
-    "0009-rdna-boosts-block-09-host-resident-MoE-iface-schedul.patch": "ac2752d0d35c0203323ddc5142613eac2d28424076d9a29bd8be46bb4f5e7a29",
-    "0010-rdna-boosts-block-10-slab-fusion-dispatcher-async-in.patch": "05af5b962b920d3d329a22df8bb1dff876194afde6b45da0c76ec8f8e733ae9d",
-    "0011-rdna-boosts-block-11-qwen4exp-model-hyper-connection.patch": "b66714c88ee47e82460be30d3eb6a6cfdf470252298e57193f37274a8983e3cc",
-    "0012-rdna-boosts-block-12-campaign-remainder-CPU-wins-bac.patch": "1746c6a34ca96ecc567fba7ec4359f06c8de1f54ce7d3c6b55f6c39b386adcb4",
-    "0013-rdna-boosts-block-13-MTP-draft-vocabulary-subset-spe.patch": "a006d8295c4866fa9544aa6197ab8e7e27f960b7f1028877e7d45db8d822b451"
+    "0000-rdna-boosts-block-00-foundation-band-uniformity-Meta.patch": "ef1d89eb1593f19b8589184cb9bb0d10e8fe8ee2cfd832321440d5668fd944ca",
+    "0001-rdna-boosts-block-01-hybrid-HIP-all-reduce-RDNA4-gat.patch": "dbe482ce515f2d186d894b51b46be92cde95247f117f1731fd120c0337caad51",
+    "0002-rdna-boosts-block-02-adaptive-MTP-draft-depth.patch": "b00169eede53da5fc8db0fc2d8267b819bd786d8ea58baf4e2d1f2cfcb83c84c",
+    "0003-rdna-boosts-block-03-chunked-gated-delta-net-prefill.patch": "c84496f3e5ba5a8aefc13f7db99d550ea98f7a6527e13f63a62b611d800e3446",
+    "0004-rdna-boosts-block-04-BF16-KV-cache-and-native-BF16-f.patch": "5af8c644bf35ff199a2d0721d0dbfb5ccb75f8488128d3175c97fb01b2b427f4",
+    "0005-rdna-boosts-block-05-flash-attention-band-native-qua.patch": "dea05eb15c621a7d4a8f764549bf01bedbfaa9e41748ec7717a3cd5a34d0e125",
+    "0006-rdna-boosts-block-06-MMB-quantized-prefill-GEMM.patch": "6cbfc3c42f5eb1206d49bac82b03ac8211a6444230e0e8d5462ef4c9221a50d2",
+    "0007-rdna-boosts-block-07-k-quant-boosts-mmvq-VDR-Q6_K-MM.patch": "2643ab51e38190465322f3578dadda56535c5387b97ecd2beb096ceeec7f4149",
+    "0008-rdna-boosts-block-08-fused-kernels-old-08-fusions-ol.patch": "343921b369b0c78169a76c610a0782116e5e4b8349071602aba0ce657563457b",
+    "0009-rdna-boosts-block-09-host-resident-MoE-iface-schedul.patch": "7321fd18835124f325accc709331f052375142b9b464029a8f0c563ce429d63f",
+    "0010-rdna-boosts-block-10-slab-fusion-dispatcher-async-in.patch": "1e62308f57c36266c9ccdbb9e9875e0e9a6bf69da45d22d165ef08a02d1f6298",
+    "0011-rdna-boosts-block-11-qwen4exp-model-hyper-connection.patch": "b9b92dedd8f4e947ef702dfc439c6d14ad7c02d237b06380f809b997de6ba2f1",
+    "0012-rdna-boosts-block-12-campaign-remainder-CPU-wins-bac.patch": "8927100d36778b031d8d91731f15c0f424c33f7217012833bf4a3383d9bd6d16",
+    "0013-rdna-boosts-block-13-MTP-draft-vocabulary-subset-spe.patch": "a56a2ea6391143cb0cfb54d55bda9001454cbe0a8e1e5741d80a89459ba544f7"
   }
 }
