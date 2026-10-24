@@ -3,8 +3,10 @@
 **Status: OPEN (campaign, 2026-10-24).  Documentation only — no rebase was performed, no branch was
 touched, nothing here is part of the delivery.**
 
-This is the handover a fresh session should start from.  Read `AGENTS.md` first (policies: report findings
-before shipping, push only to the personal fork, WIP/promotion rules), then this file, then
+This is the handover a fresh session should start from.  **Paste
+[`KICKOFF-PROMPT.md`](KICKOFF-PROMPT.md) into the new session**; it is the self-contained task brief
+(decision framework, the checkpoint ladder, the per-session deliverables).  Then read `AGENTS.md` (policies:
+report findings before shipping, push only to the personal fork, WIP/promotion rules), this file,
 [`GOTCHAS.md`](GOTCHAS.md) (the collision inventory) and [`SURVEY-2026-10-24.md`](SURVEY-2026-10-24.md)
 (what a trial apply did).
 
