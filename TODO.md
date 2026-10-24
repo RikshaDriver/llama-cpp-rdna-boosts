@@ -17,11 +17,115 @@ top of `WORKLOG.md` is the newest record.
 
 | # | subject | kind | status |
 |---|---|---|---|
+| **96** | the n-gram band clamp fires on a config whose slab declines (no arena) | gating correctness / perf | open (reproduced 2026-10-24; needs a decision between the three fix shapes) |
+| **97** | deep-context prefill scales worse than upstream (issue #214): RDNA4 cause found (#98), RDNA2 half open | performance / platform | open (gfx1201 reproduced and diagnosed 2026-10-24; reporter's RDNA2 sweep owed) |
+| **98** | split the RDNA4 MMA band row from the prefill row (same `ncols=64` instantiation) | performance / gating | open (prototype measured +36 % at d98k; needs the instantiation split + prefill-logit gate) |
 | **79** | RDNA3_0 verify-band fusions: no multi-device measurement, and gfx1101/gfx1102 untested | platform validation | open (shipped default-on in r95; needs a 2+ card gfx1100 box).  `ssh fingon` is single-RDNA3 (`ROCm0`; its second rocm-smi entry is an iGPU and is not a HIP device), so it does **not** cover the multi-device arm — it validates single-GPU gfx1100 only.  gfx1101/gfx1102 still have no hardware |
 | **70** | harden the expert-cache re-arm / wide-aux growth against a starved arena | robustness | open |
 | **36** | genuine CPU/GPU overlap for the MoE misses | performance | open, scoping (`wip/moe-cpu-overlap/`) |
 
 Accepted limitations that are deliberately **not** fixed are listed at the end — do not re-report them.
+
+---
+
+## 96. The n-gram band clamp fires on a config whose slab declines (no arena) — GATING CORRECTNESS / PERF
+
+
+**Status: open, reproduced 2026-10-24 (`WORKLOG.md` 261024.006).**  `common` clamps an enabled n-gram
+speculator to `band - 1` in `common_init_from_params`, i.e. *before* `llama_init_from_model`; the
+movable-boundary slab is only armed at model load and is created or declined at the first compute-buffer
+allocation (`moe_cache_disable_streaming()` runs there).  So a host-expert config whose slab is armed and
+then **declines** is clamped to 15 while it runs the streaming path with no arena — the class the issue-#214
+reporter is in (12 GiB card, `the movable-boundary slab does NOT fit` + `moe_cache_disable_streaming`).
+Repro on gfx1201: 35B-A3B UD Q4_K_M `-ngl 99 -ncmoe 40 --spec-type ngram-mod` with
+`GGML_CUDA_SLAB_MIN_ARENA_MIB=999999` -> `draft length 64 -> 15` at 0.03.631 s, slab decline at 0.03.652 s.
+Safe (a narrower verify is always valid) but it removes the wide-draft win that the no-arena path has
+(2x R9700 control: 67.6 wide vs 52.2 capped t/s); workaround `LLAMA_SPEC_NGRAM_MOD_BAND_CLAMP=0`.
+
+**Why it is not a one-liner.**  The clamp also sets `cparams.n_rs_batch` (the GDN rollback bound, and the
+width the slab's narrow verify floor is measured at), so it must stay before context creation; a late
+"un-clamp" would leave `n_rs_batch` too small for a 64-row verify on a GDN model.  Options:
+
+1. **Split the two widths.**  Keep `n_rs_batch` at the safety bound (`common_speculative_n_max() + 1`, from
+the *unclamped* config) and give the slab's narrow floor its own "expected verify width" parameter; clamp
+the ngram draft after the context exists.  Costs ~5 GiB of arena on a real arena config only if the floor
+keeps the wide width, so the floor must take the *clamped* width when the band is live — which is known
+before context creation, so this works.  Largest change, correct for both regimes.
+2. **Preflight feasibility test.**  The slab's three terms (work estimate, `SLAB_MIN_ARENA_MIB`, ring hole)
+are all known at model load; only free VRAM is optimistic (KV/compute are not allocated yet), so the test
+would miss configs like the reporter's that fit before KV.  Cheap, but would not have fixed this report.
+3. **Accept and document.**  Keep the clamp, state that a slab-declined config is clamped (the README/§50
+caveat already says so), and let the user set `LLAMA_SPEC_NGRAM_MOD_BAND_CLAMP=0`.  Zero risk; gives up the
+no-arena wide draft for everyone on a small card.
+
+Whichever is chosen, the slab-decline messages should name `GGML_CUDA_SLAB_MIN_ARENA_MIB` and
+`GGML_CUDA_SLAB_RING_MIB`, not only `GGML_CUDA_SLAB_RESERVE_MIB` (the reporter's binding constraint was the
+ring hole: 768 + 2048 = 2816 MiB would have fit in the 3072 MiB available).
+
+**Gates for any fix:** the reporter's class must keep `n_max 256` (no clamp line) and a real arena config
+must still clamp (band 16 -> 15) with identical text/acceptance; `scripts/gate-prefill-logits.sh` is not
+needed (no kernel change) but a same-seed coherence run on a GDN model with a 64-row verify is, to prove
+`n_rs_batch` stayed >= the verify width.
+
+---
+
+## 97. Deep-context prefill scales worse than upstream (issue #214): RDNA4 cause found, RDNA2 half open — PERFORMANCE / PLATFORM
+
+
+**Status: open; the reporter's original symptom, never diagnosed until 2026-10-24.**  Issue #214's own summary
+is "short-context prefill is much faster than upstream; full long prompts are slower", and their update
+confirming the expert-cache arena never ran leaves exactly that.  Their numbers (RX 6700 XT 12 GB, gfx1031 as
+gfx1030, `-ncmoe 24`, q8_0 K/V, `-ub 1024`): `pp512` **+63 %** at d0, +17 % at d32k, **-6 %** at d100k;
+`read 3.8k` -6 %, `read 117k` **-19 %** (360 vs 443 t/s).  Constant token count with growing depth rules out
+any per-token cost (host experts, MoE, the arena) and localises it to **attention / KV depth scaling**.
+
+**Reproduced on gfx1201 and one cause fixed in prototype (2026-10-24, `WORKLOG.md` 261024.006).**  Three
+builds (r125, upstream at the fork point `097cf33d9`, upstream `master` `71255fefc`), 1 GPU, Qwen3.6-35B-A3B
+UD Q4_K_M fully resident, q8_0 K/V, `pp512 -n 0`: r125 4541 / 2488 / 1620 / **1210** t/s at
+d0/32k/64k/98k vs upstream 2522-3600 / 2248-2273 / 1651-1661 / **1345-1366** -- our advantage decays with
+depth and goes negative by 98k, on gfx1201 too, and upstream `master` is no better than the fork point at
+depth.  The kernel trace put it in our FA launch geometry; the prototype (`#98`'s row swap) gives 1645 at
+d98k.  The reporter's streaming regime (`-ncmoe 24`, cache off) is *faster* than upstream at every depth on
+this box (1223/1106/997/892 vs 983/884/775/694), so their -19 % is not the host-expert path.
+
+**The RDNA2 half is still open, and it is not #98's row** (gfx1030 has no WMMA: its prefill takes the tile
+kernel and the `get_config_rdna` table, where ncols 64 is 256 threads in both trees).  Candidates: block 05's
+RDNA2 tile table from PR #165/r76 (per-DKQ configs, launch caps, WGP occupancy, the r99 checked tail -- never
+depth-swept, and the RDNA2 validation makes no performance claim) and the
+`prefill_stages = !RDNA3_5` FA-staging arch gate (RDNA3_5 measured native-better at every depth; RDNA2
+never was); their 117k per-token costs (GDN/MMQ) are a separate additive term.
+
+**Next:** the reporter's sweep (they offered) at `-p 512 -n 0 -d 0,8192,...,120000 -r 3` on both images with
+their own flags, plus a `-ctk`/`-ctv f16` arm at a fitting context and a log grep for `FA prefill staging`
+refusals (their peak was 12204 of 12272 MiB).  If the RDNA2 shape survives that, cut a comparable tile-table
+A/B; no RDNA2 hardware here (`TODO #79`'s shortage applies).  Do **not** close this on a decode-side finding
+again: the r123 band clamp is a decode/arena result and was never the reported symptom.
+
+---
+
+## 98. Split the RDNA4 MMA band row from the prefill row (they share the `ncols=64` instantiation) — PERFORMANCE / GATING
+
+
+**Status: open; prototype measured 2026-10-24 (`WORKLOG.md` 261024.006).**  `ggml_cuda_fattn_mma_get_config_rdna`
+starts with two RDNA4 GQA band rows keyed on `ncols` alone.  The 64-column row returns
+`fattn_mma_config(512, 1, 64, 64, 64, 32, 1, true)` (16 warps, occupancy 1) and is reached by **both** the
+W=5..8 verify band and every wide prefill (`Q->ne[1] > 4` with `ncols2 = 8`), because both dispatch to
+`ncols1 = 8`.  `__launch_bounds__` is compiled per instantiation, so prefill runs the band geometry: at
+`pp512 @ d98304` (35B-A3B Q4_K_M, q8_0 K/V, 1 GPU) the FA kernel is 28.74 s vs upstream's 19.63 s for the
+same 980 dispatches (512 threads/occ 1 vs 256/occ 2), and deep prefill is **-10 %** end to end.
+
+Replacing the row with upstream's `(256, 2, 64, 128, 128, 64, 1, true)` (prototype) gives **+36 % at d98304
+(1210 -> 1645), +36 % at d65536, +19 % at d32768, +3 % at d0**, i.e. 20 % above upstream `master` at d98304.
+
+**The row swap alone is not the fix**: it gives up the W=5..8 band geometry (the source comment measures
+~17 % for q8_0 at that band, where MTP-adaptive/ngram verifies live).  The fix is a query-width-keyed
+instantiation split -- band row only when the launch is the band (`n_q <= 8`), the 256-thread row otherwise
+(reuse the existing `band_fetch_ahead` / a new template flag, and restrict the extra instantiation to
+`DKQ=DV=256, ncols2=8` so the instance set grows by one).  **It changes prefill FA's KV-row split and combine
+order, so it owes `scripts/gate-prefill-logits.sh` (issue #113) plus same-seed coherence, and the W=5..8 band
+arm must keep its measured geometry** (a decode/verify A/B on an arena config, e.g. MTP-adaptive n_max 5-7,
+which is also where GREEDY-PURITY §19's reduction-order rules apply).  No purity promise changes if the band
+path is untouched.
 
 ---
 

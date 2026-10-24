@@ -1,5 +1,112 @@
 # WORKLOG - dated delivery records
 
+## 261024.006 (no release) -- issue #214: the reporter's box was never on the arena (r123 is not their fix), the band clamp fires on a slab-declined config, and their real regression is deep-context prefill
+
+**Docs only so far: no patch, `release.json` or tree change; `scripts/validate-set.sh` is unaffected.**  The
+maintainer re-opened issue #214 on this record.  The r123 fix stands and the campaign record stays
+`archive/work/ngram-mod-host-experts/`; the two new items are `TODO.md` **#96** (the clamp gating) and
+**#97** (deep-prefill depth scaling).
+
+**What the reporter's update says** (comment 6383029106, 2026-10-24T10:19:55Z -- posted seven minutes before
+the r123 ship note, so our reply raced it).  All three r120 server runs and the llama-bench runs log the
+movable-boundary slab refusing to be created and `moe_cache_disable_streaming` (stock `-ncmoe` streaming);
+there is no `moe_cache_report`, `h=` or `expert traffic per token` line in any of them.  On that 12 GiB card
+(128k context plus the MTP draft context leaves ~540 MiB) the 2048 MiB arena floor is out of reach, so the
+expert cache never ran.  Their r120 numbers are therefore the **no-arena / streaming** regime, not the arena
+regime the r123 clamp is for.  Their decode was already at parity or better than upstream (write 29.0 vs
+28.2, rewrite 172/183 vs 173/183, fresh 47.1/43.3 vs 44.1/43.9 t/s), consistent with the clamp being inert
+for the arena there and with the wide draft being the win off the arena.
+
+**The regression that is left is not the band, and was never diagnosed.**  Their own table holds the query
+count constant and grows only the KV depth: `pp512` at d0 **+63 %** vs upstream (922 vs 566 t/s), d32k +17 %
+(559 vs 479), d100k **-6 %** (274 vs 290); `read 3.8k` -6 % (920 vs 979), `read 117k` **-19 %** (360 vs 443).
+A per-token cost (host experts, MoE, the arena) is constant at a fixed token count, so this localises to the
+**attention / KV-read path scaling worse with depth on RDNA2**, which at 117k (quadratic attention)
+compounds into the reported -19 %.  Short-context prefill is much faster and decode is fine, so "our code is
+slower than upstream" is specifically "our deep-context prefill is".  That is `TODO.md` #97.  RDNA2-only
+candidates, all block 05: the wide-tile `GGML_CUDA_FATTN_TILE_Q_GLOBAL` reads Q from global once per KV tile
+(the +30 % figure was a shallow measurement), the per-DKQ RDNA2 tile table / launch caps / WGP occupancy,
+the checked tail for the last tile -- and the `prefill_stages = !RDNA3_5` FA staging arch gate (RDNA3_5 was
+measured native-better at every depth; RDNA2 was never depth-swept).  A near-full card adds one more: the
+FA prefill staging arena can be refused (their peak is 12204 of 12272 MiB), which falls back to native K/V
+reads.
+
+**Upstream drift is a live alternative and it is larger than the patch set.**  Our fork point `097cf33d9`
+is 2026-10-12; upstream `master` on 2026-10-24 is `71255fefc` (257 commits).  The window holds
+`62df1815b` *cuda, hip: GDN chunked kernel (#29353)* -- the GDN prefill path block 03 owns -- plus
+`5aeac37a3` / `99db719bd` FA fixes, `280141e6d` *CUDA: chunk graphs*, `4c1004c49` MMQ Stream-K cap,
+`1a24df163` DP4A MMQ tile height and `2744e48d1` faster MMVQ.  The reporter's upstream is b11804, which
+already contains all of them.  So the re-base is the first experiment, not a patch hunt; the A/B below is
+what separates them.
+
+**r123 defect this exposed: the band clamp fires on a config whose slab declines.**  `common` queries
+`llama_model_moe_cache_band()` in `common_init_from_params` (before `llama_init_from_model`), when the slab
+is only *armed*; the slab is created (or declines) at the first compute-buffer allocation
+(`ggml/src/ggml-cuda/ggml-cuda.cu` -> `ggml-cuda-slab.cu`), and only then calls
+`moe_cache_disable_streaming()`.  So a config exactly like the reporter's -- preflight passes, slab armed,
+slab cannot be created, run streams -- is clamped anyway while its arena does not exist.  Repro (gfx1201,
+35B-A3B UD Q4_K_M, `-ngl 99 -ncmoe 40 -t 8`, `--spec-type ngram-mod`, forced decline with
+`GGML_CUDA_SLAB_MIN_ARENA_MIB=999999`): `ngram-mod: draft length 64 -> 15` at 0.03.631 s, then
+`the movable-boundary slab does NOT fit` + `moe_cache_disable_streaming` at 0.03.652 s.  Safe (a narrower
+verify is always valid) but wrong: it takes the copy-heavy win the wide draft gives off the arena (2x R9700
+control: 67.6 wide vs 52.2 capped t/s).  `LLAMA_SPEC_NGRAM_MOD_BAND_CLAMP=0` is the workaround.  A correct
+fix has to decide **before** context creation, because the clamp also sets the GDN `n_rs_batch` bound and the
+slab's narrow verify floor; `TODO.md` #96 records the three options (defer the clamp and give the floor its
+own width; a conservative preflight feasibility test; or accept the clamp and document it).
+
+**The decline message names the wrong knob for a small card.**  Their log says the slab needs the work
+buffer (768 MiB) + a 2048 MiB arena floor + the H2D-ring hole, and only 3072 MiB was available after the
+1024 MiB reserve: 768 + 2048 = 2816 would fit, so the auto-sized ~1.6 GiB ring hole is what tipped it.  The
+message names `GGML_CUDA_SLAB_RESERVE_MIB`; `GGML_CUDA_SLAB_MIN_ARENA_MIB` (lower the floor) or
+`GGML_CUDA_SLAB_RING_MIB` (leave the ring outside the slab) are the knobs that can make it fit there, and
+the message should name them.
+
+**The A/B reproduced the shape on gfx1201 and found one cause -- our own FA config, not upstream drift.**
+Three builds, `~/bin/build-llama-rocm`: our r125, upstream at the fork point `097cf33d9` (`~/llama-up-base`)
+and upstream `master` `71255fefc` (`~/llama-up-head`).  Cell: 1 GPU, Qwen3.6-35B-A3B UD Q4_K_M (21.1 GiB,
+fully resident), `-fa 1 -ctk q8_0 -ctv q8_0 -t 8 -b 2048 -ub 1024 -p 512 -n 0 -r 1`, the reporter's
+constant-query depth sweep.  `pp512` t/s:
+
+| build | d0 | d32768 | d65536 | d98304 |
+|---|---:|---:|---:|---:|
+| r125 | **4541** | 2488 | 1620 | 1210 |
+| upstream @ fork point | 2522 | 2248 | 1651 | **1345** |
+| upstream @ master | 3600 | 2273 | 1661 | **1366** |
+| r125 + the prototype row below | **4694** | **2954** | **2058** | **1645** |
+
+The same ordering holds with `-ncmoe 24 MOE_EXPERT_CACHE_MIB=0` (the reporter's streaming regime, our path):
+r125 1223 / 1106 / 997 / 892 vs upstream 983 / 884 / 775 / 694 (base) and 991 / 884 / 780 / 707 (master) --
+i.e. our host-expert path is *faster* at every depth there, so their -19 % is not that path.
+
+**Root cause (gfx1201): the RDNA4 *band* MMA row is baked into the prefill kernel.**
+`ggml_cuda_fattn_mma_get_config_rdna` (`fattn-mma-f16.cuh`) starts with two RDNA4 GQA band rows keyed on
+`ncols` alone; the 64-column one returns `fattn_mma_config(512, 1, 64, 64, 64, 32, 1, true)` (16 warps,
+occupancy 1).  `__launch_bounds__` is compiled per instantiation, and the query-width dispatch gives
+`ncols1 = 8, ncols2 = 8` (ncols 64) to **both** the W=5..8 band and every wide prefill (`Q->ne[1] > 4`).  So
+prefill runs the band geometry; upstream's row for (256,256,64) is 256 threads / occupancy 2.  Kernel trace
+at `pp512 @ d98304` (`rocprofv3 --kernel-trace`, r125 vs master): total kernel 45.0 s vs 40.1 s, and the
+only large component is `flash_attn_ext_f16<256,256,8,8,...>` at **28.74 s vs 19.63 s** for the same 980
+dispatches -- ours `workgroup (32,16)` / LDS 36864 / private 112, upstream `workgroup (32,8)` / LDS 34944 /
+private 404.  Everything else is ours (MMB, routed-compact, GDN), which is the +63..+80 % at d0.
+
+Prototype (the row replaced by upstream's `(256, 2, 64, 128, 128, 64, 1, true)`, one line, rebuilt):
+**+36 % at d98304 (1210 -> 1645), +36 % at d65536, +19 % at d32768, +3 % at d0**, and 20 % above upstream
+master at d98304.  So the delivery is *not* slower than upstream at depth once the band row stops applying to
+prefill; the reporter's own bias (short-context fast, deep slower) is the same shape at a smaller magnitude
+on RDNA2.  The plain revert is **not** the fix: it also gives up the W=5..8 band geometry (the source row's
+comment measures ~17 % for q8_0 at that band, and MTP-adaptive/ngram verifies live there).  The fix is a
+query-width-keyed instantiation split (band row only when `n_q <= 8`), which changes prefill FA's KV-row
+split/combine order and therefore owes `scripts/gate-prefill-logits.sh` plus coherence -- `TODO.md` #98.
+
+**The reporter's RDNA2 case is not this bug** (gfx1030 has no WMMA: its prefill takes the tile kernel and the
+`get_config_rdna` table, which is 256 threads for ncols 64 in both trees), so #97 keeps an open RDNA2 half:
+block 05's RDNA2 tile table from PR #165/r76 at depth, and their 117k per-token costs.  Their sweep is the
+measurement that separates those.
+
+**Docs:** `README.md` (the "no active arena" note gains the slab-declined class and the clamp caveat),
+`GREEDY-PURITY.md` §50 (same, plus the reporter's confirmation), `ENVIRONMENT.md` §3
+(`LLAMA_SPEC_NGRAM_MOD_BAND_CLAMP`), `patches/README.md` (blocks 05/09), `TODO.md` (#96, #97, #98).
+
 ## 261024.005 (r125) -- issue #216: the MTP draft's KV cache type follows the main `-ctk`/`-ctv`, and the draft-reserve log only fires where it is used
 
 **Change:** **blocks 02 and 09**.  `release.json` tip `55d421582`, tree `a3379b6d0` (unchanged from

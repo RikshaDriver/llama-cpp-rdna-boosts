@@ -314,7 +314,14 @@ code/prose-neutral with the same recall win.  The small reasoning cost is the pr
 >
 > * A model with **no active arena** (fully device-resident, or the CPU expert path
 >   `MOE_EXPERT_CACHE_MIB=0`) is never clamped — there the wide draft is the win (144.7 -> 378.7 t/s on the
->   same model fully resident), so keep the defaults.
+>   same model fully resident), so keep the defaults.  A host-expert config on a card too small to create the
+>   movable-boundary slab lands on the same streaming path (the loader prints `the movable-boundary slab
+>   does NOT fit ... STREAMING`): the slab needs the estimated work buffer + the `GGML_CUDA_SLAB_MIN_ARENA_MIB`
+>   floor (2048) + the `GGML_CUDA_SLAB_RING_MIB` hole, and on a 12 GiB card lowering the floor or setting
+>   `GGML_CUDA_SLAB_RING_MIB=0` can be what makes it fit.  The wide draft is the win there too (2x R9700
+>   control: 67.6 vs 52.2 t/s capped), **but the clamp is currently decided before the slab's create/decline
+>   decision, so it can still fire on such a card** — keep `LLAMA_SPEC_NGRAM_MOD_BAND_CLAMP=0` there until
+>   `TODO.md` #96 fixes the gating.
 > * If you deliberately set `--spec-ngram-mod-n-max` above the band (issue #214's `256`, for instance), it
 >   is clamped too; note that a naked `--spec-ngram-mod-n-max 15` **without** lowering
 >   `--spec-ngram-mod-n-min` (default 48) silently disables `ngram-mod` rather than shortening it.

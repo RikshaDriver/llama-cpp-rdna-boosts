@@ -272,6 +272,18 @@ almost all of them `template-instances/*.cu`.
 * **The FA chooser band rule (F1)**: a quantized K/V cache took VEC for `n_q <= 2` and TILE from `n_q = 3`;
   both VEC conditions sit inside the band, so the branch is deleted and the band is TILE
   (`GREEDY-PURITY.md` §14).
+* **Known defect (TODO #98, 2026-10-24) — the RDNA4 MMA band row is also the prefill row.**
+  `ggml_cuda_fattn_mma_get_config_rdna` (`fattn-mma-f16.cuh`) selects its two RDNA4 GQA-8/head-256 band rows
+  on `ncols` alone, and the 64-column row is reached by **both** the W=5..8 verify band and every wide
+  prefill (`ncols1 = 8, ncols2 = 8`); `__launch_bounds__` bakes the band geometry (16 warps, occupancy 1,
+  `nbatch_K2/V2` 64, combine 32) into that instantiation, so prefill runs it instead of upstream's 256-thread
+  row.  Measured on gfx1201 (35B-A3B Q4_K_M, q8_0 K/V, 1 GPU): the FA kernel takes 28.74 s vs upstream's
+  19.63 s for the same 980 dispatches at `pp512 @ d98304` (\-26 % on the kernel, \-10 % end to end); the
+  prototype row swap (`(256, 2, 64, 128, 128, 64, 1, true)`) gives **+36 % at d98304, +19 % at d32768,
+  +3 % at d0, 20 % above upstream master at d98304**.  The plain swap also gives up the W=5..8 band gain, so
+  the fix is a query-width-keyed instantiation split (band row only when `n_q <= 8`) and it owes
+  `scripts/gate-prefill-logits.sh` (the row changes the KV-row split/combine order).  Detail:
+  `WORKLOG.md` 261024.006, `TODO.md` #97/#98.
 * **Native quantized K/V (V4/V5)**: the sub-F16 quant types (`q8_0`/`q4_0`/`q4_1`/`q5_0`/`q5_1`/`iq4_nl`)
   read the cache natively instead of a whole-cache F16 conversion per decode step — a decode-*depth* win,
   and the margin that lets a high-context MTP config load (`GREEDY-PURITY.md` §34).
@@ -497,7 +509,13 @@ whatever VRAM is left.
   wide (159.2 t/s at a 16-row verify, 55.0 at 17).  **Not** applied to a device-resident model or the CPU
   expert path (band 0): there the wide draft is the win (378.7 vs 144.7 t/s).  `LLAMA_SPEC_NGRAM_MOD_BAND_CLAMP=0`
   restores the uncapped draft; a `draft.n_max` above the band warns instead of clamping (the 15 bound is a
-  correctness one).  `GREEDY-PURITY.md` §50, `ENVIRONMENT.md` §3, `WORKLOG.md` 261024.002.
+  correctness one).  **Known gating gap (TODO #96):** the clamp is applied in `common_init_from_params`
+  before `llama_init_from_model`, i.e. before the slab is created or declines at the first compute-buffer
+  allocation, so a config whose slab is armed and then declines (a small-VRAM card) is clamped even though
+  it streams with no arena; `LLAMA_SPEC_NGRAM_MOD_BAND_CLAMP=0` restores the wide draft there.  The slab
+  decline message names `GGML_CUDA_SLAB_RESERVE_MIB`, but on such a card the binding terms are usually
+  `GGML_CUDA_SLAB_MIN_ARENA_MIB` (the 2048 MiB floor) and `GGML_CUDA_SLAB_RING_MIB` (the H2D-ring hole).
+  `GREEDY-PURITY.md` §50, `ENVIRONMENT.md` §3, `WORKLOG.md` 261024.002 / 261024.006.
 * **int64_t min/max in this file use local helpers, not `std::min`/`std::max` (r124, issue #217).**  With
   HIP on Windows (clang + the MSVC STL) clang's force-included `cuda_wrappers/algorithm` and the MSVC STL
   `<utility>` each define an inline `std::min<long long>`; `int64_t` is `__int64` there, the `enable_if`

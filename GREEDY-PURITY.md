@@ -112,6 +112,7 @@ numbers are **stable** — dozens of docs cite them — so they are never renumb
 | **§48** | a draft-side vocabulary restriction cannot change an accepted token, but the verify *schedule* can change the text: gate it inside `n_max <= 7` | doctrine (r107, block 13) |
 | **§49** | a fused chain's launch geometry comes from the *flat* projection, never from a consumer's `[…, n_seq_tokens, n_seqs]` view: gate the multi-sequence batch, not just `W = 1..8` single-stream | fix (r108, issue #204) |
 | **§50** | a draft length is a verify width *and* a memory-tier parameter: with host experts served by the arena, a verify batch wider than the cache band leaves VRAM and streams the routed experts from host on every step | doctrine (r123, TODO #59 closed) |
+| **§51** | a kernel-config row keyed on one tile dimension also configures every query width that reaches that tile: a decode/verify-band row must not be reachable from prefill | doctrine (`TODO` #97/#98, 2026-10-24) |
 
 ---
 
@@ -1219,7 +1220,13 @@ run whose experts are not served through the arena:
   (r123, block 09; `LLAMA_SPEC_NGRAM_MOD_BAND_CLAMP=0` is the A/B).  A deep draft also cost ~5 GiB of
   arena, because the slab's narrow verify floor is measured at `n_rs_batch` (32938 -> 27814 MiB).
 * A model with **no active arena** — fully device-resident, or the CPU expert path
-  (`MOE_EXPERT_CACHE_MIB=0`) — reports no band and is never clamped.
+  (`MOE_EXPERT_CACHE_MIB=0`) — reports no band and is never clamped.  The same is intended for a
+  host-expert config whose movable-boundary slab is armed and then **declines** (a card too small for the
+  work buffer + `GGML_CUDA_SLAB_MIN_ARENA_MIB` + the ring hole): it runs the same streaming path, where the
+  wide draft is the win (2x R9700: 67.6 wide vs 52.2 capped t/s).  **It is not, today** (TODO #96): the clamp
+  is decided in `common_init_from_params`, before the slab is created at the first compute-buffer
+  allocation, so such a config is clamped while it has no arena; `LLAMA_SPEC_NGRAM_MOD_BAND_CLAMP=0` keeps
+  the wide draft there until the gating is fixed.
 
 **Evidence (gfx1201, 2x R9700, Flash-Next IQ4_NL + MTP head, `-sm tensor -ncmoe 36`, `-c 16384`,
 `prompts/recall.txt`, `-n 2000 --temp 0 --seed 42`, `draft-mtp,ngram-mod` with the ngram cap swept).**
@@ -1239,9 +1246,35 @@ The README's own `draft-mtp-adaptive,ngram-mod --spec-draft-n-max 9` recommendat
 `-ncmoe 0`): MTP n3 144.7 -> ngram default **378.7** vs 244.6 clamped — the wide draft is the product.
 CPU-compute experts (`MOE_EXPERT_CACHE_MIB=0`): 38.5 -> 67.6 (wide) vs 52.2 clamps — the weights are
 local, so extra rows cost compute and the wide batch amortises the per-token overhead.  That is upstream's
-shape, which is why a reporter on a 12 GB card with `-ncmoe 24` sees `ngram-mod` win on a rewrite workload
-(issue #214) while the same flags on an arena config halve decode.  Purity is unaffected in every arm
+shape, and the issue-#214 reporter's update confirms it: all three of his r120 runs logged the slab decline
+and no `moe_cache_report`, i.e. his box was in the no-arena streaming class, and his decode already matched
+upstream (the remaining regression there is deep-context **prefill** depth scaling, TODO #97 — not this band
+and not a decode symptom).  On an arena config the same wide flags halve decode.  Purity is unaffected in every arm
 (the clamp changes the verify *schedule*, §48): `plain` / `draft-mtp n3` / ngram hand-capped /
 ngram auto-clamped all hash `9d914f47aebb` with `ROCBLAS_USE_HIPBLASLT=0` (§44).
 
 Record: `archive/work/ngram-mod-host-experts/EVIDENCE-2026-10-24.md`.
+
+## 51. A kernel-config row keyed on one tile dimension also configures every query width that reaches it
+
+**Claim.**  The MMA flash-attention config table is selected at compile time by
+`(DKQ, DV, ncols1*ncols2, ncols2)`, and its `nthreads`/`occupancy` feed `__launch_bounds__`, so a row is part
+of the *kernel*, not a runtime choice.  `ncols` alone does not identify the regime: the query-width dispatch
+gives `ncols1 = 8, ncols2 = 8` (ncols 64) to **both** the W=5..8 decode/verify band and every wide prefill
+(`Q->ne[1] > 4`).  A band row placed there therefore also re-tunes prefill: measured on RDNA4 GQA-8/head-256,
+prefill ran the band geometry (16 warps, occupancy 1, `nbatch_K2/V2` 64, combine 32) instead of upstream's
+256 threads / occupancy 2 and lost **26 % of the FA kernel / 10 % end to end** at `pp512 @ d98304`
+(`TODO.md` #97/#98, `WORKLOG.md` 261024.006).  The prototype row swap is +36 % at d98k, +19 % at d32k and
++3 % at d0 -- i.e. the band geometry was a *prefill* regression, and the delivery went from -10 % below
+upstream at depth to +20 % above it.
+
+**Rule.**  A config row that exists for the decode/verify band must be reachable **only** from the band: key
+it on a compile-time band flag (or on a distinct instantiation), never on `ncols`, `n_kv` or `n_q` at
+runtime alone.  Write in the comment which query widths reach the row.  When two regimes share an
+instantiation, the shared row must be the one safe for the wider regime and the band gets its own
+instantiation.  **A row that reaches prefill owes `scripts/gate-prefill-logits.sh`** (changing the row
+changes the KV-row split and combine order -- the family-switch class of §34/§46), plus the band arm's own
+decode/verify A/B so the band's measured gain is not silently traded away.
+
+Record: `TODO.md` #97/#98, `patches/README.md` block 05, `WORKLOG.md` 261024.006.
+
