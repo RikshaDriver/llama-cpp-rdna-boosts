@@ -155,7 +155,7 @@ MoE MMQ gate now covers RDNA4 + RDNA3_5 + RDNA3_0 (gfx1151 validated
 |-------|---------|---------|
 | `0000` | **foundation** — band-uniformity, Meta-wrapper, allocator fixes | old-00 + old-05 + old-07 + old-09a + the multi-ubatch logits readback + the `ggml-alloc` view release; + the meta hot-path dispatcher restoration (r86) |
 | `0001` | **hybrid HIP all-reduce** (RDNA4-gated) | the old block 12; + no per-AR `ev.ker` and the opt-in P2P-large path (r52) |
-| `0002` | **adaptive MTP draft depth** (`--spec-type draft-mtp-adaptive`) | old-01; + opt-in MTP prompt-tail ingest and the last-row prompt copy (r52); + the embeddings-layer-input preset API the draft setup calls (r94 block-boundary repair) |
+| `0002` | **adaptive MTP draft depth** (`--spec-type draft-mtp-adaptive`) | old-01; + opt-in MTP prompt-tail ingest and the last-row prompt copy (r52); + the embeddings-layer-input preset API the draft setup calls (r94 block-boundary repair); + the draft context's KV cache type follows the main `-ctk` / `-ctv` unless `-ctkd` / `-ctvd` pins it (r125, issue #216) |
 | `0003` | **chunked gated-delta-net prefill** (bf16/WMMA GDN) | old-02; + the per-sequence rollback tracker folds in every ubatch and `LLAMA_RS_ROLLBACK_DEBUG` (r91) |
 | `0004` | **BF16 KV cache + native-BF16 flash attention** | old-03 |
 | `0005` | **flash-attention band / native quantized K-V / derived kq mask** | old-04 FA + the old-15 FA work; + the 2-byte arm joins the 32-column band block and the head-512 MMA row is retuned (r92); + the q8_0 fetch-ahead band variant, default on (`GGML_HIP_FA_BAND_FETCH_AHEAD=0`), r98 PR #195; + one tile K/V type selection for the instantiation and the F16 scratch, and an RDNA2-gated checked tail, r99 PR #198 |
@@ -294,7 +294,23 @@ code/prose-neutral with the same recall win.  The small reasoning cost is the pr
 >   **73.9 -> 168.3 t/s** and `draft-mtp,ngram-mod` **74.1 -> 160.2 t/s**.
 >
 > So `--spec-type draft-mtp-adaptive,ngram-mod --spec-ngram-mod-n-match 45 --spec-draft-n-max 9` remains a
-> good pick on a host-expert config; no extra flags are needed.  Two things it does **not** fix:
+> good pick on a host-expert config; no extra flags are needed.
+
+> **On a card that is close to full.**  The MTP draft context is a second context on the same weights, so
+> it costs a real, fixed slice of VRAM on top of the model: its own KV cache, its own compute buffer and
+> its own output buffer.  The KV half now follows the main model's cache type (r125), so `-ctk`/`-ctv` set
+> the draft's size too; `-ctkd`/`-ctvd` pin it independently if you want the deep-lookback f16 draft.  For
+> scale, a dense 27B IQ3_S with `-c 131072 -ctk q4_0 -ctv q4_0 -b 4096 -ub 1024` asks for about **14.8
+> GiB** of device memory in total (11.0 weights + 2.3 target KV + 0.6 recurrent state + 0.14 draft KV +
+> 0.8 compute + the driver's ~1.4 GiB of unaccounted code objects and workspace), and that is the *steady*
+> state; the first prefill peaks about 1.5 GiB above it.  On Windows a set that exceeds the card is silent
+> for a while (WDDM pages it to system memory) and then surfaces as a device loss, which a lazy rocBLAS
+> init reports as `rocBLAS error: Could not initialize Tensile host: No devices found` -- see issue #216.
+> The levers, most effective first: `-c` (the target KV dominates), `-ub` (the compute buffer), `-ngl`
+> (real layer offload -- note it is a **layer count** and a model with a NextN head has
+> `n_layer + 1` layers, so `-ngl 85` on a 65-layer model offloads everything, exactly like `-ngl 99`),
+> and the KV types.  Leave `-ngl` and `-c` unset if you want `--fit` to size the context for you: with
+> either one set, the fit declines and exits.  Two things it does **not** fix:
 >
 > * A model with **no active arena** (fully device-resident, or the CPU expert path
 >   `MOE_EXPERT_CACHE_MIB=0`) is never clamped — there the wide draft is the win (144.7 -> 378.7 t/s on the

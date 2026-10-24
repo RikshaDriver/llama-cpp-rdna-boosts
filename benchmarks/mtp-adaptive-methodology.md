@@ -133,6 +133,16 @@ Run the same with `--spec-type none` and compare.  The prompt is the versioned
 `prompts/prose-rdna-boosts.txt` (16074 B, 5298 tokens, `sha256 fabdec65…`) — record the hash with any
 result, and never edit a shipped prompt in place (see `prompts/README.md`).
 
+> **Since r125 the draft context's KV cache type follows the main `-ctk` / `-ctv`** (issue #216), so the
+> `--cache-type-k bf16 --cache-type-v bf16` above is now *also* what the draft allocates; before r125 the
+> draft was always f16 regardless.  Same size (bf16 and f16 are both 2 bytes), so the numbers stay
+> comparable, but the draft's attention reads bf16 now and an f16 draft is one flag away
+> (`-ctkd f16 -ctvd f16`).  Any arm measured with a *quantized* main KV type gets a quantized draft cache
+> too; decode is neutral on the dense 27B (56.4-56.6 vs 56.4-56.5 t/s at `-c 8192 -n 400`, 80.8-80.9 vs
+> 80.6-80.7 t/s at `-c 102400 -n 3000`), so the arms stay comparable.  A fast small model is not neutral
+> (4B Q8_0 3-GPU tensor q8_0 KV: -2.9 %), so pin `-ctkd f16 -ctvd f16` when comparing small-model arms
+> across r125.
+
 The drafting model is the **MTP head built into the target GGUF** (`blk.<block_count-1>.nextn.*`,
 `*.nextn_predict_layers`), used automatically when no `-md` is passed.  Do not pass the old standalone
 `mtp-*.gguf`; it is a different drafter and changes acceptance.

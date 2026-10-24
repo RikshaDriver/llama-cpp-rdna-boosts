@@ -12,7 +12,7 @@ Details never live here: they live in `AGENTS.md`, `patches/README.md`, `MANIFES
 still means the same subject after that item is closed and removed from this file.  New items append.
 
 **Current state:** the **14-block V2.1 set** (block 00 + blocks 01-13) at fork point **`097cf33d9`**,
-release **`v14-097cf33d9-r124`**.  `release.json` is the source of truth for the tip/tree and hashes; the
+release **`v14-097cf33d9-r125`**.  `release.json` is the source of truth for the tip/tree and hashes; the
 top of `WORKLOG.md` is the newest record.
 
 | # | subject | kind | status |
@@ -86,6 +86,22 @@ fraction at 43 % residency; if it is <20 %, park it.  Design space and gates:
 
 ## Documented, deliberately NOT fixed (accepted limitations — do not re-report)
 
+
+- **A Windows VRAM overcommit is not catchable: it surfaces as a device loss, not an allocation failure
+  (issue #216, accepted; nothing in the delivery can change it).**  On WDDM an allocation set larger than
+  the card does not fail, it pages into system memory; the first big prefill (a full `-ub` compute buffer
+  plus the FA staging) then loses the device, and the process's *next* rocBLAS touch aborts with
+  `rocBLAS error: Could not initialize Tensile host: No devices found` (rocBLAS's `TensileHost` prints
+  that when `hipGetDeviceCount()` returns non-success; it allocates nothing on that path, so the message
+  is a symptom, not an OOM inside rocBLAS).  Measured budget for the reported config (dense 27B IQ3_S,
+  `-c 131072 -ctk q4_0 -ctv q4_0 -b 4096 -ub 1024` + MTP n3, no mmproj): **14.8 GiB** of static device
+  memory and a **16.0-16.2 GiB** first-prefill peak on a headless 32 GiB card, against a 16 GiB card that
+  also drives the display.  Mitigations shipped/to use: the draft KV follows the main KV type (r125,
+  block 02, -368 MiB at `-c 131072`), `-c`, `-ub`, a real `-ngl` offload (`-ngl` is a **layer count** and
+  a NextN model has `n_layer + 1` layers, so `-ngl 85` on a 65-layer model is a no-op), and letting
+  `--fit` size the context (it declines when `-ngl` or `-c` is set).  Do not re-investigate the rocBLAS
+  message as a delivery defect without a Windows event log showing a TDR (`4101`/`4102`) *absent* at the
+  abort.
 
 - **`std::min<int64_t>` / `std::max<int64_t>` in other HIP TUs is a latent Windows-only build failure
   (TODO #95, accepted; no Windows toolchain here).**  With HIP on Windows (clang + the MSVC STL) clang's

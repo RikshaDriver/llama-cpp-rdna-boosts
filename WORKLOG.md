@@ -1,5 +1,84 @@
 # WORKLOG - dated delivery records
 
+## 261024.005 (r125) -- issue #216: the MTP draft's KV cache type follows the main `-ctk`/`-ctv`, and the draft-reserve log only fires where it is used
+
+**Change:** **blocks 02 and 09**.  `release.json` tip `55d421582`, tree `a3379b6d0` (unchanged from
+r124's block content otherwise; `scripts/validate-set.sh` green -- fresh tarball, strict 14/14 `git am`,
+applied tree == recorded tree).  One user-facing default (the draft context's KV cache type) plus one
+log gating; no kernel, no allocation and no prefill change.
+
+**The report (issue #216, gfx1201 / Windows 11 / HIP SDK 7.1.1 / 16 GiB RX 9070 XT).**  A dense Qwen3.8-27B
+IQ3_S with `-c 131072 -b 4096 -ub 1024 --flash-attn on -ctk q4_0 -ctv q4_0 --spec-type draft-mtp-adaptive
+--spec-draft-n-max 3` loads and answers short prompts, and aborts on the first prompt over ~1 K tokens with
+`rocBLAS error: Could not initialize Tensile host: No devices found` and exit `0xC0000409` (the alternate
+signature: `unspecified launch failure` in `ggml_backend_cuda_synchronize`).  The report also carried the
+load-time line `keeping the flat 3584 MiB draft reserve`, which reads as if the slab or the expert-cache
+arena were involved in a **dense** model.
+
+**What the investigation established** (measurements on 1x R9700, gfx1201, headless, 10.5 K-token prompt,
+the reporter's flags, no mmproj):
+
+* **The config does not fit a 16 GiB card.**  Static device memory is **14.80 GiB** (10 951.6 MiB weights,
+  2 304 target KV + 598.5 recurrent state, 512 draft KV, 788 compute, ~2 output) and the first-prefill peak
+  measured **16.03-16.17 GiB**; `mmc` unaccounted (Tensile code objects, workspace pool, FA staging arena)
+  is ~1.4 GiB of that.  For scale: `-c 81920` 14.74 GiB, `-c 32768` 13.37 GiB, no MTP 14.41 GiB.
+* **The reporter's `-ngl` controls were no-ops.**  `-ngl` is a **layer count** and this model has
+  `n_layer_all = 65` (64 trunk + the NextN block), so `-ngl 85` / `-ngl 97` offload exactly what `-ngl 99`
+  does: measured `-ngl 85` peak **16.17 GiB**, byte-identical to `-ngl 99`.  `-ngl 51` (15 layers really on
+  the CPU) drops the peak to **13.70 GiB**.  So "freeing 2.5 GB does not help" was not evidence against a
+  memory cause.
+* **The rocBLAS message is a symptom, not an OOM inside rocBLAS.**  `TensileHost::GetDeviceCount()`
+  (`library/src/tensile_host.cpp`) prints it when **`hipGetDeviceCount()` returns non-success**, then aborts;
+  that path allocates nothing.  It is the process's *first* rocBLAS touch, so the device was already gone --
+  on WDDM an allocation set larger than the card pages into system memory and the loss surfaces later.  Our
+  tree makes **zero** rocBLAS calls for this config (an `LD_PRELOAD` probe counted 0 `hipblasCreate`, 0
+  `hipblasGemmEx` at 300- and 1800-token prompts, and 0 with `GGML_CUDA_MMF32=0`), so on r124 nothing in the
+  target prefill can be that first touch.
+* **`--fit` could not have helped either** as invoked: it declines outright when `-ngl` is set, and it only
+  resizes `n_ctx` when `-c` was left at `0`.
+
+**Change 1 (block 02): the draft context's KV type follows the main one.**  Upstream gives the speculative
+draft its own KV type pair (`-ctkd` / `-ctvd`, default **f16**) and applies it unconditionally, so
+`-ctk q4_0` still built an f16 draft cache.  For MTP that is invisible waste -- the draft *is* the target
+model and its context only carries the NextN layer: at `-c 131072` the single draft layer held **512 MiB**
+of f16 KV against **144 MiB** at q4_0, i.e. **368 MiB** a 16 GiB card cannot spare.  `common_base_params_to_speculative()`
+now takes the main type unless the draft type was set explicitly (`common_params_speculative_draft::cache_type_k_set` /
+`_v_set`, set by the two arg handlers), so `-ctkd` / `-ctvd` still pin anything, f16 included.  It cannot
+change a generated token (the draft only proposes; the target verifies).
+
+**Change 2 (block 09): the draft reserve is only computed and logged for a model that has host-resident
+experts.**  `llama_model_moe_cache_preflight()` walks `model->moe_host_expert_bytes` and is a no-op when the
+map is empty, so a dense model printed a reserve nothing consumed.  `common_init_result` now gates the
+whole block on `llama_model_moe_host_expert_dev_count(model) > 0`.  No behaviour change where the reserve
+is used (derived value, flat fallback and `MOE_EXPERT_CACHE_AUX_RESERVE_MIB` override are identical), and
+the MoE arm still prints the line.
+
+**Gates** (gfx1201, ROCm 10.1.0, `~/bin/build-llama-rocm`, r124 binaries kept as the reference):
+
+* **Same-seed greedy text, r124 vs r125, all identical:** dense 27B IQ3_S MTP n3 (q4_0 KV) and plain
+  (`2bce65443284`); 35B-A3B UD Q4_K_M `-ncmoe 40` MTP n3 (190.4 -> 190.8 t/s, `c502088e87e0`); 4B Q8_0
+  3 GPU `-sm tensor` MTP n3 and plain (`9ec2b0fc2de4`).
+* **Protocol A, four axes, `-n 3000`, bf16 KV, 1 GPU, dense 27B** -- r124 -> r125 MTP t/s: **R 65.2 ->
+  65.4, P 82.3 -> 82.4, C 88.2 -> 88.2, K 98.9 -> 98.8**, plain 35.4 / 34.7 / 35.3 / 35.6, and the generated
+  text identical across all three arms on every axis (`04a575ad230a` / `d2a1dae74474` / `ba9ab0795f58` /
+  `a87c4318b649`).
+* **The change's cost, measured rather than assumed.**  At `-ctk q4_0 -c 102400 -n 3000` three alternating
+  reps gave **80.8-80.9 (r124) vs 80.6-80.7 t/s (r125)** and at `-c 8192 -n 400` **56.4-56.6 vs 56.4-56.5**,
+  i.e. neutral; an earlier 3-rep A/B that showed "-2 %" was run-order drift (the f16 arm always ran first),
+  which the repeat caught.  The cost is real but confined to a **fast small model**: 4B Q8_0, 3 GPU
+  `-sm tensor`, `-ctk q8_0 -ctv q8_0`, MTP n3 = **239.0 / 239.6 / 240.9 vs 232.7 / 233.0 / 232.7 t/s
+  (-2.9 %)** with identical text and acceptance, because the draft attends with 1-4 rows over a quantized
+  cache; `-ctkd f16 -ctvd f16` restores it (a small model is fast enough that nobody loses sleep over
+  2.9 %, and nobody running a 4B on three cards has a VRAM problem).
+* `scripts/gate-prefill-logits.sh` **PASS** (mean KLD 0.000000, same-top-p 100.000 %);
+  `build-rocm/bin/test-arg-parser` OK.
+
+**Docs:** `patches/README.md` (block 02 paragraph + the two block 09 bullets), `ENVIRONMENT.md` §3
+(`LLAMA_ARG_SPEC_DRAFT_CACHE_TYPE_K` / `_V`), `README.md` (block table row `0002` + a "on a card that is
+close to full" note carrying the #216 budget numbers and the `-ngl` gotcha), `wiki/MTP-Quick-Reference.md`
+(flag row), `benchmarks/mtp-adaptive-methodology.md` (the protocol-A note), `TODO.md` (the Windows overcommit shape
+as an accepted limitation).
+
 ## 261024.004 (r124) -- the Windows HIP build: int64_t `std::min`/`std::max` in the expert cache collide on one mangled name (blocks 09 + 10)
 
 **Change:** **blocks 09 and 10**.  `release.json` tip `355417a72`, tree `221bc7dda4`;
