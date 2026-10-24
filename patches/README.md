@@ -1,7 +1,8 @@
 # The delivery patches — what each block is and what it does
 
 **14 blocks** (block 00 + blocks 01-13) against `release.json.base` (**`3f03b1772`** as of
-`v14-3f03b1772-r127`, the 2026-10-24 re-base), one `git am` commit each.  This file
+`v14-3f03b1772-r128`; the base is the 2026-10-24 re-base and r128 is a block amendment at that base), one
+`git am` commit each.  This file
 is the per-block reference: what a block contains, what it changes, the knobs its code reads and the
 purity notes that constrain it.  It is **not** a changelog — the release-by-release record is
 [`../WORKLOG.md`](../WORKLOG.md), the apply order and verification contract is
@@ -73,9 +74,14 @@ band rule it satisfies starts here.
   because llamafile rejected `n < 2`, i.e. decode and verify accumulated differently on CPU.
 * **Vulkan masked-V / freed-cell fixes** — `flash_attn.comp` / `flash_attn_cm1.comp` never read V for
   dead columns (baseline shaders, hence this block).
-* **`-Wshadow` for the `llama` target** (GCC `-Wshadow=local`, clang plain) plus the rename sweep that
-  makes it clean — the class of bug behind the 2026-09-11 dead-mask-chain finding
-  (`GREEDY-PURITY.md` §23).
+* **`-Wshadow` for the `llama` target** (GCC `-Wshadow=local`, clang plain) plus the sweep that makes it
+  clean — the class of bug behind the 2026-09-11 dead-mask-chain finding (`GREEDY-PURITY.md` §23).  The
+  sweep **keeps upstream's identifiers**: since r128 the loader parameter is `ml` again (the delivery had
+  renamed it `ml_l` here, which re-skinned every re-base conflict in `src/llama-model.cpp` for no
+  correctness gain — TODO #101), so clang reports that file's `ml` member vs `ml` parameter idiom and
+  `build_amax_src1_f16()`'s `n_embd` local in `llama-graph.cpp`: **9 standing warnings, all benign and
+  expected**, documented in `src/CMakeLists.txt`.  A `-Wshadow` hit anywhere else is the class the flag
+  exists for.
 * **`ggml-backend-meta`**: resolve a split-state through the view chain when the alias was never
   initialised (issue #170), return NULL from a failed per-device allocation instead of asserting (a
   clean OOM exit), and keep the split-state hot path at its pre-#170 shape with the #170 resolution in a
@@ -960,8 +966,14 @@ slab/dispatcher/ring code of its own beyond the arms implemented in its own TUs.
   tensor-split arch gate in `llama-arch.cpp` (HIP-only; `ggml-hip/CMakeLists.txt` publishes `GGML_USE_HIP`
   to the main libraries so the dynamic-backend build reads it), and the prefetch exclusion of a
   managed-reader tensor.
-* **Tests**: `test-backend-ops -o FLASH_ATTN_QSA` (the QSA CPU oracle) and the `test_hc_mix` cases,
-  `tests/test-lazy-reader.cpp`, and the lazy-reader handover in `test-llama-archs`.
+* **Tests**: `test-backend-ops -o FLASH_ATTN_QSA` (the QSA CPU oracle), the `test_hc_mix` cases and the
+  `test_hc_combine` / `test_hc_combine_mix` cases, `tests/test-lazy-reader.cpp`, and the lazy-reader
+  handover in `test-llama-archs`.  **`HC_COMBINE` had no test case at all before r128** —
+  `test-backend-ops -o HC_COMBINE` ran 0/0, so neither the op nor the default-on combine→mixer-norm fusion
+  that consumes it had an oracle (TODO #100).  `test_hc_combine` compares the op against its CPU reference
+  (the unfused `SCALE/SIGMOID/SCALE/REPEAT/MUL/ADD` chain) over both broadcast shapes, `hc` 2/4/8 and
+  `nt` up to the CUDA band bound; `test_hc_combine_mix` is a whole graph, so it reaches
+  `ggml_cuda_hc_combine_mix_try_fuse` (`GGML_CUDA_FUSE_HC_COMBINE_MIX=0` for the unfused control).
 
 **Knobs.**  `LLAMA_QSA_*`, `GGML_QSA_*`, `LLAMA_HC_*` / `GGML_HC_*` (incl. `LLAMA_HC_BLK16` /
 `LLAMA_HC_RES16` / `LLAMA_HC_GATEMIX`), `LLAMA_MTP_SPARSE`, `LLAMA_LAZY_BUF_MB` /
@@ -972,7 +984,10 @@ slab/dispatcher/ring code of its own beyond the arms implemented in its own TUs.
 (`GREEDY-PURITY.md` §§13, 16, 26, 32, 38).  The QSA op has a CPU oracle — run
 `test-backend-ops -o FLASH_ATTN_QSA` (18/18 minimum) and the sparse-vs-dense perplexity ratio, because the
 `W = 1..8` matrix cannot see a width-uniform bug (§21).  Also run `scripts/gate-qwen4exp-quant-coherence.sh`
-before changing the device gather or the head zero.
+before changing the device gather or the head zero.  The HC ops have their own oracles now:
+`test-backend-ops -o HC_COMBINE` (20 cases, the CPU reference for the fused residual combine) and
+`-o HC_COMBINE_MIX` (6 cases, the default-on combine + BF16 mixer norm fusion) — §52; run both before
+changing `hc_combine`, `hc-mix.cu`'s fusion arms, or the `HC_FUSED_MAX_TOKENS` / `HC_BF16_MAX_TOKENS` bands.
 
 ---
 

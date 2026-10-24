@@ -1,4 +1,4 @@
-From 60138626754481f6bac4587dde53c50557d9637e Mon Sep 17 00:00:00 2001
+From 8e24c7105d7b32a6a848a9d14bf2faf51b0e81b5 Mon Sep 17 00:00:00 2001
 From: Stew Forster <ci@rdna-boosts.invalid>
 Date: Thu, 22 Oct 2026 07:24:38 -0500
 Subject: [PATCH 10/13] rdna-boosts: block 10: slab, fusion dispatcher, async
@@ -19828,7 +19828,7 @@ index 13729e2a5..c2317fe60 100644
              return false;
          }
 diff --git a/src/llama-model.cpp b/src/llama-model.cpp
-index 40abcd238..273faf373 100644
+index 5f548e140..0a824b135 100644
 --- a/src/llama-model.cpp
 +++ b/src/llama-model.cpp
 @@ -397,7 +397,46 @@ llama_model * llama_model_create(llama_model_loader & ml, const llama_model_para

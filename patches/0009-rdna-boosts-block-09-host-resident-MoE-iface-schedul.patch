@@ -1,4 +1,4 @@
-From bca6ff4c21ee229a7a898cc4aa177971c566eb6c Mon Sep 17 00:00:00 2001
+From 358fd34396fd97d607c5f75734d0b736a3e0bcbd Mon Sep 17 00:00:00 2001
 From: Stew Forster <ci@rdna-boosts.invalid>
 Date: Wed, 21 Oct 2026 10:40:32 -0500
 Subject: [PATCH 09/13] rdna-boosts: block 09: host-resident MoE (iface,
@@ -18044,10 +18044,10 @@ index da37efd5a..6600480c8 100644
      void unmap_weight(const llama_tensor_weight & w) const;
  
 diff --git a/src/llama-model.cpp b/src/llama-model.cpp
-index ea4f796f9..40abcd238 100644
+index d008812e0..5f548e140 100644
 --- a/src/llama-model.cpp
 +++ b/src/llama-model.cpp
-@@ -1692,9 +1692,21 @@ bool llama_model_base::load_tensors(llama_model_loader & ml_l) {
+@@ -1692,9 +1692,21 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
          return {dev, &pimpl->gpu_buft_list.at(dev)};
      };
  
@@ -18072,17 +18072,17 @@ index ea4f796f9..40abcd238 100644
  
      // assign the repeating layers to the devices according to the splits
      pimpl->dev_layer.resize(n_layer_all);
-@@ -1896,6 +1908,9 @@ bool llama_model_base::load_tensors(llama_model_loader & ml_l) {
+@@ -1896,6 +1908,9 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
          }
      }
  
 +    // wip/moe-cache-autosize: host-resident MoE expert bytes for the --fit arena floor reservation
-+    moe_host_expert_bytes = ml_l.moe_host_expert_bytes;
++    moe_host_expert_bytes = ml.moe_host_expert_bytes;
 +
      // per-tensor activation precision policy
-     prec_policy.load(ml_l, *this);
+     prec_policy.load(ml, *this);
  
-@@ -1964,6 +1979,16 @@ bool llama_model_base::load_tensors(llama_model_loader & ml_l) {
+@@ -1964,6 +1979,16 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
                      bufs.emplace_back(buf);
                  }
              }
@@ -18091,14 +18091,14 @@ index ea4f796f9..40abcd238 100644
 +            // per-tensor release never unmaps pages that a host-pointer tensor points into
 +            // (a tied embedding is loaded once mmap-backed and once copied to a device)
 +            for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != nullptr; t = ggml_get_next_tensor(ctx, t)) {
-+                const auto * w = ml_l.get_weight(ggml_get_name(t));
++                const auto * w = ml.get_weight(ggml_get_name(t));
 +                if (w != nullptr) {
-+                    ml_l.mark_mmap_used((uint32_t) w->idx, w->offs, ggml_nbytes(t));
++                    ml.mark_mmap_used((uint32_t) w->idx, w->offs, ggml_nbytes(t));
 +                }
 +            }
          } else {
              ggml_backend_buffer_t buf;
-             if (ml_l.no_alloc) {
+             if (ml.no_alloc) {
 @@ -3381,7 +3406,9 @@ llama_model_params llama_model_default_params() {
          /*.split_mode                  =*/ LLAMA_SPLIT_MODE_LAYER,
          /*.load_mode                   =*/ LLAMA_LOAD_MODE_AUTO,

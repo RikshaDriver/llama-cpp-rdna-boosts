@@ -1,4 +1,4 @@
-From 2f4298e89912bfa6a5564aef82541e51b941a5d7 Mon Sep 17 00:00:00 2001
+From 3b729477101eb572c468fa70878ee88d54c428da Mon Sep 17 00:00:00 2001
 From: Stew Forster <ci@rdna-boosts.invalid>
 Date: Sat, 24 Oct 2026 09:35:46 -0500
 Subject: [PATCH 02/13] rdna-boosts: block 02: adaptive MTP draft depth
@@ -1280,7 +1280,7 @@ index 933cb8013..5d244ecac 100644
  // returns total number of elements or 0 on error
  // if out is nullptr, returns the number of tokens without writing to out
 diff --git a/src/llama-model.cpp b/src/llama-model.cpp
-index d35b4cc59..4e8d33432 100644
+index f647edb2d..3932a2c1a 100644
 --- a/src/llama-model.cpp
 +++ b/src/llama-model.cpp
 @@ -3980,6 +3980,14 @@ static void llama_tensor_rows_to_f32(const ggml_tensor * tensor, int64_t row0, i

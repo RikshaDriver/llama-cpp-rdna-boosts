@@ -1,5 +1,86 @@
 # WORKLOG - dated delivery records
 
+## 261024.009 (r128) -- TODO #100 and #101 retired: the `HC_COMBINE` oracle, and the `ml_l` rename removed
+
+**Release:** `v14-3f03b1772-r128`.  Base `3f03b1772` (base tree `14370bd49a`), canonical tip `828be32a7`,
+tree `5a44c1b270ac0e723f8be88bd9f1610648b61359`, 14 blocks.  `scripts/validate-set.sh` green (checksums,
+fresh-tarball **strict 14/14** `git am`, applied tree == recorded tree).  **No block renumbered, merged or
+split**; both items are amendments inside the blocks that own them, plus a re-cut of every patch (the
+`From <sha>` lines change on any rebuild).
+
+Small release by design: the delta against the r127 tree is **4 files** — `tests/test-backend-ops.cpp`
+(+109), `src/llama-model.cpp` (115 lines renamed back), `src/CMakeLists.txt` (comment), `src/llama-context.cpp`
+(1 line).  No kernel, no dispatch, no default changed.
+
+### #100 — `HC_COMBINE` had no oracle (block 11)
+
+`test-backend-ops -o HC_COMBINE` ran **0/0**: the op had no test case in any tree, while its sibling
+`HC_MIX` had 30.  A wrong fused residual combine (`out[e,c,t] = residual[e,c,t] + block_out[e,t] *
+2*sigmoid(inject[c,t]/hc)`) is a *uniform* corruption of the residual stream, so same-seed text, MTP
+acceptance and the width probe all agree with themselves and no gate could see it.  `HC_MIX`'s cases cannot
+see it either: their `x` is a random tensor, so a broken combine only feeds a different random input.
+
+Two cases, both in block 11:
+
+* `test_hc_combine` — the op against its CPU reference (the unfused `SCALE/SIGMOID/SCALE/REPEAT/MUL/ADD`
+  chain): `n_embd` 512/2560, `hc` 2/4/8 (the CUDA kernel's `w[8]` bound), `nt` 1/2/3/5/8/16 (16 is
+  `HC_BF16_MAX_TOKENS`, the widest the op accepts), and both `block_out`/`inject` shapes (broadcast
+  `ne[1] == 1` and per-token).  **20/20.**
+* `test_hc_combine_mix` — a *whole graph* `HC_COMBINE -> BF16 HC_MIX` at the Flash-Next shapes (n_embd 2560,
+  hc 4, low rank 320), `nt` 1/2/3/5/8 plus the `w_inject`-less head call.  A single-op case cannot reach
+  `ggml_cuda_hc_combine_mix_try_fuse`, which is **default-on**; `run_whole_graph()` can.  **6/6 with the
+  fusion on, 6/6 with `GGML_CUDA_FUSE_HC_COMBINE_MIX=0`** (the unfused control), and a temporary
+  instrument confirmed the matcher fires on the default arm and not on the control.  Perf cases added too
+  (`test-backend-ops perf -o HC_COMBINE`).
+
+`-o "HC_MIX,HC_COMBINE,HC_COMBINE_MIX"` → **56/56**; `test-llama-archs -a qwen4exp` all 3 backends green
+(GPU NMSE 4.42e-14, mixed batch 2.07e-14).  New rule: `GREEDY-PURITY.md` §52; per-block row 11 in
+`MANIFESTS.md`.
+
+### #101 — the `ml`→`ml_l` rename is gone (block 00, propagated through 09/12)
+
+The loader parameter rename was introduced by block 00's `-Wshadow` sweep and cost 115 lines of divergence
+in `src/llama-model.cpp` — every re-base conflict in that file was re-skinned for nothing.  It is reverted
+across the **whole chain** (block 00 renames nothing, blocks 09/12's added lines use `ml`), so the delivered
+file now matches upstream's identifiers exactly.
+
+**Why the parameter and not the member.**  The first attempt renamed the *member* (`ml` → `ml_ptr`, 3 lines)
+instead; that is a trap: upstream's own arch files read the member **by name** in
+`load_arch_tensors(llama_model_loader &)` (unnamed parameter) — `src/models/eagle3.cpp` and
+`src/models/dflash.cpp` do `ml->get_tensor_meta(...)` / `ml->get_key(...)` (7 sites, all upstream text).  A
+member rename breaks with every upstream addition of that pattern, so the member keeps its upstream name.
+
+**The cost, accepted and documented.**  clang has no `-Wshadow=local` (GCC does, and the CMake comment
+already says the delivery does not police declaration-shadows-a-member), so clang reports upstream's idiom:
+**9 standing warnings** — 8 in `llama-model.cpp` (`ml` parameter vs `ml` member) and 1 in `llama-graph.cpp`
+(`build_amax_src1_f16()`'s `n_embd` local).  They are enumerated in `src/CMakeLists.txt` with the
+instruction that a `-Wshadow` hit anywhere else is the class the flag exists for.  Verified: the full
+`llama` target rebuilt from scratch reports exactly those 9 and nothing else.
+
+### Drive-by (block 12)
+
+`llama_io_read_host`'s constructor initialised `buf_size` before `lctx` against the declaration order
+(`-Wreorder-ctor`, new in this tree from the r119 async restore).  Reordered; the warning is gone.
+
+### Gates (gfx1201, ROCm 10.1.0, `~/bin/build-llama-rocm`)
+
+| gate | result |
+|---|---|
+| full build | 0 errors; the only `llama`-target warnings are the 9 documented `-Wshadow` ones |
+| per-block build (`--changed-from` the pre-rename chain; fresh dir per commit) | **5/5 built, 0 failed** — blocks 00, 09, 11, 12, 13 (the other 9 deltas are byte-identical to the chain that built 14/14 in r127; block 11 was built on its own because only its *context* changed) |
+| op tests | HC_MIX **30/30**, HC_COMBINE **20/20** (0/0 before this release), HC_COMBINE_MIX **6/6** fused and 6/6 unfused |
+| `test-llama-archs -a qwen4exp` | all 3 backends pass (GPU NMSE 4.42e-14, Meta 4.42e-14, mixed 2.07e-14) |
+| coherence, dense 27B UD-Q4_K_XL `-sm tensor` 3 GPU, prose prompt, -n 200, seed 42 | `plain == draft-mtp`, 850 chars sha **`0cd2d424a564`** (identical to r127); a second plain run reproduces it |
+| coherence, 35B-A3B UD-Q4_K_M `-sm tensor -ncmoe 40` | `plain == draft-mtp`, 291 chars `51341103fc8d` |
+| coherence, Flash-Next GSQ (qwen4exp) 3 GPU tensor `-ncmoe 48`, `--load-mode none --lazy-mode off`, `-md` MTP head | `plain == draft-mtp`, 307 chars `cb5e51772cfb` |
+| prefill logits (`gate-prefill-logits.sh`, base recorded from r127) | **PASS 0.000000 / 99.980 %** (no kernel touched; the base was not re-recorded) |
+| `validate-set.sh` | green — strict 14/14 on a fresh tarball, tree == `release.json.tree` |
+
+`TODO.md`: **#100 and #101 removed** (a closed item is a WORKLOG entry, never a TODO row).  `MANIFESTS.md`:
+per-block row 11 added for the oracle, plus a working note that `src/llama-model.{cpp,h}` keeps upstream's
+identifiers.  `patches/README.md`: block 00's `-Wshadow` bullet now states the policy and the 9 warnings;
+block 11's Tests/Purity sections list both new cases.
+
 ## 261024.008 (r127) -- re-base onto `3f03b1772` (261 upstream commits): 14 blocks replayed, no block renumbered, gfx1151 validated
 
 **Release:** `v14-3f03b1772-r127`.  `release.json` base `3f03b1772` (base tree `14370bd49a`), canonical tip

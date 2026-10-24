@@ -1,4 +1,4 @@
-From efad23dc54d58f0e059d200a462345286d2e4f18 Mon Sep 17 00:00:00 2001
+From 21e7b0c6acd9cea526329e2ee4682fe53ba2d2c8 Mon Sep 17 00:00:00 2001
 From: Stew Forster <ci@rdna-boosts.invalid>
 Date: Wed, 21 Oct 2026 10:40:31 -0500
 Subject: [PATCH 00/13] rdna-boosts: block 00: foundation - band-uniformity,
@@ -55,42 +55,42 @@ streams on 2x R9700); the dispatcher drops 454 -> 287 B.
 ---
  common/arg.cpp                                |   3 +-
  common/speculative.cpp                        |  10 +-
- ggml/src/ggml-alloc.c                         |  88 ++++
- ggml/src/ggml-backend-meta.cpp                | 105 ++++-
+ ggml/src/ggml-alloc.c                         |  88 ++++++
+ ggml/src/ggml-backend-meta.cpp                | 105 ++++++-
  ggml/src/ggml-cpu/llamafile/sgemm.cpp         |   8 +-
  ggml/src/ggml-cuda/fattn-common.cuh           |  10 +-
  ggml/src/ggml-cuda/ggml-cuda.cu               |  21 +-
  ggml/src/ggml-cuda/mmf.cu                     |   2 +-
  ggml/src/ggml-cuda/mmf.cuh                    |  30 +-
- ggml/src/ggml-cuda/mmid.cu                    | 195 ++------
+ ggml/src/ggml-cuda/mmid.cu                    | 195 ++++---------
  ggml/src/ggml-cuda/mmq.cu                     |   7 +-
- ggml/src/ggml-cuda/mmq.cuh                    |  96 ++--
+ ggml/src/ggml-cuda/mmq.cuh                    |  96 +++----
  .../vulkan-shaders/flash_attn.comp            |  29 +-
- .../vulkan-shaders/flash_attn_cm1.comp        |  49 +-
+ .../vulkan-shaders/flash_attn_cm1.comp        |  49 +++-
  include/llama.h                               |   2 +-
- src/CMakeLists.txt                            |  18 +
- src/llama-batch.cpp                           |  64 +--
- src/llama-context.cpp                         | 139 ++++--
+ src/CMakeLists.txt                            |  25 ++
+ src/llama-batch.cpp                           |  64 ++---
+ src/llama-context.cpp                         | 139 ++++++----
  src/llama-grammar.cpp                         |   6 +-
- src/llama-graph.cpp                           | 258 +++++------
+ src/llama-graph.cpp                           | 258 +++++++++---------
  src/llama-graph.h                             |   8 +-
  src/llama-kv-cache-dsv4.cpp                   |   8 +-
- src/llama-kv-cache.cpp                        |  56 +--
+ src/llama-kv-cache.cpp                        |  56 ++--
  src/llama-memory-recurrent.cpp                |  14 +-
  src/llama-mmap.cpp                            |  14 +-
- src/llama-model-loader.cpp                    |  62 ++-
+ src/llama-model-loader.cpp                    |  62 ++++-
  src/llama-model-loader.h                      |  22 +-
- src/llama-model.cpp                           | 438 +++++++++---------
+ src/llama-model.cpp                           | 230 ++++++++--------
  src/llama-moe-cache.cpp                       |  24 +-
  src/llama-quant.cpp                           |  10 +-
- src/llama-sampler.cpp                         |  60 +--
+ src/llama-sampler.cpp                         |  60 ++--
  src/llama-vocab.cpp                           |  30 +-
- src/llama.cpp                                 |  40 +-
- src/models/bert.cpp                           |  42 +-
- src/models/deci.cpp                           |  32 +-
+ src/llama.cpp                                 |  40 ++-
+ src/models/bert.cpp                           |  42 +--
+ src/models/deci.cpp                           |  32 +--
  src/models/eurobert.cpp                       |  28 +-
  src/models/gemma-embedding2.cpp               |   6 +-
- src/models/gemma3n.cpp                        |  62 +--
+ src/models/gemma3n.cpp                        |  62 ++---
  src/models/gemma4-assistant.cpp               |  14 +-
  src/models/gemma4.cpp                         |   8 +-
  src/models/glm5-next.cpp                      |  12 +-
@@ -103,11 +103,11 @@ streams on 2x R9700); the dispatcher drops 454 -> 287 B.
  src/models/openelm.cpp                        |  14 +-
  src/models/step35.cpp                         |  16 +-
  src/models/vllm-decision2.cpp                 |   8 +-
- src/models/wavtokenizer-dec.cpp               |  64 +--
+ src/models/wavtokenizer-dec.cpp               |  64 ++---
  tools/cli/README.md                           |   2 +-
  tools/completion/README.md                    |   2 +-
  tools/server/README.md                        |   2 +-
- 54 files changed, 1314 insertions(+), 1000 deletions(-)
+ 54 files changed, 1217 insertions(+), 896 deletions(-)
 
 diff --git a/common/arg.cpp b/common/arg.cpp
 index 9706b3ac5..e72a86311 100644
@@ -1169,10 +1169,10 @@ index 3af6e2223..6a20bafe5 100644
          LLAMA_LAZY_MODE_ON   = 2, // read the rows of tensors marked by the arch on demand (requires mmap)
      };
 diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
-index 97250c2e8..9c51939fd 100644
+index 97250c2e8..80330eb10 100644
 --- a/src/CMakeLists.txt
 +++ b/src/CMakeLists.txt
-@@ -69,8 +69,26 @@ target_include_directories(llama PRIVATE . ${CMAKE_CURRENT_BINARY_DIR})
+@@ -69,8 +69,33 @@ target_include_directories(llama PRIVATE . ${CMAKE_CURRENT_BINARY_DIR})
  target_include_directories(llama PUBLIC ../include)
  target_compile_features   (llama PRIVATE cxx_std_17) # don't bump
  
@@ -1188,7 +1188,14 @@ index 97250c2e8..9c51939fd 100644
 +    # "declaration shadows a member" constructor idiom and "hides constructor", which the delivery
 +    # does not police and which the container build (GCC host compiler) surfaced by the thousand;
 +    # -Wshadow=local keeps the dangerous local-shadow class and drops that member/global output.
-+    # clang has no =local form, so it keeps plain -Wshadow.
++    # clang has no =local form, so it keeps plain -Wshadow and therefore *does* report the
++    # "declaration shadows a field" idiom that upstream uses: 9 standing warnings, all benign and
++    # deliberately not renamed.  Eight are llama-model.cpp's `llama_model_loader * ml` member against
++    # the `ml` parameter of its `load_*()` overrides -- renaming that parameter to `ml_l` re-skinned
++    # every re-base conflict in the file for no correctness gain (TODO #101), so upstream's name stays
++    # -- and the ninth is `build_amax_src1_f16()`'s `n_embd` local in llama-graph.cpp.  Read a
++    # -Wshadow hit in those two files as that idiom; a hit anywhere else is the class this flag exists
++    # for.
 +    if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
 +        target_compile_options(llama PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-Wshadow=local>)
 +    else()
@@ -2879,7 +2886,7 @@ index ed59079a4..da37efd5a 100644
          }
      };
 diff --git a/src/llama-model.cpp b/src/llama-model.cpp
-index 65c42f85f..d35b4cc59 100644
+index 65c42f85f..f647edb2d 100644
 --- a/src/llama-model.cpp
 +++ b/src/llama-model.cpp
 @@ -1217,9 +1217,9 @@ static buft_list_t make_gpu_buft_list(ggml_backend_dev_t dev, llama_split_mode s
@@ -2895,289 +2902,6 @@ index 65c42f85f..d35b4cc59 100644
                          return i;
                      }
                  }
-@@ -1360,13 +1360,13 @@ llama_model::~llama_model() {
-     }
- }
- 
--void llama_model_base::load_stats(llama_model_loader & ml) {
--    pimpl->n_elements = ml.n_elements;
--    pimpl->n_bytes = ml.n_bytes;
-+void llama_model_base::load_stats(llama_model_loader & ml_l) {
-+    pimpl->n_elements = ml_l.n_elements;
-+    pimpl->n_bytes = ml_l.n_bytes;
- }
- 
--void llama_model_base::load_hparams(llama_model_loader & ml) {
--    const gguf_context * ctx = ml.metadata;
-+void llama_model_base::load_hparams(llama_model_loader & ml_l) {
-+    const gguf_context * ctx = ml_l.metadata;
- 
-     // get metadata as string
-     for (int i = 0; i < gguf_get_n_kv(ctx); i++) {
-@@ -1379,38 +1379,38 @@ void llama_model_base::load_hparams(llama_model_loader & ml) {
-         gguf_kv.emplace(name, value);
-     }
- 
--    load_hparams_hadamard(ml);
-+    load_hparams_hadamard(ml_l);
- 
-     // get general kv
--    ml.get_key(LLM_KV_GENERAL_NAME, name, false);
-+    ml_l.get_key(LLM_KV_GENERAL_NAME, name, false);
- 
-     // everything past this point is not vocab-related
-     // for CLIP models, we only need to load tensors, no hparams
--    if (hparams.vocab_only || ml.get_arch() == LLM_ARCH_CLIP) {
-+    if (hparams.vocab_only || ml_l.get_arch() == LLM_ARCH_CLIP) {
-         return;
-     }
- 
--    ml.get_key(LLM_KV_CONTEXT_LENGTH,          hparams.n_ctx_train);
--    ml.get_key(LLM_KV_EMBEDDING_LENGTH,        hparams.n_embd);
--    ml.get_key(LLM_KV_EMBEDDING_LENGTH_OUT,    hparams.n_embd_out_impl, false);
--    ml.get_key(LLM_KV_ATTENTION_CAUSAL,        hparams.causal_attn,     false);
--    ml.get_key(LLM_KV_POOLING_TYPE,            hparams.pooling_type,    false);
--    ml.get_key(LLM_KV_CLASSIFIER_POOLING_TYPE, hparams.pooling_type_cls, false);
-+    ml_l.get_key(LLM_KV_CONTEXT_LENGTH,          hparams.n_ctx_train);
-+    ml_l.get_key(LLM_KV_EMBEDDING_LENGTH,        hparams.n_embd);
-+    ml_l.get_key(LLM_KV_EMBEDDING_LENGTH_OUT,    hparams.n_embd_out_impl, false);
-+    ml_l.get_key(LLM_KV_ATTENTION_CAUSAL,        hparams.causal_attn,     false);
-+    ml_l.get_key(LLM_KV_POOLING_TYPE,            hparams.pooling_type,    false);
-+    ml_l.get_key(LLM_KV_CLASSIFIER_POOLING_TYPE, hparams.pooling_type_cls, false);
-     std::string act_cls;
--    if (ml.get_key(LLM_KV_CLASSIFIER_ACTIVATION, act_cls, false)) {
-+    if (ml_l.get_key(LLM_KV_CLASSIFIER_ACTIVATION, act_cls, false)) {
-         const auto it = LLM_CLS_ACT_TYPES_FROM_STRING.find(act_cls);
-         GGML_ASSERT(it != LLM_CLS_ACT_TYPES_FROM_STRING.end() && "unsupported classifier activation");
-         hparams.act_cls = it->second;
-     }
--    ml.get_key(LLM_KV_BLOCK_COUNT,             hparams.n_layer_all);
-+    ml_l.get_key(LLM_KV_BLOCK_COUNT,             hparams.n_layer_all);
-     GGML_ASSERT(hparams.n_layer_all > 0 && hparams.n_layer_all <= LLAMA_MAX_LAYERS);
--    ml.get_key(LLM_KV_NEXTN_PREDICT_LAYERS,    hparams.n_layer_nextn,   false);
-+    ml_l.get_key(LLM_KV_NEXTN_PREDICT_LAYERS,    hparams.n_layer_nextn,   false);
-     GGML_ASSERT(hparams.n_layer_nextn <= hparams.n_layer_all);
--    ml.get_key(LLM_KV_EXPERT_COUNT,            hparams.n_expert,        false);
-+    ml_l.get_key(LLM_KV_EXPERT_COUNT,            hparams.n_expert,        false);
-     std::fill(hparams.n_expert_used_arr.begin(), hparams.n_expert_used_arr.end(), 0);
--    ml.get_key_or_arr(LLM_KV_EXPERT_USED_COUNT, hparams.n_expert_used_arr, hparams.n_layer_all, false);
--    ml.get_key(LLM_KV_EXPERT_GROUP_COUNT,      hparams.n_expert_groups, false);
--    ml.get_key(LLM_KV_EXPERT_GROUP_USED_COUNT, hparams.n_group_used,    false);
-+    ml_l.get_key_or_arr(LLM_KV_EXPERT_USED_COUNT, hparams.n_expert_used_arr, hparams.n_layer_all, false);
-+    ml_l.get_key(LLM_KV_EXPERT_GROUP_COUNT,      hparams.n_expert_groups, false);
-+    ml_l.get_key(LLM_KV_EXPERT_GROUP_USED_COUNT, hparams.n_group_used,    false);
- 
-     if (arch == LLM_ARCH_HUNYUAN_VL || arch == LLM_ARCH_HUNYUAN_DENSE) {
-         if (hparams.n_expert <= 1) {
-@@ -1420,14 +1420,14 @@ void llama_model_base::load_hparams(llama_model_loader & ml) {
-     }
- 
-     if (arch == LLM_ARCH_WAVTOKENIZER_DEC) {
--        ml.get_key(LLM_KV_FEATURES_LENGTH,  hparams.n_embd);
--        ml.get_key(LLM_KV_EMBEDDING_LENGTH, hparams.n_embd_out_impl);
-+        ml_l.get_key(LLM_KV_FEATURES_LENGTH,  hparams.n_embd);
-+        ml_l.get_key(LLM_KV_EMBEDDING_LENGTH, hparams.n_embd_out_impl);
- 
--        ml.get_key(LLM_KV_POSNET_EMBEDDING_LENGTH, hparams.posnet.n_embd);
--        ml.get_key(LLM_KV_POSNET_BLOCK_COUNT,      hparams.posnet.n_layer);
-+        ml_l.get_key(LLM_KV_POSNET_EMBEDDING_LENGTH, hparams.posnet.n_embd);
-+        ml_l.get_key(LLM_KV_POSNET_BLOCK_COUNT,      hparams.posnet.n_layer);
- 
--        ml.get_key(LLM_KV_CONVNEXT_EMBEDDING_LENGTH, hparams.convnext.n_embd);
--        ml.get_key(LLM_KV_CONVNEXT_BLOCK_COUNT,      hparams.convnext.n_layer);
-+        ml_l.get_key(LLM_KV_CONVNEXT_EMBEDDING_LENGTH, hparams.convnext.n_embd);
-+        ml_l.get_key(LLM_KV_CONVNEXT_BLOCK_COUNT,      hparams.convnext.n_layer);
- 
-         GGML_ASSERT(hparams.posnet.n_layer   <= hparams.n_layer_all);
-         GGML_ASSERT(hparams.convnext.n_layer <= hparams.n_layer_all);
-@@ -1459,7 +1459,7 @@ void llama_model_base::load_hparams(llama_model_loader & ml) {
-     std::fill(hparams.rope_sections.begin(), hparams.rope_sections.end(), 0);
-     std::fill(hparams.rope_pattern.begin(),  hparams.rope_pattern.end(), 1);
-     std::fill(hparams.is_swa_impl.begin(),   hparams.is_swa_impl.end(), 0);
--    std::fill(hparams.is_recr_impl.begin(),  hparams.is_recr_impl.end(),  llm_arch_is_recurrent(ml.get_arch()) ? 1 : 0);
-+    std::fill(hparams.is_recr_impl.begin(),  hparams.is_recr_impl.end(),  llm_arch_is_recurrent(ml_l.get_arch()) ? 1 : 0);
-     std::fill(hparams.is_indexer_full_impl.begin(), hparams.is_indexer_full_impl.end(), 0);
- 
-     std::fill(hparams.xielu_alpha_n.begin(), hparams.xielu_alpha_n.end(), 0.0f);
-@@ -1470,8 +1470,8 @@ void llama_model_base::load_hparams(llama_model_loader & ml) {
-     std::fill(hparams.swiglu_clamp_exp.begin(),   hparams.swiglu_clamp_exp.end(),   0.0f);
-     std::fill(hparams.swiglu_clamp_shexp.begin(), hparams.swiglu_clamp_shexp.end(), 0.0f);
- 
--    ml.get_key_or_arr(LLM_KV_FEED_FORWARD_LENGTH,  hparams.n_ff_arr,   hparams.n_layer_all, false);
--    ml.get_key_or_arr(LLM_KV_ATTENTION_HEAD_COUNT, hparams.n_head_arr, hparams.n_layer_all, false);
-+    ml_l.get_key_or_arr(LLM_KV_FEED_FORWARD_LENGTH,  hparams.n_ff_arr,   hparams.n_layer_all, false);
-+    ml_l.get_key_or_arr(LLM_KV_ATTENTION_HEAD_COUNT, hparams.n_head_arr, hparams.n_layer_all, false);
- 
-     // Populate deepstack_mapping_arr - initialized to -1 (no deepstack)
-     std::fill(hparams.deepstack_mapping_arr.begin(), hparams.deepstack_mapping_arr.end(), -1);
-@@ -1479,26 +1479,26 @@ void llama_model_base::load_hparams(llama_model_loader & ml) {
-     // n_head_kv is optional, default to n_head
-     hparams.n_head_kv_arr = hparams.n_head_arr;
- 
--    ml.get_key_or_arr(LLM_KV_ATTENTION_HEAD_COUNT_KV, hparams.n_head_kv_arr, hparams.n_layer_all, false);
-+    ml_l.get_key_or_arr(LLM_KV_ATTENTION_HEAD_COUNT_KV, hparams.n_head_kv_arr, hparams.n_layer_all, false);
- 
-     bool rope_finetuned = false;
--    ml.get_key(LLM_KV_ROPE_SCALING_FINETUNED, rope_finetuned, false);
-+    ml_l.get_key(LLM_KV_ROPE_SCALING_FINETUNED, rope_finetuned, false);
-     hparams.rope_finetuned = rope_finetuned;
- 
-     hparams.n_ctx_orig_yarn = hparams.n_ctx_train;
--    ml.get_key(LLM_KV_ROPE_SCALING_ORIG_CTX_LEN, hparams.n_ctx_orig_yarn, false);
-+    ml_l.get_key(LLM_KV_ROPE_SCALING_ORIG_CTX_LEN, hparams.n_ctx_orig_yarn, false);
- 
-     // rope_freq_base (optional)
-     hparams.rope_freq_base_train = 10000.0f;
--    ml.get_key(LLM_KV_ROPE_FREQ_BASE, hparams.rope_freq_base_train, false);
-+    ml_l.get_key(LLM_KV_ROPE_FREQ_BASE, hparams.rope_freq_base_train, false);
- 
-     std::string rope_scaling("linear");
--    ml.get_key(LLM_KV_ROPE_SCALING_TYPE, rope_scaling, false);
-+    ml_l.get_key(LLM_KV_ROPE_SCALING_TYPE, rope_scaling, false);
-     hparams.rope_scaling_type_train = llama_rope_scaling_type_from_string(rope_scaling);
-     GGML_ASSERT(hparams.rope_scaling_type_train != LLAMA_ROPE_SCALING_TYPE_UNSPECIFIED);
- 
-     std::string rope_section_order("tyxz");
--    ml.get_key(LLM_KV_ROPE_SECTION_ORDER, rope_section_order, false);
-+    ml_l.get_key(LLM_KV_ROPE_SECTION_ORDER, rope_section_order, false);
-     hparams.rope_section_order = llama_rope_section_order_from_string(rope_section_order);
-     if (hparams.rope_section_order == LLAMA_ROPE_SECTION_ORDER_UNSPECIFIED) {
-         throw std::runtime_error("unknown rope section order: " + rope_section_order);
-@@ -1507,14 +1507,14 @@ void llama_model_base::load_hparams(llama_model_loader & ml) {
-     // TODO: Handle SWA metadata similarly when models start implementing it
-     // rope_freq_scale (inverse of the kv) is optional
-     float ropescale = 0.0f;
--    if (!ml.get_key(LLM_KV_ROPE_SCALING_FACTOR, ropescale, false)) {
-+    if (!ml_l.get_key(LLM_KV_ROPE_SCALING_FACTOR, ropescale, false)) {
-         // try the old key name
--        ml.get_key(LLM_KV_ROPE_SCALE_LINEAR, ropescale, false);
-+        ml_l.get_key(LLM_KV_ROPE_SCALE_LINEAR, ropescale, false);
-     }
-     hparams.rope_freq_scale_train = ropescale == 0.0f ? 1.0f : 1.0f/ropescale;
- 
--    ml.get_key(LLM_KV_ROPE_SCALING_ATTN_FACTOR, hparams.rope_attn_factor, false);
--    ml.get_key(LLM_KV_ROPE_SCALING_ALPHA,       hparams.rope_scaling_alpha, false);
-+    ml_l.get_key(LLM_KV_ROPE_SCALING_ATTN_FACTOR, hparams.rope_attn_factor, false);
-+    ml_l.get_key(LLM_KV_ROPE_SCALING_ALPHA,       hparams.rope_scaling_alpha, false);
- 
-     // non-transformer models do not have attention heads
-     if (hparams.n_head() > 0) {
-@@ -1522,15 +1522,15 @@ void llama_model_base::load_hparams(llama_model_loader & ml) {
-         // gpt-j n_rot = rotary_dim
- 
-         hparams.n_embd_head_k_full = hparams.n_embd / hparams.n_head();
--        ml.get_key(LLM_KV_ATTENTION_KEY_LENGTH, hparams.n_embd_head_k_full, false);
-+        ml_l.get_key(LLM_KV_ATTENTION_KEY_LENGTH, hparams.n_embd_head_k_full, false);
- 
-         hparams.n_embd_head_v_full = hparams.n_embd / hparams.n_head();
--        ml.get_key(LLM_KV_ATTENTION_VALUE_LENGTH, hparams.n_embd_head_v_full, false);
-+        ml_l.get_key(LLM_KV_ATTENTION_VALUE_LENGTH, hparams.n_embd_head_v_full, false);
- 
-         // sanity check for n_rot (optional)
-         hparams.n_rot_full = hparams.n_embd_head_k_full;
- 
--        ml.get_key(LLM_KV_ROPE_DIMENSION_COUNT, hparams.n_rot_full, false);
-+        ml_l.get_key(LLM_KV_ROPE_DIMENSION_COUNT, hparams.n_rot_full, false);
- 
-         if (arch == LLM_ARCH_LLAMA || arch == LLM_ARCH_DECI || arch == LLM_ARCH_FALCON || arch == LLM_ARCH_LLAMA_EMBED) {
-             if (hparams.n_rot_full != hparams.n_embd_head_k_full) {
-@@ -1547,30 +1547,30 @@ void llama_model_base::load_hparams(llama_model_loader & ml) {
-     {
-         hparams.n_embd_head_k_swa = hparams.n_embd_head_k_full;
-         hparams.n_embd_head_v_swa = hparams.n_embd_head_v_full;
--        ml.get_key(LLM_KV_ATTENTION_KEY_LENGTH_SWA, hparams.n_embd_head_k_swa, false);
--        ml.get_key(LLM_KV_ATTENTION_VALUE_LENGTH_SWA, hparams.n_embd_head_v_swa, false);
-+        ml_l.get_key(LLM_KV_ATTENTION_KEY_LENGTH_SWA, hparams.n_embd_head_k_swa, false);
-+        ml_l.get_key(LLM_KV_ATTENTION_VALUE_LENGTH_SWA, hparams.n_embd_head_v_swa, false);
- 
-         hparams.n_rot_swa = hparams.n_rot_full;
--        ml.get_key(LLM_KV_ROPE_DIMENSION_COUNT_SWA, hparams.n_rot_swa, false);
-+        ml_l.get_key(LLM_KV_ROPE_DIMENSION_COUNT_SWA, hparams.n_rot_swa, false);
-     }
- 
-     // for classifier models
--    ml.get_arr(LLM_KV_CLASSIFIER_OUTPUT_LABELS, classifier_labels, false);
-+    ml_l.get_arr(LLM_KV_CLASSIFIER_OUTPUT_LABELS, classifier_labels, false);
-     if (!classifier_labels.empty()) {
-         hparams.n_cls_out = classifier_labels.size();
-     }
- 
-     // for decision models
--    ml.get_arr(LLM_KV_DECISION_LABELS, decision_labels, false);
-+    ml_l.get_arr(LLM_KV_DECISION_LABELS, decision_labels, false);
- 
-     // per-arch hparams
--    load_arch_hparams(ml);
-+    load_arch_hparams(ml_l);
- 
--    pimpl->n_bytes = ml.n_bytes;
-+    pimpl->n_bytes = ml_l.n_bytes;
- 
--    pimpl->desc_str = arch_name() + " " + type_name() + " " + ml.ftype_name();
-+    pimpl->desc_str = arch_name() + " " + type_name() + " " + ml_l.ftype_name();
- 
--    pimpl->ftype = ml.ftype;
-+    pimpl->ftype = ml_l.ftype;
- 
-     if (hparams.f_max_alibi_bias > 0.0f) {
-         hparams.use_alibi = true;
-@@ -1583,13 +1583,13 @@ void llama_model_base::load_hparams(llama_model_loader & ml) {
-     }
- }
- 
--void llama_model_base::load_vocab(llama_model_loader & ml) {
-+void llama_model_base::load_vocab(llama_model_loader & ml_l) {
-     const auto kv = LLM_KV(arch);
- 
--    vocab.load(ml, kv);
-+    vocab.load(ml_l, kv);
- }
- 
--bool llama_model_base::load_tensors(llama_model_loader & ml) {
-+bool llama_model_base::load_tensors(llama_model_loader & ml_l) {
-     const auto & split_mode   = params.split_mode;
-     const bool use_mlock      = params.load_mode == LLAMA_LOAD_MODE_MLOCK || params.load_mode == LLAMA_LOAD_MODE_MMAP_MLOCK;
-     const auto & tensor_split = params.tensor_split;
-@@ -1599,33 +1599,33 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
- 
-     const bool use_mmap_buffer = true;
- 
--    this->ml = &ml; // to be used by create_tensor() and load_arch_tensors()
-+    this->ml = &ml_l; // to be used by create_tensor() and load_arch_tensors()
- 
--    if (ml.use_mmap && params.load_mode == LLAMA_LOAD_MODE_AUTO) {
-+    if (ml_l.use_mmap && params.load_mode == LLAMA_LOAD_MODE_AUTO) {
-         for (const auto & dev : devices) {
-             ggml_backend_dev_props props;
-             ggml_backend_dev_get_props(dev.dev, &props);
-             if (!props.caps.mmap_support) {
--                ml.use_mmap = false;
-+                ml_l.use_mmap = false;
-                 break;
-             }
-         }
-     }
- 
-     // resolve AUTO on systems without mmap support (e.g. iGPUs): fall back to OFF; see #28160
--    if (ml.lazy.mode == LLAMA_LAZY_MODE_AUTO) {
-+    if (ml_l.lazy.mode == LLAMA_LAZY_MODE_AUTO) {
-         for (const auto & dev : devices) {
-             ggml_backend_dev_props props;
-             ggml_backend_dev_get_props(dev.dev, &props);
-             if (!props.caps.mmap_support) {
--                ml.lazy.mode = LLAMA_LAZY_MODE_OFF;
-+                ml_l.lazy.mode = LLAMA_LAZY_MODE_OFF;
-                 break;
-             }
-         }
-     }
- 
-     const char * load_mode_name = params.load_mode == LLAMA_LOAD_MODE_AUTO
--        ? llama_load_mode_name(ml.use_mmap ? LLAMA_LOAD_MODE_MMAP : LLAMA_LOAD_MODE_NONE)
-+        ? llama_load_mode_name(ml_l.use_mmap ? LLAMA_LOAD_MODE_MMAP : LLAMA_LOAD_MODE_NONE)
-         : llama_load_mode_name(params.load_mode);
- 
-     LLAMA_LOG_INFO("%s: loading model tensors, this can take a while... (load_mode = %s)\n",
 @@ -1705,12 +1705,10 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
      // assign the output layer
      pimpl->dev_output = get_layer_buft_list(n_layer_all);
@@ -3192,16 +2916,7 @@ index 65c42f85f..d35b4cc59 100644
  
          const int64_t n_expert = hparams.n_expert;
  
-@@ -1721,7 +1719,7 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
-         layers.resize(n_layer_all);
- 
-         // call the per-model loading function
--        load_arch_tensors(ml);
-+        load_arch_tensors(ml_l);
- 
-         // generic pass: load optional per-tensor/per-expert ".scale" tensors (e.g. NVFP4 scale2)
-         // this avoids having to add scale loading to every architecture
-@@ -1730,156 +1728,156 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
+@@ -1730,149 +1728,149 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
  
              // attention weight scales (per-tensor, shape {1})
              if (!layer.wq_s && layer.wq) {
@@ -3395,219 +3110,29 @@ index 65c42f85f..d35b4cc59 100644
              }
          }
      }
- 
--    ml.done_getting_tensors();
-+    ml_l.done_getting_tensors();
- 
--    if (per_layer_tok_embd && ml.lazy.has(per_layer_tok_embd)) {
-+    if (per_layer_tok_embd && ml_l.lazy.has(per_layer_tok_embd)) {
-         LLAMA_LOG_INFO("%s: enabling prefetch for '%s'\n", __func__, per_layer_tok_embd->name);
- 
-         can_prefetch.insert(per_layer_tok_embd);
-@@ -1892,28 +1890,28 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
-             output->type == GGML_TYPE_NVFP4 &&
-             (output_s || output_in_s)));
-     // populate tensors_by_name
--    for (auto & [_, ctx_ptr] : ml.ctx_map) {
-+    for (auto & [_, ctx_ptr] : ml_l.ctx_map) {
-         for (auto * cur = ggml_get_first_tensor(ctx_ptr.get()); cur != NULL; cur = ggml_get_next_tensor(ctx_ptr.get(), cur)) {
-             tensors_by_name.emplace_back(ggml_get_name(cur), cur);
-         }
-     }
- 
-     // per-tensor activation precision policy
--    prec_policy.load(ml, *this);
-+    prec_policy.load(ml_l, *this);
- 
--    ml.init_mappings(true, use_mlock ? &pimpl->mlock_mmaps : nullptr);
--    pimpl->mappings.reserve(ml.mappings.size());
-+    ml_l.init_mappings(true, use_mlock ? &pimpl->mlock_mmaps : nullptr);
-+    pimpl->mappings.reserve(ml_l.mappings.size());
- 
-     // create the backend buffers
-     // note: the buffers are owned by pimpl->ctxs_bufs, this is a raw-pointer view used to load the data
-     std::vector<std::pair<ggml_context *, std::vector<ggml_backend_buffer_t>>> ctx_bufs;
--    ctx_bufs.reserve(ml.ctx_map.size());
-+    ctx_bufs.reserve(ml_l.ctx_map.size());
- 
-     // reserve hint: each context creates one buffer per file, or more when its tensors are spread
-     //     across disjoint ranges of a file (see get_mapping_ranges)
--    pimpl->ctxs_bufs.reserve(ml.ctx_map.size() * ml.files.size());
-+    pimpl->ctxs_bufs.reserve(ml_l.ctx_map.size() * ml_l.files.size());
- 
--    for (auto & [ctx_key, ctx_ptr] : ml.ctx_map) {
-+    for (auto & [ctx_key, ctx_ptr] : ml_l.ctx_map) {
-         ggml_backend_buffer_type_t buft = ctx_key.buft;
-         ggml_context * ctx = ctx_ptr.get();
- 
-@@ -1938,23 +1936,27 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
+@@ -1938,10 +1936,14 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
  
          std::vector<ggml_backend_buffer_ptr> bufs;
  
 -        // a lazy context is mapped whatever the load mode, but the memory-fit pass maps nothing
--        const bool is_lazy_mapped = ctx_key.lazy && !ml.no_alloc;
 +        // a lazy context is mapped whatever the load mode, but the memory-fit pass maps nothing.
 +        // a resident context (explicit `--lazy-mode off` under a mapped load) must NOT be turned into
 +        // a host-pointer buffer over the mapping -- that is the whole point of `off` -- so it takes
 +        // the plain host-buffer path below and the loader reads its tensors into RAM.
-+        const bool is_lazy_mapped = ctx_key.lazy && !ml_l.no_alloc;
+         const bool is_lazy_mapped = ctx_key.lazy && !ml.no_alloc;
 +        const bool is_resident    = ctx_key.resident;
  
 -        if ((ml.use_mmap || is_lazy_mapped) && use_mmap_buffer && buffer_from_host_ptr_supported && is_default_buft) {
--            GGML_ASSERT(!ml.no_alloc);
-+        if ((ml_l.use_mmap || is_lazy_mapped) && use_mmap_buffer && buffer_from_host_ptr_supported && is_default_buft && !is_resident) {
-+            GGML_ASSERT(!ml_l.no_alloc);
++        if ((ml.use_mmap || is_lazy_mapped) && use_mmap_buffer && buffer_from_host_ptr_supported && is_default_buft && !is_resident) {
+             GGML_ASSERT(!ml.no_alloc);
              const size_t max_size = ggml_get_max_tensor_size(ctx);
  
--            for (uint32_t idx = 0; idx < ml.files.size(); idx++) {
-+            for (uint32_t idx = 0; idx < ml_l.files.size(); idx++) {
-                 // map the mmap regions that contain the tensors of this context
-                 // this is important for metal with apple silicon: a backend buffer pins everything it
-                 //     wraps, so the regions owned by the other contexts (lazy tensors read on demand
-                 //     from disk, MoE tensors kept on the CPU, etc) are left out and stay out of RAM
-                 // this also allows using partial offloading when the model size exceeds the metal buffer
-                 //     size, but not the RAM size
--                void * addr = ml.mappings.at(idx)->addr();
-+                void * addr = ml_l.mappings.at(idx)->addr();
- 
--                for (const auto & range : ml.get_mapping_ranges(idx, ctx)) {
-+                for (const auto & range : ml_l.get_mapping_ranges(idx, ctx)) {
-                     ggml_backend_buffer_t buf = ggml_backend_dev_buffer_from_host_ptr(dev, (char *) addr + range.first, range.last - range.first, max_size);
-                     if (buf == nullptr) {
-                         throw std::runtime_error(format("unable to allocate %s buffer", ggml_backend_buft_name(buft)));
-@@ -1964,7 +1966,7 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
-             }
-         } else {
-             ggml_backend_buffer_t buf;
--            if (ml.no_alloc) {
-+            if (ml_l.no_alloc) {
-                 buf = ggml_backend_buft_alloc_buffer(buft, /*size =*/ 0); // dummy buffer
-                 for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != nullptr; t = ggml_get_next_tensor(ctx, t)) {
-                     t->buffer = buf; // set dummy buffer for weights so that the backend scheduler won't try to allocate them
-@@ -1976,7 +1978,7 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
-                 throw std::runtime_error(format("unable to allocate %s buffer", ggml_backend_buft_name(buft)));
-             }
-             // lock the buffers that hold the tensors: a multi_buffer has no base, and its parts are pageable memory when pinning fails
--            if (use_mlock && !ml.no_alloc && ggml_backend_buffer_is_host(buf)) {
-+            if (use_mlock && !ml_l.no_alloc && ggml_backend_buffer_is_host(buf)) {
-                 std::vector<ggml_backend_buffer_t> lock_bufs;
-                 for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != nullptr; t = ggml_get_next_tensor(ctx, t)) {
-                     if (t->buffer != nullptr && std::find(lock_bufs.begin(), lock_bufs.end(), t->buffer) == lock_bufs.end()) {
-@@ -2033,12 +2035,12 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
-         }
-     }
- 
--    if (ml.no_alloc) {
-+    if (ml_l.no_alloc) {
-         return true;
-     }
- 
-     // without mmap, load non-host buffers first: their tensors go through a staging buffer, which is cheapest while the fewest weights are resident
--    if (!ml.use_mmap) {
-+    if (!ml_l.use_mmap) {
-         std::stable_partition(ctx_bufs.begin(), ctx_bufs.end(), [](const auto & x) {
-             const auto & bufs = x.second;
-             return !bufs.empty() && !ggml_backend_buffer_is_host(bufs[0]);
-@@ -2047,13 +2049,13 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
- 
-     // load tensor data
-     for (auto & [ctx, bufs] : ctx_bufs) {
--        if (!ml.load_all_data(ctx, bufs, use_mlock ? &pimpl->mlock_mmaps : NULL, params.progress_callback, params.progress_callback_user_data)) {
-+        if (!ml_l.load_all_data(ctx, bufs, use_mlock ? &pimpl->mlock_mmaps : NULL, params.progress_callback, params.progress_callback_user_data)) {
-             return false;
-         }
-     }
- 
-     if (use_mmap_buffer) {
--        for (auto & mapping : ml.mappings) {
-+        for (auto & mapping : ml_l.mappings) {
-             pimpl->mappings.emplace_back(std::move(mapping));
-         }
-     }
-@@ -2064,10 +2066,10 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
- }
- 
- // read and check the prism.hadamard metadata, and record the folded weights (load_tensors_hadamard makes the tensors)
--void llama_model_base::load_hparams_hadamard(llama_model_loader & ml) {
-+void llama_model_base::load_hparams_hadamard(llama_model_loader & ml_l) {
-     uint32_t hadamard_version = 0;
--    ml.get_key(LLM_KV_PRISM_HADAMARD_TIED_OUTPUT, hdmd.tied_output, false);
--    if (ml.get_key(LLM_KV_PRISM_HADAMARD_VERSION, hadamard_version, false)) {
-+    ml_l.get_key(LLM_KV_PRISM_HADAMARD_TIED_OUTPUT, hdmd.tied_output, false);
-+    if (ml_l.get_key(LLM_KV_PRISM_HADAMARD_VERSION, hadamard_version, false)) {
-         if (hadamard_version != 1 && hadamard_version != 2) {
-             throw std::runtime_error(format("unsupported prism.hadamard.version: %u", hadamard_version));
-         }
-@@ -2075,7 +2077,7 @@ void llama_model_base::load_hparams_hadamard(llama_model_loader & ml) {
-         if ((hadamard_version == 2) != hdmd.tied_output) {
-             throw std::runtime_error("prism.hadamard version 2 requires tied_output=true; version 1 forbids it");
-         }
--        if (hdmd.tied_output && ml.get_weight("output.weight")) {
-+        if (hdmd.tied_output && ml_l.get_weight("output.weight")) {
-             throw std::runtime_error("prism.hadamard.tied_output requires output.weight to be absent");
-         }
- 
-@@ -2085,11 +2087,11 @@ void llama_model_base::load_hparams_hadamard(llama_model_loader & ml) {
-         std::string sign_mode;
-         std::vector<std::string> weight_names;
- 
--        ml.get_key(LLM_KV_PRISM_HADAMARD_BLOCK_SIZE, block_size);
--        ml.get_key(LLM_KV_PRISM_HADAMARD_TRANSFORM, transform);
--        ml.get_key(LLM_KV_PRISM_HADAMARD_AXIS, axis);
--        ml.get_key(LLM_KV_PRISM_HADAMARD_SIGN_MODE, sign_mode);
--        ml.get_arr(LLM_KV_PRISM_HADAMARD_WEIGHT_NAMES, weight_names);
-+        ml_l.get_key(LLM_KV_PRISM_HADAMARD_BLOCK_SIZE, block_size);
-+        ml_l.get_key(LLM_KV_PRISM_HADAMARD_TRANSFORM, transform);
-+        ml_l.get_key(LLM_KV_PRISM_HADAMARD_AXIS, axis);
-+        ml_l.get_key(LLM_KV_PRISM_HADAMARD_SIGN_MODE, sign_mode);
-+        ml_l.get_arr(LLM_KV_PRISM_HADAMARD_WEIGHT_NAMES, weight_names);
- 
-         if (block_size == 0 || (block_size & (block_size - 1)) != 0) {
-             throw std::runtime_error(format("invalid prism.hadamard.block_size: %u", block_size));
-@@ -2110,8 +2112,8 @@ void llama_model_base::load_hparams_hadamard(llama_model_loader & ml) {
-         if (sign_mode == "explicit") {
-             std::vector<int32_t> sign_widths;
-             std::vector<int32_t> sign_values;
--            ml.get_arr(LLM_KV_PRISM_HADAMARD_SIGN_WIDTHS, sign_widths);
--            ml.get_arr(LLM_KV_PRISM_HADAMARD_SIGN_VALUES, sign_values);
-+            ml_l.get_arr(LLM_KV_PRISM_HADAMARD_SIGN_WIDTHS, sign_widths);
-+            ml_l.get_arr(LLM_KV_PRISM_HADAMARD_SIGN_VALUES, sign_values);
-             // explicit mode with no widths gives an empty sign table, which acts as identity and changes the model
-             if (sign_widths.empty()) {
-                 throw std::runtime_error("prism.hadamard.sign_mode is explicit but sign_widths is empty");
-@@ -2138,7 +2140,7 @@ void llama_model_base::load_hparams_hadamard(llama_model_loader & ml) {
-             }
-         }
- 
--        ml.get_key(LLM_KV_PRISM_HADAMARD_GDN_V_GROUPED, hdmd.gdn_v_grouped, false);
-+        ml_l.get_key(LLM_KV_PRISM_HADAMARD_GDN_V_GROUPED, hdmd.gdn_v_grouped, false);
- 
-         // only build_lora_mm/build_lora_mm_id apply the transform: refuse archs and tensor kinds that can skip them
-         switch (arch) {
-@@ -2200,7 +2202,7 @@ void llama_model_base::load_hparams_hadamard(llama_model_loader & ml) {
- 
-         // tables read by row lookup store latent rows: the inverse transform goes on the lookup result
-         std::vector<std::string> inverse_names;
--        ml.get_arr(LLM_KV_PRISM_HADAMARD_INVERSE_WEIGHT_NAMES, inverse_names, false);
-+        ml_l.get_arr(LLM_KV_PRISM_HADAMARD_INVERSE_WEIGHT_NAMES, inverse_names, false);
-         for (const auto & name : inverse_names) {
-             // the graph applies the inverse only after the token-embedding lookup, other latent tables stay rotated
-             if (name != "token_embd.weight") {
-@@ -2222,7 +2224,7 @@ void llama_model_base::load_hparams_hadamard(llama_model_loader & ml) {
-             throw std::runtime_error("prism.hadamard.tied_output requires a latent token embedding");
-         }
-         hdmd.weight_blocks.emplace("token_embd.weight", it->second);
--    } else if (hdmd.inverse_blocks.count("token_embd.weight") && !ml.get_weight("output.weight")) {
-+    } else if (hdmd.inverse_blocks.count("token_embd.weight") && !ml_l.get_weight("output.weight")) {
-         throw std::runtime_error("a tied Hadamard output requires version 2 and tied_output=true");
-     }
- }
 @@ -2394,15 +2396,15 @@ void llama_model_base::load_tensors_hadamard() {
              __func__, hdmd.rot.size() + hdmd.inv.size(), hdmd.inv.size(), rotations.size(), sign_tensors.size());
  }
  
 -ggml_tensor * llama_model_base::create_tensor(llama_model_loader & ml, const LLM_TN_IMPL & tn, const std::initializer_list<int64_t> & ne, int flags) {
-+ggml_tensor * llama_model_base::create_tensor(llama_model_loader & ml_l, const LLM_TN_IMPL & tn_l, const std::initializer_list<int64_t> & ne, int flags) {
++ggml_tensor * llama_model_base::create_tensor(llama_model_loader & ml, const LLM_TN_IMPL & tn_l, const std::initializer_list<int64_t> & ne, int flags) {
      const buft_list_t * buft_list_layer = nullptr;
 -    if (tn.bid != -1) {
 +    if (tn_l.bid != -1) {
@@ -3615,8 +3140,7 @@ index 65c42f85f..d35b4cc59 100644
 -        buft_list_layer = (size_t) tn.bid < pimpl->dev_layer.size() ? pimpl->dev_layer.at(tn.bid).buft_list : pimpl->dev_output.buft_list;
 +        buft_list_layer = (size_t) tn_l.bid < pimpl->dev_layer.size() ? pimpl->dev_layer.at(tn_l.bid).buft_list : pimpl->dev_output.buft_list;
      }
--    return ml.create_tensor(
-+    return ml_l.create_tensor(
+     return ml.create_tensor(
          hparams, &pimpl->cpu_buft_list, pimpl->dev_input.buft_list, pimpl->dev_output.buft_list, buft_list_layer,
 -        tn, ne, flags);
 +        tn_l, ne, flags);
@@ -3960,47 +3484,6 @@ index 65c42f85f..d35b4cc59 100644
  }
  
  void llama_model_base::create_tensor_gate_up_exps(llama_layer & layer, int bid, int64_t n_embd_, int64_t n_ff_, int64_t n_expert_, int flags) {
-@@ -3913,33 +3915,33 @@ void llama_model_base::create_tensor_qkv(llama_layer & layer, int bid,
-     }
- }
- 
--llama_model_base::nextn_flags_t llama_model_base::nextn_flags(llama_model_loader & ml, llm_tensor trunk_probe) const {
-+llama_model_base::nextn_flags_t llama_model_base::nextn_flags(llama_model_loader & ml_l, llm_tensor trunk_probe) const {
-     int trunk = 0;
-     int mtp   = 0;
- 
-     // a file without the first trunk layer is MTP-only, a file without the first NextN layer is trunk-only
-     if (hparams.n_layer_nextn > 0) {
--        if (ml.get_weight(tn(trunk_probe, "weight", 0).str().c_str()) == nullptr) {
-+        if (ml_l.get_weight(tn(trunk_probe, "weight", 0).str().c_str()) == nullptr) {
-             trunk = TENSOR_NOT_REQUIRED;
-         }
--        if (ml.get_weight(tn(LLM_TENSOR_NEXTN_EH_PROJ, "weight", hparams.n_layer()).str().c_str()) == nullptr) {
-+        if (ml_l.get_weight(tn(LLM_TENSOR_NEXTN_EH_PROJ, "weight", hparams.n_layer()).str().c_str()) == nullptr) {
-             mtp = TENSOR_NOT_REQUIRED;
-         }
-     }
- 
--    if (!ml.load_mtp) {
-+    if (!ml_l.load_mtp) {
-         mtp |= TENSOR_SKIP;
-     }
- 
-     return { trunk, mtp };
- }
- 
--void llama_model_base::load_swa_pattern(llama_model_loader & ml, uint32_t n_pattern, bool dense_first) {
--    if (ml.get_arr(LLM_KV_ATTENTION_SLIDING_WINDOW_PATTERN, hparams.is_swa_impl, false)) {
-+void llama_model_base::load_swa_pattern(llama_model_loader & ml_l, uint32_t n_pattern, bool dense_first) {
-+    if (ml_l.get_arr(LLM_KV_ATTENTION_SLIDING_WINDOW_PATTERN, hparams.is_swa_impl, false)) {
-         return;
-     }
- 
--    ml.get_key(LLM_KV_ATTENTION_SLIDING_WINDOW_PATTERN, n_pattern, false);
-+    ml_l.get_key(LLM_KV_ATTENTION_SLIDING_WINDOW_PATTERN, n_pattern, false);
-     hparams.set_swa_pattern(n_pattern, dense_first);
- }
- 
 diff --git a/src/llama-moe-cache.cpp b/src/llama-moe-cache.cpp
 index 4d3596b24..a3eb236d9 100644
 --- a/src/llama-moe-cache.cpp

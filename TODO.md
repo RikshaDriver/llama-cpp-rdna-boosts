@@ -12,7 +12,7 @@ Details never live here: they live in `AGENTS.md`, `patches/README.md`, `MANIFES
 still means the same subject after that item is closed and removed from this file.  New items append.
 
 **Current state:** the **14-block V2.1 set** (block 00 + blocks 01-13) at fork point **`3f03b1772`**
-(the 2026-10-24 re-base), release **`v14-3f03b1772-r127`**.  `release.json` is the source of truth for the
+(the 2026-10-24 re-base), release **`v14-3f03b1772-r128`**.  `release.json` is the source of truth for the
 tip/tree and hashes; the top of `WORKLOG.md` is the newest record.
 
 | # | subject | kind | status |
@@ -23,8 +23,6 @@ tip/tree and hashes; the top of `WORKLOG.md` is the newest record.
 | **79** | RDNA3_0 verify-band fusions: no multi-device measurement, and gfx1101/gfx1102 untested | platform validation | open (shipped default-on in r95; needs a 2+ card gfx1100 box).  `ssh fingon` is single-RDNA3 (`ROCm0`; its second rocm-smi entry is an iGPU and is not a HIP device), so it does **not** cover the multi-device arm — it validates single-GPU gfx1100 only.  gfx1101/gfx1102 still have no hardware |
 | **70** | harden the expert-cache re-arm / wide-aux growth against a starved arena | robustness | open |
 | **36** | genuine CPU/GPU overlap for the MoE misses | performance | open, scoping (`wip/moe-cpu-overlap/`) |
-| **100** | `HC_COMBINE` has no test case (`test-backend-ops -o HC_COMBINE` runs 0/0), so the op has no oracle | test coverage | open (pre-existing; `HC_MIX` has 30 cases) |
-| **101** | drop the `ml`→`ml_l` parameter rename in `llama-model.cpp` (pure churn: it re-skinned every re-base conflict in that file) | cleanup | open (proposed 2026-10-24; keep `ml_l` until the next re-base to avoid another tree rewrite) |
 
 Accepted limitations that are deliberately **not** fixed are listed at the end — do not re-report them.
 

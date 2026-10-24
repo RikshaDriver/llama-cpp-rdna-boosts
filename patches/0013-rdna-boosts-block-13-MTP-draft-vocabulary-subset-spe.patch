@@ -1,4 +1,4 @@
-From 0c28ef86c51e4e46c7f5631f1829dee0cc413468 Mon Sep 17 00:00:00 2001
+From 828be32a751274baa735b2d1e21585ddffa8bf5d Mon Sep 17 00:00:00 2001
 From: Stew Forster <ci@rdna-boosts.invalid>
 Date: Thu, 22 Oct 2026 05:53:08 -0500
 Subject: [PATCH 13/13] rdna-boosts: block 13: MTP draft vocabulary subset
@@ -201,7 +201,7 @@ index b08013bd4..e992a835c 100644
          enum llama_context_type      ctx_type;          // set the context type (e.g. MTP)
          enum llama_rope_scaling_type rope_scaling_type; // RoPE scaling type, from `enum llama_rope_scaling_type`
 diff --git a/src/llama-context.cpp b/src/llama-context.cpp
-index 205e0e53d..f94a8fd20 100644
+index a8c3f2957..bf2b8075e 100644
 --- a/src/llama-context.cpp
 +++ b/src/llama-context.cpp
 @@ -808,6 +808,22 @@ llama_context::llama_context(
@@ -322,7 +322,7 @@ index c2317fe60..735380a2a 100644
  
      llm_graph_result * res;
 diff --git a/src/llama-model.cpp b/src/llama-model.cpp
-index e453b2026..69ab8b75d 100644
+index daf42cf47..dcb6ac2a8 100644
 --- a/src/llama-model.cpp
 +++ b/src/llama-model.cpp
 @@ -23,6 +23,7 @@

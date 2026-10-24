@@ -16,12 +16,13 @@ upstream moves.  It is not a changelog — the current release, tip/tree and per
 | canonical chain | `release.json .tip` / `.tree` |
 | release identity | `release.json .release` (`v<blocks>-<base>-r<N>`) |
 
-**This release is a re-base** (`v14-3f03b1772-r127`): the set was replayed from `097cf33d9` (2026-10-12)
-onto **`3f03b1772`** (2026-10-24) — 261 upstream commits, including a chunked GDN prefill kernel, a MoE
-cache rewritten to SLRU, chunked CUDA graphs, a 4 GiB pinned-host cap, a fused QSA mask op and reworked
-MMQ/MMVQ tuning.  Between re-bases every `rN` is a **block amendment** at the same base, so the block series
-and its recorded trees stay comparable.  A re-base is a deliberate event with its own `WORKLOG.md` entry
-and a record in [`archive/docs/baseline-history.md`](archive/docs/baseline-history.md).
+**The base is fixed by a re-base.**  The last one is `v14-3f03b1772-r127`: it replayed the set from
+`097cf33d9` (2026-10-12) onto **`3f03b1772`** (2026-10-24) — 261 upstream commits, including a chunked GDN
+prefill kernel, a MoE cache rewritten to SLRU, chunked CUDA graphs, a 4 GiB pinned-host cap, a fused QSA
+mask op and reworked MMQ/MMVQ tuning.  Between re-bases every `rN` is a **block amendment** at the same base
+(the current release, `v14-3f03b1772-r128`, is one: two TODOs closed, no kernel changed), so the block
+series and its recorded trees stay comparable.  A re-base is a deliberate event with its own `WORKLOG.md`
+entry and a record in [`archive/docs/baseline-history.md`](archive/docs/baseline-history.md).
 
 ## What the patches are
 

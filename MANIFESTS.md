@@ -117,6 +117,7 @@ on the tip.
 | 10 | **(r103)** bf16 K/V prefill runs and is bit-identical to the unfused chain: `llama-bench -ctk bf16 -ctv bf16` (must not abort) + a prefill-logit compare against a base recorded with `GGML_CUDA_DISABLE_ROPE_SET_ROWS=1`; `test-backend-ops -o ROPE -o SET_ROWS` | 5136.70 t/s pp512; KLD −0.000000 / 100.000 %; ROPE+SET_ROWS green |
 | 11 | dense coherence + the block's own arm (DFlash/CPU/mmap): `-ncmoe` peak-RSS check with and without the reclaim | identical text; RSS as recorded in `patches/README.md` |
 | 11 | **(r106) DFlash2 + `-sm tensor`**: a 2- and 3-GPU `--spec-type draft-dflash` run on a selector drafter (coherence, deterministic text, draft acceptance equal to the same config under `-sm layer`), `--parallel 2`, and `-sm tensor` + draft + `-ncmoe` (the slab narrow-2 arm) | all coherent with no override env; acceptance identical to `-sm layer`; `test-backend-ops` 3/3 and `gate-prefill-logits.sh` at KLD <= 0.005 (r106: 2 GPU 84.5 vs 63.4 t/s, 3 GPU 61.1, KLD 0.000000 / 100.000 %) |
+| 11 | **(r128) the HC op oracles**: `test-backend-ops -o HC_COMBINE` (the op against its CPU reference; both block_out/inject broadcast shapes, hc 2/4/8, `nt` up to the CUDA band bound) and `-o HC_COMBINE_MIX` (the whole-graph combine -> BF16 mixer pair, i.e. the default-on `GGML_CUDA_FUSE_HC_COMBINE_MIX` arm; `GGML_CUDA_FUSE_HC_COMBINE_MIX=0` is the unfused control) | 20/20 and 6/6 on gfx1201.  `-o HC_COMBINE` ran **0/0 — no oracle at all — before r128** (TODO #100); `GREEDY-PURITY.md` §52 |
 | 12 | **(r107) MTP draft vocabulary subset**: `-sm tensor` 2-GPU run with `--spec-draft-mtp-vocab N` on (the model prints `mtp_draft_vocab = N: MTP draft head uses R of V rows` under `-v`); greedy text at `--spec-draft-n-max 7` against `--spec-type none` (prose **and** code, `-n 3000`); the four-axis adaptive gate (R/C/K/P, `-n 3000`) with the flag off vs on; `test-backend-ops`; `test-logits-width-probe SPLIT=tensor`; `scripts/gate-prefill-logits.sh`; a row-range read check for the `ggml-backend-meta` half | text identical inside the purity band; all four axes not slower (r107: R +1.3 %, P +1.7 %, C +2.4 %, K +0.8 %); `test-backend-ops` 21179/21179; probe W=1..8 maxdiff 0; KLD 0.000000 / 100.000 %; `-sm tensor` works without the trim aborting — `GREEDY-PURITY.md` §48 |
 | 12 | **(r119) batched state restore**: `test-save-load-state`, `test-state-restore-fragmented`; a server prompt-cache restore vs a fresh `cache_prompt:false` run (48 greedy tokens) on 35B-A3B (plain and DFlash2) and Flash-Next GSQ, 2 GPU `-sm tensor`; four-axis MTP A/B at `-n 3000`; prefill-logit gate | restored text == fresh in every arm; MTP text/acceptance identical stock vs patched; KLD 0.000000 / 100.000 %; `LLAMA_STATE_ASYNC_READ=0` keeps the per-tensor path; one GPU is ~2 ms slower (accepted for the multi-device win) |
 
@@ -135,7 +136,7 @@ fails to apply:
 
 ## Known notes (working)
 
-- **`test-backend-ops.cpp` is shared by several blocks** (03/04/05/07/08/10).  Their hunks sit in different
+- **`test-backend-ops.cpp` is shared by several blocks** (03/04/05/07/08/10/11).  Their hunks sit in different
   case regions, so a re-base is local to the failing file — but grep every patch that touches the file
   before concluding a case is missing.
 - **Block 08 is one diff on purpose.**  Its matchers and the `mmvq` / `mmq` / `norm` / `quantize` kernels
@@ -145,6 +146,11 @@ fails to apply:
   amending an early block; appending it to the last block is what made the per-block build gate necessary.
 - **The set must apply whitespace-clean.**  `apply-all.sh` prints no git whitespace warnings; a warning is
   a regeneration bug, not a cosmetic issue.
+- **Keep UPSTREAM's identifiers in `src/llama-model.{cpp,h}`** — most blocks touch that file, so a local
+  rename is paid on every re-base.  Since r128 the loader parameter is `ml` again (the delivery had
+  renamed it `ml_l` to silence clang's `-Wshadow`, which re-skinned every conflict in the file — TODO #101);
+  the 9 standing `declaration shadows a field` warnings that buys are documented in `src/CMakeLists.txt`
+  and are expected.
 - **Block-number collisions in old records:** documents written before 2026-10-13 use the
   pre-V2.0 16-block numbering ("block 12" = hybrid all-reduce there, but "block 10" = the k-quant
   umbrella).  `WORKLOG.md`, `archive/` and the dated notes in `archive/docs/patch-notes-history.md` are

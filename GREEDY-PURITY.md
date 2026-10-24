@@ -113,6 +113,7 @@ numbers are **stable** — dozens of docs cite them — so they are never renumb
 | **§49** | a fused chain's launch geometry comes from the *flat* projection, never from a consumer's `[…, n_seq_tokens, n_seqs]` view: gate the multi-sequence batch, not just `W = 1..8` single-stream | fix (r108, issue #204) |
 | **§50** | a draft length is a verify width *and* a memory-tier parameter: with host experts served by the arena, a verify batch wider than the cache band leaves VRAM and streams the routed experts from host on every step | doctrine (r123, TODO #59 closed) |
 | **§51** | a kernel-config row keyed on one tile dimension also configures every query width that reaches that tile: a decode/verify-band row must not be reachable from prefill | doctrine (`TODO` #97/#98, 2026-10-24) |
+| **§52** | an op with no test case has no oracle: `HC_COMBINE` ran 0/0 in `test-backend-ops`, so a wrong fused residual combine was invisible to every gate — the op and the default-on fusion that consumes it are covered since r128 | fix (r128, TODO #100 closed) |
 
 ---
 
@@ -1278,4 +1279,38 @@ changes the KV-row split and combine order -- the family-switch class of §34/§
 decode/verify A/B so the band's measured gain is not silently traded away.
 
 Record: `TODO.md` #97/#98/#99, `patches/README.md` block 05, `WORKLOG.md` 261024.006 / 261024.007.
+
+## 52. An op with no test case has no oracle — and a default-on fusion needs the pair covered, not just the op
+
+**Claim.**  `GGML_OP_HC_COMBINE` (the qwen4exp hyper-connection residual combine,
+`out[e,c,t] = residual[e,c,t] + block_out[e,t] * 2*sigmoid(inject[c,t]/hc)`) shipped for four releases with
+**no `test-backend-ops` case at all**: `-o HC_COMBINE` ran **0/0**, so the op was never compared to a
+reference.  Its sibling `HC_MIX` had 30 cases throughout, which is what made the gap invisible — the file
+"has HC coverage" if you only look at the summary line.  A wrong combine (an inverted or mis-centred
+`2*sigmoid` weight, a `stream`/`token` index swap, an in-place residual read) is a *uniform* corruption of
+the residual stream: it changes no kernel's shape, so same-seed text, MTP acceptance and the width probe all
+still agree with themselves, and on a MoE-bound decode the FA/mixer kernel is not the wall clock (§51).
+`HC_MIX`'s 30 cases cannot see it either: its `x` is a random tensor in the test, so a combine that produced
+garbage would just feed a different — equally random — input.
+
+**Rule.**  Every op a block adds owes a `test-backend-ops` case whose reference is the *unfused* chain (for a
+fused op, the CPU backend's implementation of the same op is that oracle).  Cover the shapes the model
+actually runs (both broadcast forms, the `hc` values in use, the band widths), and when a **fusion** of two
+ops is default-on, add a whole-graph case for the pair: `run_whole_graph()` reaches the fusion dispatcher,
+a single-op case cannot.  Name the pair case after both ops (`HC_COMBINE_MIX`) so it is selectable, and run
+both arms (`=0` kills the fusion) so the fused and unfused paths are each compared to the same CPU
+reference.
+
+**Evidence (r128, gfx1201).**  `test_hc_combine`: 20 cases (`n_embd` 512/2560, `hc` 2/4/8, `nt`
+1/2/3/5/8/16, `block_out`+`inject` broadcast and per-token) — **20/20**.  `test_hc_combine_mix`: 6 whole-graph
+cases at the Flash-Next shapes (n_embd 2560, hc 4, low rank 320, BF16 mixer), `nt` 1/2/3/5/8 plus the
+`w_inject`-less head call — **6/6** with the fusion on and 6/6 with `GGML_CUDA_FUSE_HC_COMBINE_MIX=0`; a
+temporary instrument confirmed `ggml_cuda_hc_combine_mix_try_fuse` fires on the default arm and not on the
+control.  `test-llama-archs -a qwen4exp` stays green (GPU NMSE 4.42e-14, mixed batch 2.07e-14), and nothing
+in the delivery's text moved: dense 27B `plain == draft-mtp` sha `0cd2d424a564` (identical to r127),
+35B-A3B `plain == draft-mtp` identical, Flash-Next GSQ `plain == draft-mtp` identical, prefill-logit KLD
+0.000000 / 99.980 %.
+
+Record: `TODO.md` #100 (closed), `patches/README.md` block 11, `MANIFESTS.md` (per-block row 11),
+`WORKLOG.md` 261024.009.
 

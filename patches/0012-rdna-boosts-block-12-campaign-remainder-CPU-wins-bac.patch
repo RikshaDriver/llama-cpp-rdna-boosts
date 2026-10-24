@@ -1,4 +1,4 @@
-From 5caf8feaa0b4048fab8e17a15709a3f6bc15c618 Mon Sep 17 00:00:00 2001
+From e18381c5591607787b27a448ec5de5b3bfda4993 Mon Sep 17 00:00:00 2001
 From: Stew Forster <ci@rdna-boosts.invalid>
 Date: Wed, 21 Oct 2026 10:40:32 -0500
 Subject: [PATCH 12/13] rdna-boosts: block 12: campaign remainder (CPU wins,
@@ -4298,7 +4298,7 @@ index 35be8d526..b08013bd4 100644
  
      enum llama_context_type {
 diff --git a/src/llama-context.cpp b/src/llama-context.cpp
-index 7d613926b..205e0e53d 100644
+index 7d613926b..a8c3f2957 100644
 --- a/src/llama-context.cpp
 +++ b/src/llama-context.cpp
 @@ -1,3 +1,6 @@
@@ -4689,7 +4689,7 @@ index 7d613926b..205e0e53d 100644
  class llama_io_read_host : public llama_io_read_i {
  public:
 -    llama_io_read_host(const uint8_t * p, size_t len) : ptr(p), buf_size(len) {}
-+    llama_io_read_host(const uint8_t * p, size_t len, llama_context * lctx = nullptr) : ptr(p), buf_size(len), lctx(lctx) {}
++    llama_io_read_host(const uint8_t * p, size_t len, llama_context * lctx = nullptr) : ptr(p), lctx(lctx), buf_size(len) {}
 +
 +    // Batched restore (LLAMA_STATE_ASYNC_READ, default on; 0 = the per-tensor synchronous sets below).  Each
 +    // synchronous set bounces through a pinned chunk and synchronizes its device, once per tensor and device (a
@@ -4995,32 +4995,32 @@ index d13253e84..0870f80e0 100644
      bool no_alloc;
      bool load_mtp;
 diff --git a/src/llama-model.cpp b/src/llama-model.cpp
-index 186d82fbc..e453b2026 100644
+index 1d77143d9..daf42cf47 100644
 --- a/src/llama-model.cpp
 +++ b/src/llama-model.cpp
-@@ -1997,7 +1997,47 @@ bool llama_model_base::load_tensors(llama_model_loader & ml_l) {
-         const bool is_lazy_mapped = ctx_key.lazy && !ml_l.no_alloc;
+@@ -1997,7 +1997,47 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
+         const bool is_lazy_mapped = ctx_key.lazy && !ml.no_alloc;
          const bool is_resident    = ctx_key.resident;
  
--        if ((ml_l.use_mmap || is_lazy_mapped) && use_mmap_buffer && buffer_from_host_ptr_supported && is_default_buft && !is_resident) {
+-        if ((ml.use_mmap || is_lazy_mapped) && use_mmap_buffer && buffer_from_host_ptr_supported && is_default_buft && !is_resident) {
 +        // wip/host-expert-master-drop (TODO #55): a POOL-BACKED host expert master keeps its tensors in
 +        // the read-only model mapping instead of a full pinned allocation (`--host-experts pool`).  The
 +        // mapping is the source of truth (page cache / GGUF on disk, reclaimable), the bounded pinned
 +        // pool is the only non-swappable tier, and every GPU read is served through it -- so a host
 +        // expert set larger than RAM runs by streaming from disk.  The buffer type still carries this
 +        // device, so the expert op stays on the GPU and nothing about the schedule changes.
-+        const bool host_master_mapped = ml_l.use_mmap && !ml_l.no_alloc && dev != nullptr && buft != nullptr &&
++        const bool host_master_mapped = ml.use_mmap && !ml.no_alloc && dev != nullptr && buft != nullptr &&
 +            buft == ggml_backend_dev_moe_host_master_buft(dev);
 +
 +        if (host_master_mapped) {
 +            const size_t max_size = ggml_get_max_tensor_size(ctx);
 +
-+            for (uint32_t idx = 0; idx < ml_l.files.size(); idx++) {
++            for (uint32_t idx = 0; idx < ml.files.size(); idx++) {
 +                // the mmap regions that contain this context's tensors of this file (a pool-backed master
 +                // can be split into several disjoint ranges, so one buffer per range)
-+                void * addr = ml_l.mappings.at(idx)->addr();
++                void * addr = ml.mappings.at(idx)->addr();
 +
-+                for (const auto & range : ml_l.get_mapping_ranges(idx, ctx)) {
++                for (const auto & range : ml.get_mapping_ranges(idx, ctx)) {
 +                    ggml_backend_buffer_t buf = ggml_backend_host_buffer_from_ptr(
 +                            buft, (char *) addr + range.first, range.last - range.first, max_size);
 +                    if (buf == nullptr) {
@@ -5034,17 +5034,17 @@ index 186d82fbc..e453b2026 100644
 +
 +            // the tensors point directly into the mapping: the pages must survive the load
 +            for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != nullptr; t = ggml_get_next_tensor(ctx, t)) {
-+                const auto * w = ml_l.get_weight(ggml_get_name(t));
++                const auto * w = ml.get_weight(ggml_get_name(t));
 +                if (w != nullptr) {
-+                    ml_l.mark_mmap_used((uint32_t) w->idx, w->offs, ggml_nbytes(t));
++                    ml.mark_mmap_used((uint32_t) w->idx, w->offs, ggml_nbytes(t));
 +                }
 +            }
 +            if (bufs.empty()) {
 +                throw std::runtime_error(format("host expert master: no mapped range covers the %s expert tensors",
 +                                                ggml_backend_buft_name(buft)));
 +            }
-+        } else if ((ml_l.use_mmap || is_lazy_mapped) && use_mmap_buffer && buffer_from_host_ptr_supported && is_default_buft && !is_resident) {
-             GGML_ASSERT(!ml_l.no_alloc);
++        } else if ((ml.use_mmap || is_lazy_mapped) && use_mmap_buffer && buffer_from_host_ptr_supported && is_default_buft && !is_resident) {
+             GGML_ASSERT(!ml.no_alloc);
              const size_t max_size = ggml_get_max_tensor_size(ctx);
  
 @@ -2551,6 +2591,42 @@ size_t llama_model::max_host_weight_tensor_bytes() const {
