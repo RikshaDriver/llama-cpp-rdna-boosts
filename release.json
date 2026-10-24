@@ -1,13 +1,13 @@
 {
-  "release": "v14-097cf33d9-r120",
+  "release": "v14-097cf33d9-r121",
   "base": "097cf33d9",
   "base_tree": "30c400ccea2e2fb47b663036a6cee08a4dc542d8",
   "n_blocks": 14,
-  "tip": "aa67b58ab126d221c483d25625469c892a8324aa",
-  "tree": "0fd9827d791c4e63e26dd658a0e9c5216ca95933",
+  "tip": "9f353b22a770e3830b01a4e12c665fe056ffa3d1",
+  "tree": "bad14d63e496dea1ba66d784e0205aaf81a293eb",
   "all_patch": {
     "name": "rdna-boosts-all.patch",
-    "sha256": "859d0a1836d4ead0b0f6443c4397cdf8fda17bc7fe76e3e599c9ef5defc54610"
+    "sha256": "beeb3a3f3fbe39af9f525c2ee474b569a784bbb1228adc661c0e03278d43f3ef"
   },
   "patches": {
     "0000-rdna-boosts-block-00-foundation-band-uniformity-Meta.patch": "fd5af5baa8c2c5caee6929942cec21c7515db37aec51704c95bbb8b85071a922",
@@ -20,9 +20,9 @@
     "0007-rdna-boosts-block-07-k-quant-boosts-mmvq-VDR-Q6_K-MM.patch": "e787926ff80cbe03e927c3dd0e7f8ef0db9c24d60889a0508f5dd1ed8591c32f",
     "0008-rdna-boosts-block-08-fused-kernels-old-08-fusions-ol.patch": "ee7dabd64e5be08ad414cc9cb59a8e3c98412165b35ca6ca4183a68837d609c6",
     "0009-rdna-boosts-block-09-host-resident-MoE-iface-schedul.patch": "5efa0dd6c90d3ef62ae95b728f30415432902c125d9f3627698bc84a1ab51d27",
-    "0010-rdna-boosts-block-10-slab-fusion-dispatcher-async-in.patch": "9c89440b3c52726df2d4f2ec1c15b845e33fc8395aea85157ee556ace8429772",
-    "0011-rdna-boosts-block-11-qwen4exp-model-hyper-connection.patch": "9a19e70b5afaa3c21864c3469241d419ff9ddf5dd1e5bcec8c861824d16e43e8",
-    "0012-rdna-boosts-block-12-campaign-remainder-CPU-wins-bac.patch": "1f52675d48a59a89d87347a23a4e8e173ad4396b155fe9fef866a6c22559789e",
-    "0013-rdna-boosts-block-13-MTP-draft-vocabulary-subset-spe.patch": "fff56d69dbb512c9e6ec4df2593c72e5af0c599c5be49dc46bf23ddfb2ca3327"
+    "0010-rdna-boosts-block-10-slab-fusion-dispatcher-async-in.patch": "eb548cb1d65e4533032b5db676f8b10ba1f5eb4342e014b786767b438334231c",
+    "0011-rdna-boosts-block-11-qwen4exp-model-hyper-connection.patch": "22122a0cd79e6f9035ed63ab9ca6e1c2d31ced8594844bb8c26aac0dcd6cabdf",
+    "0012-rdna-boosts-block-12-campaign-remainder-CPU-wins-bac.patch": "f8ae1eebee3b23b375a49764012c896627cacba7a57f82e225cd07d4210b557b",
+    "0013-rdna-boosts-block-13-MTP-draft-vocabulary-subset-spe.patch": "2f2bb03731c1e6800a20aa8b0a8d95d8d212a4d5441ee4e06613862e5b41d0b7"
   }
 }

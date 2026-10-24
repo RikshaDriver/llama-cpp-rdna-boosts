@@ -671,6 +671,27 @@ block's own symbols (QSA/HC matchers, the indexer relu-sum, the HC_BLK16/RES16 m
 * **The slab** (`ggml-cuda-slab.cu`, `ggml-cuda-arena.cu`): one VMM reserve per device split by a movable
   boundary — compute below, MoE arena above, no HIP call at runtime.  Plus the narrow-band learning, the
   wide-phase auxiliary region, pool-wide routing, and the slab transient absorption.
+* **The slab's peer-access grants are per device and best effort, and a cross-device copy must ask before it**
+  (r121, found validating TODO #94).  `ggml_cuda_vmm_map_phys` used to grant READWRITE for the owner and every peer in ONE
+  `cuMemSetAccess` call and, on failure, silently retried with the owner only.  With three ~29 GiB slabs that
+  call fails on the second and third device — the peers have no free VRAM left for the driver to build a
+  29 GiB peer mapping — so devices 1/2 ended up owner-only, and the scheduler's layer-boundary
+  `hipMemcpyPeerAsync` into their compute buffers was issued into an ungranted range: host-side
+  `ROCm error: invalid argument` without `GGML_CUDA_P2P`, and a **GPU fault** (`HSA_STATUS_ERROR_MEMORY_FAULT`
+  in `__amd_rocclr_copyBuffer`, "Page not present") with it.  That is what made `-sm layer` + `-ncmoe`
+  abort at warm-up on Flash-Next (reproduced on the r120 base with no drafter attached).
+  Now: own grant first, then **each peer individually**, the granted set kept in `ggml_cuda_slab.peer_mask`
+  (a refused pair warns once), and `ggml_cuda_slab_peer_copy_ok(dst, nbytes)` decides the copy path — a
+  destination **outside** every slab keeps the raw peer copy (plain memory stages inside the driver), a
+  destination **inside** a slab needs the grants of *every* live slab, because a copy between two fully
+  granted devices still fails while a third slab's grants are incomplete (measured: three 28 GiB slabs
+  {0,1,2}/{0,1}/{0} fail 0→1, three 20 GiB slabs {0,1,2} succeed).  When it says no, both copy sites
+  (`ggml_backend_cuda_cpy_tensor_async`, `ggml_backend_cuda_buffer_cpy_tensor`) use
+  `ggml_cuda_peer_copy_staged`: a grow-only pinned buffer per (src, dst) pair, D2H on the source stream, H2D
+  on the destination stream, and a `done` event guarding the reuse.  No env knob.  Cost: none where the
+  grants complete (peer copies unchanged; tensor-split DFlash2 97.19 → 97.2 t/s, text identical); a host
+  bounce on the refused pairs, which is what makes `-sm layer` + `-ncmoe 48` work at all (Flash-Next GSQ:
+  265 t/s prefill, 48.4 t/s decode, greedy text identical to the `GGML_CUDA_SLAB=0` arm).
 * **The fusion dispatcher** (`ggml-cuda-try-fuse.cu`): the matcher arms moved out of `ggml-cuda.cu`.
 * **Rope/FWHT fusions** (M-RoPE and NEOX, with the q8_0 K/V cache `SET_ROWS` folded in), the paired GDN
   q/k norms, and the `ADD + rms_norm_q8_1` one-token fusion (`GREEDY-PURITY.md` §42).
@@ -781,6 +802,21 @@ slab/dispatcher/ring code of its own beyond the arms implemented in its own TUs.
   fused indexer top-k/score (`indexer-topk.cu`, `lightning-indexer`), hyper-connections (`hc-mix.cu`,
   `hyperconn.cu`), the managed lazy reader, PLE n-gram loading, the MTP draft head, and the **keys-only
   indexer cache** (`LLAMA_QSA_KEYS_ONLY`; no V tensor at all — `llama_kv_cache` gains `v_enabled`).
+* **The DFlash/DSpark layer-input tap exports the HC-averaged state** (r121, TODO #94 / issue #211): the
+  graph used to publish `t_layer_inp[il] = res_hc`, the **wide** hyper-connection residual (`hc * n_embd` =
+  10240 on Flash-Next), while `llama_context::extract_layer_inp()` requires exactly `n_embd` floats per row
+  — so attaching any DFlash2 head to a qwen4exp target aborted at
+  `GGML_ASSERT(row_floats == model.hparams.n_embd)` (llama-context.cpp:3437), and the F1 device path hit its
+  `t->ne[1] == n_tokens` assert instead.  `graph::build_hc_mean()` (same 8 lines as deepseek4/glm5-next)
+  now collapses the streams, and the export is **gated on `cparams.embeddings_layer_inp[il]`** like
+  deepseek4's, so a graph that taps nothing (plain decode, MTP, QSA) gains no node at all — plain decode is
+  byte-identical, and Flash-Next GSQ prefill logits are unchanged (PPL 1.9404, mean KLD −0.000000,
+  same-top-p 100.000 %).  The convention is settled by the head author's own sglang capture patch
+  (`hidden_states.unflatten(-1, (hc, hidden)).mean(dim=-2)`, captured **after** the layer call, so
+  `completed i` = llama.cpp's `t_layer_inp[i+1]` = the GGUF's `target_layers`).  Mean vs stream-0 measured
+  on recall: acceptance length 4.32 vs 2.41.  Known limit: index `n_layer` (the "output of the last layer",
+  which deepseek4 also supports) is not exported — after the loop `res_hc` may be row-gathered, so it needs
+  the pre-gather residual; no DFlash2 head taps the final layer ([6,16,26,36,46]/48, [6,20,34,48,62]/64).
 * **The QSA/indexer ops**: `fattn-qsa.{cu,cuh}` (VEC and the attached packed-block views),
   `fattn-qsa3.cu` (the packed-block WMMA prefill kernel, which takes its wide-phase workspace from the
   block-10 slab), `indexer-score.{cu,cuh}` (the fused score / fill plus the prefill relu-sum fusion),

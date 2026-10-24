@@ -188,6 +188,29 @@ stub alive to serve them, and treat a `wip/` path in an old record as a historic
   probe.  **Keep hipBLASLt enabled in the delivery** (disabling it costs up to -15 % decode; the switch is
   for reproducible runs and bisection only).  `GREEDY-PURITY.md` §44,
   `archive/work/fix-gemma-4/evidence/MEASUREMENTS-2026-10-21d.md`.
+- **A layer-input tap needs the HC-averaged state on qwen4exp (`build_hc_mean`, r121, TODO #94 closed).**
+  `qwen4exp` runs `hc` parallel residual streams, so `res_hc` is `hc * n_embd` wide (10240 on Flash-Next)
+  while `extract_layer_inp()` demands exactly `n_embd` per row: exporting the wide residual made any
+  DFlash2/DSpark head abort at `GGML_ASSERT(row_floats == model.hparams.n_embd)` (llama-context.cpp:3437;
+  the F1 device path asserts `t->ne[1] == n_tokens`).  The tap is `graph::build_hc_mean()` (mean over the
+  streams, the same 8 lines as deepseek4/glm5-next and the head author's own `hidden_states.mean(dim=-2)`
+  capture), **gated on `cparams.embeddings_layer_inp[il]`** so a graph that taps nothing (plain decode, MTP,
+  QSA) gains no node — plain decode is byte-identical and the prefill logits are unchanged (KLD −0.000000).
+  `target_layers` is `completed + 1` (the capture is a layer *output*), no index shift.  Measured on
+  Flash-Next: +40 % code / +91 % recall over plain decode at 3 GPU tensor + `-ncmoe 48`, six
+  `plain == draft-dflash` text-identical arm pairs.  Index `n_layer` (the last layer's output) is **not**
+  exported — it needs the pre-gather residual; no head taps the final layer.  Record:
+  `archive/work/qwen4exp-dflash2/`.
+- **A cross-device copy must ask `ggml_cuda_slab_peer_copy_ok()` first (r121).**  The slab's
+  peer-access grant is per-device and **best effort**: with three ~29 GiB slabs the driver refuses it for the
+  second and third device (the peers have no free VRAM to build a 29 GiB peer mapping), and a
+  `hipMemcpyPeerAsync` into an ungranted slab range **faults the GPU** (`HSA_STATUS_ERROR_MEMORY_FAULT` in
+  `__amd_rocclr_copyBuffer`) or returns `invalid argument` — never anything catchable.  The query is
+  process-wide for slab destinations: a copy between two fully granted devices still fails while a third
+  slab's grants are incomplete.  When it says no, the copy stages through a grow-only pinned buffer
+  (`ggml_cuda_peer_copy_staged`, D2H on the src stream, H2D on the dst stream).  Do not add a raw peer copy
+  anywhere without the guard; `-sm layer` + `-ncmoe` warm-up aborted on Flash-Next before this (reproduced on
+  the r120 base with no drafter).  No env knob.
 - **DFlash2 under `-sm tensor` is supported (r106, TODO #78 closed):** the selector's `ggml_top_k` /
   `ggml_get_rows` over the draft logits -- which are the *target's* `output.weight` projection, placed
   vocabulary-split -- are served by a new general collective **`GGML_OP_ALL_GATHER`** (`ggml_all_gather()`)

@@ -1,4 +1,4 @@
-From cd0be8988dc164be759831135f13806d60807b54 Mon Sep 17 00:00:00 2001
+From d183f70223b872a2337a8b7514a3ad4b8e8c4cb7 Mon Sep 17 00:00:00 2001
 From: Stew Forster <ci@rdna-boosts.invalid>
 Date: Wed, 21 Oct 2026 10:40:32 -0500
 Subject: [PATCH 12/13] rdna-boosts: block 12: campaign remainder (CPU wins,
@@ -79,7 +79,7 @@ unchanged.
  ggml/src/ggml-cpu/ggml-cpu.cpp                |    2 +-
  ggml/src/ggml-cpu/repack.cpp                  |    3 +
  .../ggml-cuda/ggml-cuda-moe-cache-hooks.cu    |   31 +-
- ggml/src/ggml-cuda/ggml-cuda-slab.cu          |  212 +-
+ ggml/src/ggml-cuda/ggml-cuda-slab.cu          |  213 +-
  ggml/src/ggml-cuda/ggml-cuda.cu               |  109 +
  ggml/src/ggml-cuda/moe-expert-cache.cu        | 1789 ++++++++++++-----
  ggml/src/ggml-cuda/moe-expert-cache.h         |   12 +
@@ -95,7 +95,7 @@ unchanged.
  src/llama-model.h                             |   13 +-
  src/llama.cpp                                 |    4 +
  src/models/dflash.cpp                         |   89 +-
- 33 files changed, 2959 insertions(+), 680 deletions(-)
+ 33 files changed, 2960 insertions(+), 680 deletions(-)
 
 diff --git a/common/arg.cpp b/common/arg.cpp
 index c7606ca31..fac39ec0d 100644
@@ -1325,10 +1325,10 @@ index 12db6fa10..e849ccbf8 100644
          void * pin = cuda_ctx->h2d_pin_buffer(slot, total);
          if (pin == nullptr) {
 diff --git a/ggml/src/ggml-cuda/ggml-cuda-slab.cu b/ggml/src/ggml-cuda/ggml-cuda-slab.cu
-index 27a1cc605..512aa68c7 100644
+index 83aeba014..38aaf5c49 100644
 --- a/ggml/src/ggml-cuda/ggml-cuda-slab.cu
 +++ b/ggml/src/ggml-cuda/ggml-cuda-slab.cu
-@@ -869,7 +869,23 @@ static bool ggml_cuda_slab_init_locked(int device, ggml_cuda_slab & s, size_t wo
+@@ -942,7 +942,23 @@ static bool ggml_cuda_slab_init_locked(int device, ggml_cuda_slab & s, size_t wo
  // The size is FIXED at the first establishment: narrow-2 is anchored at the top (`off = size - floor`), so
  // a later, larger request would move a live view's base.  In practice the first request is the draft's
  // `sched_reserve` pp layout, which is its widest graph, so the region never needs to grow.
@@ -1353,7 +1353,7 @@ index 27a1cc605..512aa68c7 100644
      if (!s.inited || bytes == 0) {
          return 0;
      }
-@@ -881,9 +897,8 @@ static size_t ggml_cuda_slab_narrow2_floor_locked(int device, ggml_cuda_slab & s
+@@ -954,9 +970,8 @@ static size_t ggml_cuda_slab_narrow2_floor_locked(int device, ggml_cuda_slab & s
          const size_t off = s.size - nf2;
          const size_t min_arena = ggml_cuda_slab_min_arena_bytes();
          // The work region (`boundary`, which includes the wide prefill view and the ring) and a usable
@@ -1365,7 +1365,7 @@ index 27a1cc605..512aa68c7 100644
              GGML_LOG_WARN("%s: device %d: no room for a %.2f GiB narrow-2 region above the work region "
                            "(%.2f GiB) and a %.2f GiB arena floor in a %.2f GiB slab (mapped %.2f GiB); "
                            "the draft compute buffer stays on the cudaMalloc path\n",
-@@ -892,37 +907,154 @@ static size_t ggml_cuda_slab_narrow2_floor_locked(int device, ggml_cuda_slab & s
+@@ -965,38 +980,156 @@ static size_t ggml_cuda_slab_narrow2_floor_locked(int device, ggml_cuda_slab & s
                            (double) s.mapped / (1ull << 30));
              return 0;
          }
@@ -1395,13 +1395,15 @@ index 27a1cc605..512aa68c7 100644
 +    const size_t off = s.size - nf2;
 +    if (off >= s.mapped) {
          ggml_cuda_set_device(device);
-         if (!ggml_cuda_vmm_map_phys(device, (CUdeviceptr) ((uintptr_t) s.base + off), nf2)) {
+         uint32_t granted = 0;
+         if (!ggml_cuda_vmm_map_phys(device, (CUdeviceptr) ((uintptr_t) s.base + off), nf2, &granted)) {
              GGML_LOG_WARN("%s: device %d: could not map the %.2f GiB narrow-2 region; the draft compute "
                            "buffer stays on the cudaMalloc path\n",
                            __func__, device, (double) nf2 / (1ull << 30));
 -            return 0;
 +            return;
 +        }
++        s.peer_mask &= granted;
 +    } else {
 +        // The arena gave the range up: drop every free run at or above the new top, so a later
 +        // `arena_alloc` cannot hand out memory that now belongs to the draft's compute view.
@@ -1537,7 +1539,7 @@ index 27a1cc605..512aa68c7 100644
  }
  
  // This is a MULTISET, not a flag: more than one compute buffer is live at a time (the main context and the
-@@ -971,6 +1103,11 @@ void ggml_cuda_slab_work_release(int device, size_t off, size_t need) {
+@@ -1045,6 +1178,11 @@ void ggml_cuda_slab_work_release(int device, size_t off, size_t need) {
  // when the wide view is dropped.  The ring is never part of the arena, so arming it is an ordinary
  // boundary move (evicting the COLDEST tables), not an independent arena eviction.
  void * ggml_cuda_slab_work_alloc(int device, size_t need) {
@@ -1549,7 +1551,7 @@ index 27a1cc605..512aa68c7 100644
      size_t lo = 0, hi = 0;
      bool   move = false;
      size_t ret_off = 0;
-@@ -985,36 +1122,9 @@ void * ggml_cuda_slab_work_alloc(int device, size_t need) {
+@@ -1059,36 +1197,9 @@ void * ggml_cuda_slab_work_alloc(int device, size_t need) {
              if (!ggml_cuda_slab_init_locked(device, s, need)) {
                  return nullptr;
              }
@@ -1590,10 +1592,10 @@ index 27a1cc605..512aa68c7 100644
          // Establish the fixed narrow floor: the first reserve smaller than the boundary (the
          // prefill -> decode drop re-reserves the decode/verify layout there).  Its ring region then sits
 diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
-index 8bd3ff5a7..1fa9e1c30 100644
+index 72540fdba..7c6c441ba 100644
 --- a/ggml/src/ggml-cuda/ggml-cuda.cu
 +++ b/ggml/src/ggml-cuda/ggml-cuda.cu
-@@ -3102,6 +3102,77 @@ ggml_backend_buffer_type_t ggml_backend_cuda_host_buffer_type() {
+@@ -3115,6 +3115,77 @@ ggml_backend_buffer_type_t ggml_backend_cuda_host_buffer_type() {
      return ggml_backend_cuda_host_buffer_type_dev(0);
  }
  
@@ -1671,7 +1673,7 @@ index 8bd3ff5a7..1fa9e1c30 100644
  //static bool ggml_backend_buffer_is_cuda_host(ggml_backend_buffer_t buffer) {
  //    return buffer->buft->iface.get_name == ggml_backend_cuda_host_buffer_type_name;
  //}
-@@ -4121,6 +4192,10 @@ bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct ggml_tens
+@@ -4134,6 +4205,10 @@ bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct ggml_tens
          case GGML_OP_DUP:
              ggml_cuda_dup(ctx, dst);
              break;
@@ -1682,7 +1684,7 @@ index 8bd3ff5a7..1fa9e1c30 100644
          case GGML_OP_CPY:
              ggml_cuda_cpy(ctx, dst->src[0], dst->src[1]);
              break;
-@@ -4517,6 +4592,24 @@ static void ggml_backend_cuda_set_tensor_async(ggml_backend_t backend, ggml_tens
+@@ -4530,6 +4605,24 @@ static void ggml_backend_cuda_set_tensor_async(ggml_backend_t backend, ggml_tens
      }
      ggml_cuda_async_input_drain(cuda_ctx->device);
  
@@ -1707,7 +1709,7 @@ index 8bd3ff5a7..1fa9e1c30 100644
      CUDA_CHECK(cudaMemcpyAsync((char *) tensor->data + offset, data, size, cudaMemcpyHostToDevice, cuda_ctx->stream()));
  }
  
-@@ -6755,6 +6848,8 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
+@@ -6853,6 +6946,8 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
              } break;
          case GGML_OP_DUP:
                  return true;
@@ -1716,7 +1718,7 @@ index 8bd3ff5a7..1fa9e1c30 100644
          case GGML_OP_ARGMAX:
          case GGML_OP_COUNT_EQUAL:
              {
-@@ -7157,6 +7252,19 @@ static void ggml_backend_cuda_device_moe_cache_set_host_source(ggml_backend_dev_
+@@ -7255,6 +7350,19 @@ static void ggml_backend_cuda_device_moe_cache_set_host_source(ggml_backend_dev_
      moe_cache_set_host_source(tensor_data, path, offs, n_experts, host_bytes, total_bytes);
  }
  
@@ -1736,7 +1738,7 @@ index 8bd3ff5a7..1fa9e1c30 100644
  static size_t ggml_backend_cuda_device_slab_work_size(ggml_backend_dev_t dev) {
      // OPEN 2 (TODO #42): the movable-boundary slab WORK region's current size (the boundary), or 0 when this
      // device has no slab.  `llama_context` compares it against the narrow size it last settled on to decide
-@@ -7291,6 +7399,7 @@ static const ggml_backend_device_i ggml_backend_cuda_device_interface = {
+@@ -7389,6 +7497,7 @@ static const ggml_backend_device_i ggml_backend_cuda_device_interface = {
      /* .slab_set_ring_cap         = */ ggml_backend_cuda_device_slab_set_ring_cap,
      /* .slab_enabled              = */ ggml_backend_cuda_device_slab_enabled,
      /* .slab_ring_slots           = */ ggml_backend_cuda_device_slab_ring_slots,

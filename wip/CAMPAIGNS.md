@@ -23,7 +23,15 @@ is the signature of a stub, not of a campaign.
 | [`fp8-support/`](fp8-support/README.md) | native FP8 E4M3 for RDNA4 | PARKED (2026-09-26) — rebased and building, fully RDNA4-gated, but **gate 2 failed** (the fp8 4B is 0.69x Q8_0 where cllm had 1.16x, because the delivery's MMB/GEMM work made Q8_0 +32 % and the fp8 WMMA path did not follow).  Resume actions are in `PLAN.md`.  Not closed — paused behind the delivery work |
 | [`moe-cpu-overlap/`](moe-cpu-overlap/README.md) | genuine CPU/GPU overlap for the expert misses (the Strata shape) | OPEN / scoping (TODO #36) — **work in flight**: the note refutes the earlier "cannot be done" verdict for the interleaved shape and sets out the pipeline to try |
 | [`ngram-mod-host-experts/`](ngram-mod-host-experts/README.md) | `ngram-mod` + `draft-mtp-adaptive` roughly halves decode when the MoE experts are host-resident (`-ncmoe`/`-cmoe`, expert cache active); plain `draft-mtp-adaptive` restores the expected rate | **OPEN (seeded 2026-10-14), scoping + measurement** |
-| [`qwen4exp-dflash2/`](qwen4exp-dflash2/README.md) | DFlash2 drafting on Qwen3.8-Flash-Next: the head exists (`incoai/Qwen3.8-Flash-Next-DFlash2`, Q4_K_M 362 MB) but qwen4exp exports the **wide** hyper-connection residual as its DFlash layer input, so the target aborts in `extract_layer_inp()`; the fix is a block-11 `build_hc_mean()` export (deepseek4 already does it) | **OPEN (seeded 2026-10-23, TODO #94), scoping + one known shape blocker** |
+
+**Promoted (r121, 2026-10-23, blocks 11 + 10).**  `qwen4exp-dflash2/` left `wip/` for
+[`archive/work/qwen4exp-dflash2/`](../archive/work/qwen4exp-dflash2/RESOLUTION.md): the qwen4exp graph now
+exports the **HC-averaged** layer input that a DFlash2 drafter taps (`build_hc_mean()`, gated on
+`cparams.embeddings_layer_inp[il]`, no new knob), so `--spec-type draft-dflash` attaches to
+Qwen3.8-Flash-Next: +40 % (code) / +91 % (recall) decode over plain at 3 GPU tensor + `-ncmoe 48`, six
+`plain == draft-dflash` text-identical arm pairs, prefill logits unchanged.  **TODO #94 is retired.**  The
+validation also found and fixed a slab defect (a peer copy into an ungranted slab range aborted
+`-sm layer` + `-ncmoe` at warm-up; block 10).  See `WORKLOG.md` 261023.006.
 
 **Promoted (r119, 2026-10-23, block 12).**  `state-restore-batch/` left `wip/` for
 [`archive/work/state-restore-batch/`](../archive/work/state-restore-batch/RESOLUTION.md): PR #209

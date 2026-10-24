@@ -1,5 +1,58 @@
 # WORKLOG - dated delivery records
 
+## 261023.006 (r121) -- TODO #94: DFlash2 drafting on Qwen3.8-Flash-Next (qwen4exp exports the HC-averaged layer input, block 11); a slab peer copy into an ungranted range aborted `-sm layer` + `-ncmoe` (block 10)
+
+**Shipped:** `v14-097cf33d9-r121` (**block 11** for the qwen4exp layer-input export, **block 10** for the
+slab peer-access grants + the staged copy).  `release.json` tip `9f353b22a`, tree `bad14d63e`.
+`scripts/validate-set.sh` green (fresh tarball, strict 14/14 `git am`, applied tree == recorded tree);
+`gate-per-block-build.sh --changed-from aa67b58ab` **4/4** (blocks 10-13 rebuilt); `gate-prefill-logits.sh`
+PASS (mean KLD 0.000000, same-top-p 100.000 %); `check-gpu-faults.sh` clean (kernel window + the arm logs).
+Records: [`archive/work/qwen4exp-dflash2/`](archive/work/qwen4exp-dflash2/RESOLUTION.md).
+
+**1. TODO #94: the reported blocker is a shape, not an algorithm.**  A DFlash2 head for Flash-Next exists
+(`incoai/Qwen3.8-Flash-Next-DFlash2`, Q4_K_M 362 MB) and every shape lines up with the target except one:
+`src/models/qwen4exp.cpp` published `t_layer_inp[il] = res_hc`, the **wide** hyper-connection residual
+(`hc * n_embd` = 10240), while `llama_context::extract_layer_inp()` requires `n_embd` per row — so the run
+aborted at `GGML_ASSERT(row_floats == model.hparams.n_embd)` (llama-context.cpp:3437).  Reproduced on the
+r120 base.  The head wants the **mean over the hc streams** (5 x 2560 = 12800), which is what its own sglang
+capture patch does (`hidden_states.unflatten(-1, (hc, hidden)).mean(dim=-2)`), and what `deepseek4`/
+`glm5-next` already export for their own DFlash paths.
+
+**2. The fix (block 11, `qwen4exp.cpp` + `models.h`, 28 lines, no new env var).**  `graph::build_hc_mean()`
+(the same 8 lines as deepseek4) and the export gated on `cparams.embeddings_layer_inp[il]` exactly like
+deepseek4's — the old line was an unconditional pointer store, so an ungated collapse would have added
+`hc-1` adds + a scale to every qwen4exp graph (plain decode, MTP, QSA) for a tensor nobody reads.  Capture
+point settled from the reference source rather than by search: the patch inserts the capture **after** the
+layer call, so `completed i` = llama.cpp's `t_layer_inp[i+1]` = the GGUF's `target_layers`, no shift.
+
+**3. Evidence.**  `plain == draft-dflash` greedy text **body-identical on six arm pairs** (3 GPU tensor
+`-ncmoe 48` on code and on recall, 2 GPU tensor, `-sm layer`, `GGML_LF_DFLASH_DEV=0` host injection, and
+fully device-resident experts), and pre-fix vs post-fix **plain** text identical, so the non-DFlash paths
+are untouched.  Flash-Next GSQ prefill logits pre/post: PPL 1.9404 both, mean KLD −0.000000, same-top-p
+100.000 %.  The reduction is the right one: an env-gated stream-0-only export (removed before shipping)
+measured recall acceptance length **2.41 vs 4.32**.  Acceptance is healthy, not the "broken encoder ~0.3"
+the campaign's heuristic suggested — the ratio falls with the block size while mean length is the metric
+(FN DFlash2 n7: code 0.293 / len 3.04, recall 0.478 / len 4.32, against the head card's own block-4
+reference of 2.83-3.26).
+
+**4. Decode (3 GPU tensor, `-ncmoe 48`, `-c 16384`, q8_0 K/V, greedy 256 tokens, `ROCBLAS_USE_HIPBLASLT=0`).**
+Flash-Next GSQ + the head: **code 97.2 t/s (len 3.04) vs plain 69.4 (+40 %)**, **recall 133.0 (len 4.32) vs
+69.6 (+91 %)**.  Not a win on every arm: 2 GPU tensor 67.9 vs 68.8 (parity), `-sm tensor` with all experts
+resident 66.2 vs 76.9, `-sm layer` (no `-ncmoe`) 57.7 vs 54.0.  `-spec-draft-n-max 3` (the head card's own
+block-4 shape) is 92.1 / 115.7.
+
+**5. A pre-existing slab defect (found while validating #94, fixed here): `-sm layer` + `-ncmoe` aborted at warm-up.**  The
+slab grant fix and the staged copy are block 10; the full analysis, the driver experiments and the numbers
+are in the block-10 note in `patches/README.md`.  Reproduced on the r120 base with **no drafter attached**,
+so it was never a DFlash2 defect.  After the fix: Flash-Next GSQ `-sm layer` + `-ncmoe 48` runs (265 t/s
+prefill, 48.4 t/s decode) with greedy text identical to its `GGML_CUDA_SLAB=0` arm, and the configs whose
+grants complete are unchanged (tensor-split DFlash2 97.19 → 97.20 t/s, 27B acceptance 0.34556 / len 3.39
+identical).
+
+**6. Known limit (documented, not fixed):** qwen4exp does not export layer-input index `n_layer` (the
+"output of the last layer", which deepseek4 supports) — after the loop `res_hc` may be row-gathered, so it
+needs the pre-gather residual.  No DFlash2 head taps the final layer.
+
 ## 261023.005 (r120) -- issue #208: a DFlash2 draft block never reached the second draft scheduler (block 09); reuse 0 -> 97.8 %, decode +1.5 % (27B 2 GPU) to +3.7 % (35B-A3B host experts)
 
 **Shipped:** `v14-097cf33d9-r120` (**block 09** amended; **block 12** amended only to move one call site's

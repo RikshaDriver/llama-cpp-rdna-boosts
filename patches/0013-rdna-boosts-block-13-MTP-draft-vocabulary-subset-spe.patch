@@ -1,4 +1,4 @@
-From aa67b58ab126d221c483d25625469c892a8324aa Mon Sep 17 00:00:00 2001
+From 9f353b22a770e3830b01a4e12c665fe056ffa3d1 Mon Sep 17 00:00:00 2001
 From: Stew Forster <ci@rdna-boosts.invalid>
 Date: Thu, 22 Oct 2026 05:53:08 -0500
 Subject: [PATCH 13/13] rdna-boosts: block 13: MTP draft vocabulary subset
@@ -617,10 +617,10 @@ index 118deeb2a..e7f6bc6a8 100644
  
      res->t_logits = cur;
 diff --git a/src/models/qwen4exp.cpp b/src/models/qwen4exp.cpp
-index fa5935b86..e9aae8950 100644
+index cc8abd94d..d50a63f71 100644
 --- a/src/models/qwen4exp.cpp
 +++ b/src/models/qwen4exp.cpp
-@@ -1305,7 +1305,22 @@ llama_model_qwen4exp::graph_mtp::graph_mtp(const llama_model & model, const llm_
+@@ -1312,7 +1312,22 @@ llama_model_qwen4exp::graph_mtp::graph_mtp(const llama_model & model, const llm_
          GGML_ASSERT(head_w && "QWEN4EXP MTP: the target model has no LM head to borrow");
      }
  
