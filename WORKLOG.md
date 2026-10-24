@@ -1,5 +1,42 @@
 # WORKLOG - dated delivery records
 
+## 261024.003 (no release) -- TODO #80 retired: the Meta split-state lookup-count headroom sits below the delivery's re-allocation rate
+
+**No source change, no release.**  `TODO.md` **#80** ("Meta split-state cache: 30+ lookups per node per
+re-allocation", parked) moved out of the open list into **Documented, deliberately NOT fixed** (accepted
+limitation): the investigation found the item is no longer an active concern.
+
+**Why.**  The defect that opened the thread -- the reported r80 -> r82 3.5 % 4-stream regression -- was not
+reproducible here (`261018.010`), and the cost the reporter then measured at the right place was the
+pre-warm walk's **heap churn**, fixed in r100 (`261020.014`, block 09, `GGML_META_SS_SCRATCH`, default on).
+Issue #184 was closed 2026-10-21 with his confirmation that r100 is in his production build (+1.6 %
+4-stream decode, identical greedy output).  The remaining record is his ~165k cache hits per re-allocation
+(30+ per node) with the note that hashing the cached 336-byte `ggml_tensor` copy to skip the `memcmp` is a
+wash -- so the only lever is the lookup **count**, a recursion/pruning redesign of `calculate_split_state`
+and the pre-warm walk.
+
+**Measured on the current tree (`r123`, 3x R9700, new `archive/work/issue-184-meta-r80r82/probe-reallocs.py`).**
+The reporter's own shape (Flash-Next GSQ-IQ3_XXS + the shared Q8_0 MTP head, `-sm tensor -ncmoe 47`,
+`-fa auto`, q8_0 KV, `-c 131072`, `-np 4`, `--spec-type draft-mtp-adaptive --spec-draft-n-max 3`, four
+concurrent pre-warmed greedy 192-token completions) reports **3 graph reallocations** for the whole 4.24 s
+window (2 same-size + 1 changed size) with **63 graph reuses** per stream; dense 4B Q8_0, 2 GPU tensor,
+4 x 128 tokens: 12 reallocations / 126 reuses.  His workload re-allocates **~230** times per run, which is
+why the walk matters there and not here: at his own post-r100 16.0 ms per re-allocation (the whole
+`ggml_gallocr_alloc_graph`, not just the walk) our 3 reallocations are at most ~1 % of the window, and the
+lookup-count share of that is below this box's noise floor -- r100's removal of the *entire* heap churn
+measured +0.29 % on this shape.
+
+**Why not queue it anyway.**  The split-state machine is `GGML_ASSERT`-heavy and its cache feeds every Meta
+split decision, so a pruning/recursion change owes the full r100 proof set (identical states under
+`GGML_META_SS_VERIFY=1`, identical greedy text and prefill-logit KLD, same-binary A/B via
+`GGML_META_SS_SCRATCH=0`) for a win that cannot be demonstrated on any config the delivery validates.  The
+code is unchanged since r100 (`git log -L` over the walk: block 09 is the last commit that touches it), and
+both knobs are already documented (`ENVIRONMENT.md` §2, `patches/README.md` block 09).
+
+**Docs.**  `TODO.md` (table row and section removed, accepted-limitation entry added with the numbers),
+`archive/work/issue-184-meta-r80r82/RESOLUTION.md` (+ addendum and a repro line) +
+`probe-reallocs.py` (the probe).  `WORKLOG.md` 261020.014 stays as the r100 record.
+
 ## 261024.002 (r123) -- a draft length is a verify width: clamp the draftless n-gram speculators to the MoE expert cache's band (block 09, TODO #59 closed)
 
 **Change:** **block 09**.  `release.json` tip `ee842ded4`, tree `e91b266d4`; `scripts/validate-set.sh`

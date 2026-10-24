@@ -80,10 +80,25 @@ Their last paragraph: ~165k cache hits per re-allocation, 30+ per node, each a h
 (336 B is ~11 vector words), so the lever is the lookup *count* (recursion/pruning structure), not the
 comparison.  Not measured, not attempted.
 
+## Addendum (2026-10-24, current tree r123) — the remaining headroom is retired, not queued
+
+`TODO #80` is moved to `TODO.md` → **Documented, deliberately NOT fixed** (accepted limitation), decision
+record `WORKLOG.md` 261024.003.  The walk's code is **unchanged since r100** (`git log -L` over the pre-warm
+walk: block 09 is the last commit that touches it), issue #184 is closed with the reporter's confirmation
+that r100 is in his production build, and the frequency that makes the remaining lookup count matter is
+his workload, not the delivery's: on his own shape (Flash-Next IQ3_XXS + the shared Q8_0 MTP head,
+`-sm tensor -ncmoe 47`, q8_0 KV, 4 concurrent pre-warmed 192-token greedy completions) the current tree
+re-allocates **3** graphs per window with **63** reuses per stream, where his workload re-allocates ~230
+times per run.  Probe: `probe-reallocs.py` in this directory (it also prints the dense 4B 2-GPU case).
+
 ## Repro
 
 ```bash
 # the two arms are one binary: GGML_META_SS_SCRATCH=1 (default) vs =0
 GGML_META_SS_VERIFY=1 <cmd>          # proves the states are identical (aborts otherwise)
 python3 archive/work/issue-184-meta-r80r82/ab.py 3 '{}' pmr S,P
+
+# how often a config re-allocates a graph (the walk's cost driver)
+python3 archive/work/issue-184-meta-r80r82/probe-reallocs.py flashnext
+python3 archive/work/issue-184-meta-r80r82/probe-reallocs.py dense4b
 ```

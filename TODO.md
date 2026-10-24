@@ -17,7 +17,6 @@ top of `WORKLOG.md` is the newest record.
 
 | # | subject | kind | status |
 |---|---|---|---|
-| **80** | Meta split-state cache: 30+ lookups per node per re-allocation | performance | parked (see the section at the end; the lever is the lookup COUNT, not the comparison) |
 | **79** | RDNA3_0 verify-band fusions: no multi-device measurement, and gfx1101/gfx1102 untested | platform validation | open (shipped default-on in r95; needs a 2+ card gfx1100 box).  `ssh fingon` is single-RDNA3 (`ROCm0`; its second rocm-smi entry is an iGPU and is not a HIP device), so it does **not** cover the multi-device arm — it validates single-GPU gfx1100 only.  gfx1101/gfx1102 still have no hardware |
 | **70** | harden the expert-cache re-arm / wide-aux growth against a starved arena | robustness | open |
 | **36** | genuine CPU/GPU overlap for the MoE misses | performance | open, scoping (`wip/moe-cpu-overlap/`) |
@@ -25,21 +24,6 @@ top of `WORKLOG.md` is the newest record.
 Accepted limitations that are deliberately **not** fixed are listed at the end — do not re-report them.
 
 ---
-
-## 80. Meta split-state cache: 30+ lookups per node per re-allocation — PERFORMANCE (parked)
-
-
-r100 removed the walk's heap churn (block 09, issue #184: `wstack`/`wseen` on a reused per-thread
-`monotonic_buffer_resource`).  What is left per graph re-allocation, on the reporter's 4-stream workload, is
-~165k cache hits -- **more than 30 per node** -- each a hash find on the tensor pointer plus a 336-byte
-`memcmp` of the cached `ggml_tensor` copy.
-
-Parked, not attempted: hashing the tensor bytes to skip the `memcmp` would cost about what the `memcmp`
-costs (336 B is ~11 vector words), so the lever is the lookup **count** (the recursion/pruning structure of
-`calculate_split_state` and the pre-warm walk), not the comparison.  Any change there needs the same proof
-the r100 change used: identical states under `GGML_META_SS_VERIFY=1`, identical greedy text and prefill
-KLD, and a same-binary A/B (`GGML_META_SS_SCRATCH=0` is the adjacent switch).  Measurements and the
-reporter's numbers: `archive/work/issue-184-meta-r80r82/RESOLUTION.md`.
 
 ## 79. RDNA3_0 verify-band fusions: the multi-device arm and gfx1101/gfx1102 are unmeasured — PLATFORM VALIDATION
 
@@ -103,6 +87,23 @@ fraction at 43 % residency; if it is <20 %, park it.  Design space and gates:
 ## Documented, deliberately NOT fixed (accepted limitations — do not re-report)
 
 
+- **The Meta split-state lookup-count headroom (TODO #80) — retired 2026-10-24, accepted.**  The measured
+  defect (issue #184: the pre-warm walk allocating one heap node per visited tensor on every graph
+  re-allocation) was fixed in r100 (block 09, `GGML_META_SS_SCRATCH`, default on).  What remained is the
+  reporter's ~165k cache hits per re-allocation (30+ per node), and the only lever is the lookup **count**
+  (the recursion/pruning structure of `calculate_split_state` and the pre-warm walk) — hashing the cached
+  336-byte `ggml_tensor` copy to skip the `memcmp` costs about what the `memcmp` costs.  Not pursued because
+  the frequency that makes it worth anything is his workload: it re-allocates **~230** graphs per run, while
+  the delivery's own validated shapes re-allocate **3** in a whole 4-stream x 192-token Flash-Next IQ3_XXS
+  + MTP window (`-sm tensor -ncmoe 47`, 63 graph reuses per stream; 4B Q8_0 2-GPU tensor: 12 in 4 x 128),
+  so even at his own post-r100 16.0 ms per re-allocation the whole walk is at most ~1 % of a 4.2 s window
+  and the lookup-count share of that is below this box's noise floor (r100's entire heap-churn removal
+  measured +0.29 % on this shape).  Issue #184 is closed (2026-10-21) with the reporter confirming r100 in
+  his production build (+1.6 % 4-stream decode, identical greedy output), and the walk's code is unchanged
+  since r100.  A future change there still owes the r100 proof set (identical states under
+  `GGML_META_SS_VERIFY=1`, identical greedy text and prefill KLD, same-binary A/B with
+  `GGML_META_SS_SCRATCH=0`).  Records: `archive/work/issue-184-meta-r80r82/RESOLUTION.md` (addendum) +
+  `probe-reallocs.py`, `WORKLOG.md` 261024.003.
 - **`mmf32` covers the skinny F32 shapes only (r104, `TODO` #82 closed) — accepted.**  A full-F32 model's FFN
   GEMMs (`m` ≫ 256: dense F32/F16-weights-heavy prefill) still fall through to rocBLAS/hipBLASLt, so they keep
   that path's per-start solution lottery; the kernel's tile (32 output rows) is the wrong shape to be
