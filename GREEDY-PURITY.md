@@ -1264,9 +1264,10 @@ gives `ncols1 = 8, ncols2 = 8` (ncols 64) to **both** the W=5..8 decode/verify b
 (`Q->ne[1] > 4`).  A band row placed there therefore also re-tunes prefill: measured on RDNA4 GQA-8/head-256,
 prefill ran the band geometry (16 warps, occupancy 1, `nbatch_K2/V2` 64, combine 32) instead of upstream's
 256 threads / occupancy 2 and lost **26 % of the FA kernel / 10 % end to end** at `pp512 @ d98304`
-(`TODO.md` #97/#98, `WORKLOG.md` 261024.006).  The prototype row swap is +36 % at d98k, +19 % at d32k and
-+3 % at d0 -- i.e. the band geometry was a *prefill* regression, and the delivery went from -10 % below
-upstream at depth to +20 % above it.
+(`TODO.md` #97/#98, `WORKLOG.md` 261024.006).  Deleting the row (r126) is +36 % at d98k, +19 % at d32k and
++3 % at d0 -- i.e. the band row was a *prefill* regression, and the delivery went from -10 % below upstream
+at depth to +20 % above it.  The W=5..8 band arm it also configured measured unchanged within noise on a
+MoE-bound decode, which is why no separate instantiation was cut (`TODO.md` #99).
 
 **Rule.**  A config row that exists for the decode/verify band must be reachable **only** from the band: key
 it on a compile-time band flag (or on a distinct instantiation), never on `ncols`, `n_kv` or `n_q` at
@@ -1276,5 +1277,5 @@ instantiation.  **A row that reaches prefill owes `scripts/gate-prefill-logits.s
 changes the KV-row split and combine order -- the family-switch class of §34/§46), plus the band arm's own
 decode/verify A/B so the band's measured gain is not silently traded away.
 
-Record: `TODO.md` #97/#98, `patches/README.md` block 05, `WORKLOG.md` 261024.006.
+Record: `TODO.md` #97/#98/#99, `patches/README.md` block 05, `WORKLOG.md` 261024.006 / 261024.007.
 

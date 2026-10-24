@@ -18,8 +18,8 @@ top of `WORKLOG.md` is the newest record.
 | # | subject | kind | status |
 |---|---|---|---|
 | **96** | the n-gram band clamp fires on a config whose slab declines (no arena) | gating correctness / perf | open (reproduced 2026-10-24; needs a decision between the three fix shapes) |
-| **97** | deep-context prefill scales worse than upstream (issue #214): RDNA4 cause found (#98), RDNA2 half open | performance / platform | open (gfx1201 reproduced and diagnosed 2026-10-24; reporter's RDNA2 sweep owed) |
-| **98** | split the RDNA4 MMA band row from the prefill row (same `ncols=64` instantiation) | performance / gating | open (prototype measured +36 % at d98k; needs the instantiation split + prefill-logit gate) |
+| **97** | deep-context prefill: the RDNA4 band-row leak is FIXED (r126); the RDNA2 half of issue #214 is open | performance / platform | open (RDNA4: closed in r126; RDNA2: reporter's sweep owed) |
+| **99** | restore the W=5..8 band geometry via a compile-time band instantiation (only if a decode-bound workload shows it pays) | performance | parked (the row's removal measured within noise end to end; r126) |
 | **79** | RDNA3_0 verify-band fusions: no multi-device measurement, and gfx1101/gfx1102 untested | platform validation | open (shipped default-on in r95; needs a 2+ card gfx1100 box).  `ssh fingon` is single-RDNA3 (`ROCm0`; its second rocm-smi entry is an iGPU and is not a HIP device), so it does **not** cover the multi-device arm — it validates single-GPU gfx1100 only.  gfx1101/gfx1102 still have no hardware |
 | **70** | harden the expert-cache re-arm / wide-aux growth against a starved arena | robustness | open |
 | **36** | genuine CPU/GPU overlap for the MoE misses | performance | open, scoping (`wip/moe-cpu-overlap/`) |
@@ -69,7 +69,7 @@ needed (no kernel change) but a same-seed coherence run on a GDN model with a 64
 
 ---
 
-## 97. Deep-context prefill scales worse than upstream (issue #214): RDNA4 cause found, RDNA2 half open — PERFORMANCE / PLATFORM
+## 97. Deep-context prefill: RDNA4 fixed in r126, the RDNA2 half of issue #214 open — PERFORMANCE / PLATFORM
 
 
 **Status: open; the reporter's original symptom, never diagnosed until 2026-10-24.**  Issue #214's own summary
@@ -79,13 +79,16 @@ gfx1030, `-ncmoe 24`, q8_0 K/V, `-ub 1024`): `pp512` **+63 %** at d0, +17 % at d
 `read 3.8k` -6 %, `read 117k` **-19 %** (360 vs 443 t/s).  Constant token count with growing depth rules out
 any per-token cost (host experts, MoE, the arena) and localises it to **attention / KV depth scaling**.
 
-**Reproduced on gfx1201 and one cause fixed in prototype (2026-10-24, `WORKLOG.md` 261024.006).**  Three
+**Reproduced on gfx1201; the RDNA4 cause is fixed and shipped in r126 (2026-10-24, `WORKLOG.md` 261024.006 /
+261024.007, `patches/README.md` block 05).**  Three
 builds (r125, upstream at the fork point `097cf33d9`, upstream `master` `71255fefc`), 1 GPU, Qwen3.6-35B-A3B
 UD Q4_K_M fully resident, q8_0 K/V, `pp512 -n 0`: r125 4541 / 2488 / 1620 / **1210** t/s at
 d0/32k/64k/98k vs upstream 2522-3600 / 2248-2273 / 1651-1661 / **1345-1366** -- our advantage decays with
 depth and goes negative by 98k, on gfx1201 too, and upstream `master` is no better than the fork point at
-depth.  The kernel trace put it in our FA launch geometry; the prototype (`#98`'s row swap) gives 1645 at
-d98k.  The reporter's streaming regime (`-ncmoe 24`, cache off) is *faster* than upstream at every depth on
+depth.  The kernel trace put it in our FA launch geometry: the RDNA4 `ncols=64` **band** row was also the
+prefill row (shared `__launch_bounds__` instantiation).  Deleting it (r126) measured 4624 / 2957 / 2023 /
+**1632** t/s at d0/32k/64k/98k -- 20 % above upstream at d98k, with the d0 lead intact -- and the W=5..8
+band arm unchanged within noise.  The reporter's streaming regime (`-ncmoe 24`, cache off) is *faster* than upstream at every depth on
 this box (1223/1106/997/892 vs 983/884/775/694), so their -19 % is not the host-expert path.
 
 **The RDNA2 half is still open, and it is not #98's row** (gfx1030 has no WMMA: its prefill takes the tile
@@ -103,31 +106,24 @@ again: the r123 band clamp is a decode/arena result and was never the reported s
 
 ---
 
-## 98. Split the RDNA4 MMA band row from the prefill row (they share the `ncols=64` instantiation) — PERFORMANCE / GATING
+## 99. Restore the W=5..8 band geometry via a compile-time band instantiation — PERFORMANCE (parked)
 
 
-**Status: open; prototype measured 2026-10-24 (`WORKLOG.md` 261024.006).**  `ggml_cuda_fattn_mma_get_config_rdna`
-starts with two RDNA4 GQA band rows keyed on `ncols` alone.  The 64-column row returns
-`fattn_mma_config(512, 1, 64, 64, 64, 32, 1, true)` (16 warps, occupancy 1) and is reached by **both** the
-W=5..8 verify band and every wide prefill (`Q->ne[1] > 4` with `ncols2 = 8`), because both dispatch to
-`ncols1 = 8`.  `__launch_bounds__` is compiled per instantiation, so prefill runs the band geometry: at
-`pp512 @ d98304` (35B-A3B Q4_K_M, q8_0 K/V, 1 GPU) the FA kernel is 28.74 s vs upstream's 19.63 s for the
-same 980 dispatches (512 threads/occ 1 vs 256/occ 2), and deep prefill is **-10 %** end to end.
+**Status: parked 2026-10-24.**  r126 deleted the RDNA4 GQA-8/head-256 `ncols == 64` band row because it was
+also the prefill row (`patches/README.md` block 05, `GREEDY-PURITY.md` §51).  The row gave the W=5..8 verify
+band a 16-warp geometry (kernel-level ~17 % on q8_0 per its own comment), but when it was removed the
+end-to-end decode on the measured arm did not move: 35B-A3B UD Q4_K_M, 1 GPU, `-ncmoe 40`, 32k context,
+q8_0 K/V, recall prompt, `--spec-type draft-mtp` n_max 7: **248.8 / 239.6 t/s (r125) vs 241.2 / 249.7
+(r126)**, and n_max 3 (which never used the row) **197.4 / 196.5 vs 196.8 / 197.2** -- noise either way, i.e.
+the FA kernel is not the wall clock on a MoE-bound decode.  So this is only worth doing for a future
+decode-bound workload (a dense head-256/GQA-8 model, or a much larger context).
 
-Replacing the row with upstream's `(256, 2, 64, 128, 128, 64, 1, true)` (prototype) gives **+36 % at d98304
-(1210 -> 1645), +36 % at d65536, +19 % at d32768, +3 % at d0**, i.e. 20 % above upstream `master` at d98304.
-
-**The row swap alone is not the fix**: it gives up the W=5..8 band geometry (the source comment measures
-~17 % for q8_0 at that band, where MTP-adaptive/ngram verifies live).  The fix is a query-width-keyed
-instantiation split -- band row only when the launch is the band (`n_q <= 8`), the 256-thread row otherwise
-(reuse the existing `band_fetch_ahead` / a new template flag, and restrict the extra instantiation to
-`DKQ=DV=256, ncols2=8` so the instance set grows by one).  **It changes prefill FA's KV-row split and combine
-order, so it owes `scripts/gate-prefill-logits.sh` (issue #113) plus same-seed coherence, and the W=5..8 band
-arm must keep its measured geometry** (a decode/verify A/B on an arena config, e.g. MTP-adaptive n_max 5-7,
-which is also where GREEDY-PURITY §19's reduction-order rules apply).  No purity promise changes if the band
-path is untouched.
-
----
+If it is picked up: it cannot be a config row keyed on `ncols` -- `__launch_bounds__` is compiled per
+instantiation and the same `ncols=64` kernel serves prefill.  Add a `bool band` template parameter (or reuse
+the existing `band_fetch_ahead` machinery), thread it through the kernel's config getters, select it in the
+host `case` only when `Q->ne[1] <= 8`, and keep prefill on the 256-thread table row.  It changes the band's
+reduction order for W=5..8, so it owes `scripts/gate-prefill-logits.sh` for the prefill side (unchanged if
+prefill keeps its row), the `FLASH_ATTN_EXT` oracle, and the MTP Protocol A acceptance arm.
 
 ## 79. RDNA3_0 verify-band fusions: the multi-device arm and gfx1101/gfx1102 are unmeasured — PLATFORM VALIDATION
 

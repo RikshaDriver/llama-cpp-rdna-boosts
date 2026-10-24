@@ -1,4 +1,4 @@
-From baeafb336c5c7929b16114e7ce3c676a1c579599 Mon Sep 17 00:00:00 2001
+From dfc8ca3932eb11766604e3ad28e520b39cf89c06 Mon Sep 17 00:00:00 2001
 From: Stew Forster <ci@rdna-boosts.invalid>
 Date: Wed, 21 Oct 2026 10:40:31 -0500
 Subject: [PATCH 05/13] rdna-boosts: block 05: flash-attention band, native
@@ -1867,7 +1867,7 @@ index 2ea7cac83..84d57adfb 100644
              const int total_work = ntiles_KV * ntiles_dst;
  
 diff --git a/ggml/src/ggml-cuda/fattn-mma-f16.cuh b/ggml/src/ggml-cuda/fattn-mma-f16.cuh
-index 0572b2bd6..08c6b4734 100644
+index 0572b2bd6..20017230b 100644
 --- a/ggml/src/ggml-cuda/fattn-mma-f16.cuh
 +++ b/ggml/src/ggml-cuda/fattn-mma-f16.cuh
 @@ -127,7 +127,27 @@ static constexpr __host__ __device__ fattn_mma_config ggml_cuda_fattn_mma_get_co
@@ -1881,21 +1881,21 @@ index 0572b2bd6..08c6b4734 100644
 +    // K and V are staged in two 64-half2 batches instead of one 128-half2 batch: with native q8_0 K/V
 +    // this is 12-14 % faster on gfx1201 (kv 51200..98304, n_q 1..4) and f16 3-4 %.  The K batches are
 +    // iterated forward for 256-dim heads (see flash_attn_ext_f16_iter), so the result is bit-identical
-+    // to the single-batch row.  Only the band uses this row; the prefill kernels keep the table below.
++    // to the single-batch row.
 +    // 8 warps per block (256 threads) hide more of the synchronous K/V load latency: another ~17 %
 +    // for q8_0.  The warps split each Q column's KV rows 4 ways instead of 2, which changes the VKQ
 +    // summation order (not bit-identical to 4 warps) but not its dependence on n_q (W = 1..8 stay pure).
++    // This row is reachable ONLY from the band: ncols1 = 32/ncols2, which the dispatch chooses for
++    // n_q <= 32/ncols2 (<= 4 with ncols2 = 8); prefill always takes ncols1 = 64/ncols2 (ncols 64).
 +    if (is_rdna4 && ncols2 == 8 && DKQ == 256 && DV == 256 && ncols == 32) {
 +        return fattn_mma_config(256, 1, 64, 64, 64, 64, 1, true);
 +    }
-+    // The same band row for query widths 5..8 (ncols1 = 8): 16 warps keep 4 warps per Q column group,
-+    // so every column is computed exactly as in the 32-column block (same KV-row split and combine
-+    // order), but the KV cache is streamed once instead of once per 32-column tile.
-+    // nbatch_combine 32 keeps the 16-warp combine buffer within the 64 KiB of LDS (the combine sums the
-+    // same partials in the same order, in narrower DV chunks).
-+    if (is_rdna4 && ncols2 == 8 && DKQ == 256 && DV == 256 && ncols == 64) {
-+        return fattn_mma_config(512, 1, 64, 64, 64, 32, 1, true);
-+    }
++    // There is deliberately no band row for ncols == 64.  The query-width dispatch gives ncols1 = 8
++    // (ncols 64) to BOTH the W=5..8 band and every wide prefill, and nthreads/occupancy feed
++    // __launch_bounds__, so a row here is compiled into the prefill kernel: a 16-warp band row measured
++    // 26 % slower FA / 10 % slower end to end at pp512 @ d98304 (deep prefill) and 36 % was recovered by
++    // leaving prefill on the table row below.  Restoring a W=5..8 band geometry needs a separate
++    // instantiation keyed on a compile-time band flag, not a row keyed on ncols (TODO #99).
      GGML_CUDA_FATTN_MMA_CONFIG_CASE( 64,  64,  8, 128, 2,  64,  32,  32,  32, 1, true);
      GGML_CUDA_FATTN_MMA_CONFIG_CASE( 64,  64, 16, 128, 2,  64,  32,  32,  32, 1, true);
      GGML_CUDA_FATTN_MMA_CONFIG_CASE( 64,  64, 32, 128, 2,  64,  32,  32,  32, 1, true);
@@ -2077,8 +2077,10 @@ index 0572b2bd6..08c6b4734 100644
 -    return ggml_cuda_fattn_mma_get_config(DKQ, DV, ncols, cc).Q_in_reg;
 +static __host__ bool ggml_cuda_fattn_mma_get_Q_in_reg(const int DKQ, const int DV, const int ncols, const int cc, const int ncols2) {
 +    return ggml_cuda_fattn_mma_get_config(DKQ, DV, ncols, cc, ncols2).Q_in_reg;
-+}
-+
+ }
+ 
+-static constexpr __device__ bool ggml_cuda_fattn_mma_get_Q_in_reg(const int DKQ, const int DV, const int ncols) {
+-    return ggml_cuda_fattn_mma_get_config(DKQ, DV, ncols).Q_in_reg;
 +static constexpr __device__ bool ggml_cuda_fattn_mma_get_Q_in_reg(const int DKQ, const int DV, const int ncols, const int ncols2 = 1) {
 +    return ggml_cuda_fattn_mma_get_config(DKQ, DV, ncols, ncols2).Q_in_reg;
 +}
@@ -2122,10 +2124,8 @@ index 0572b2bd6..08c6b4734 100644
 +    GGML_UNUSED_VARS(DKQ, DV, ncols1, ncols2);
 +    return false;
 +#endif // defined(TURING_MMA_AVAILABLE)
- }
- 
--static constexpr __device__ bool ggml_cuda_fattn_mma_get_Q_in_reg(const int DKQ, const int DV, const int ncols) {
--    return ggml_cuda_fattn_mma_get_config(DKQ, DV, ncols).Q_in_reg;
++}
++
 +// Row padding is only needed if the tile is not swizzled.
 +static constexpr __host__ __device__ int ggml_cuda_fattn_mma_get_stride_tile(const int nbatch_2, const bool swizzled) {
 +    return swizzled ? nbatch_2 : nbatch_2 + 4;

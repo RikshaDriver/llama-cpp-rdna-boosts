@@ -1,5 +1,76 @@
 # WORKLOG - dated delivery records
 
+## 261024.007 (r126) -- the RDNA4 MMA band row is no longer also the prefill row: deep-context prefill recovers (block 05, TODO #98 closed)
+
+**Change:** **block 05**.  `release.json` tip `760ac6aaf`, tree `6abcc1a92`;
+`scripts/validate-set.sh` green (checksums OK, fresh-tarball strict 14/14 `git am`, applied tree ==
+recorded tree).  One config row in `ggml/src/ggml-cuda/fattn-mma-f16.cuh`; no new block, no new env, no
+allocation change.
+
+**The bug** (`WORKLOG.md` 261024.006, `TODO.md` #97/#98).  `ggml_cuda_fattn_mma_get_config_rdna` began
+with two RDNA4 GQA-8/head-256 **band** rows keyed on `ncols` alone.  The 64-column one
+(`fattn_mma_config(512, 1, 64, 64, 64, 32, 1, true)`) was reached by **both** the W=5..8 verify band and
+every wide prefill, because the query-width dispatch gives `ncols1 = 8, ncols2 = 8` (ncols 64) to both, and
+`nthreads`/`occupancy` feed `__launch_bounds__` -- so prefill was compiled with the band geometry (16 warps,
+occupancy 1) while upstream's `(256,256,64)` row is 256 threads / occupancy 2.  Traced at
+`pp512 @ d98304` (Qwen3.6-35B-A3B Q4_K_M, q8_0 K/V, 1 GPU): the FA kernel took **28.74 s vs upstream's
+19.63 s** for the same 980 dispatches, -10 % end to end at depth.  This is issue #214's shape (short prefill
+fast, deep prefill slow) on gfx1201.
+
+**The fix.**  The `ncols == 64` band row is **deleted**; prefill falls through to the table row
+`(256, 2, 64, 128, 128, 64, 1, true)`, which is the same row upstream and the non-RDNA4 arches already use.
+The `ncols == 32` band row stays and the comment now states why it is band-only (`ncols1 = 32/ncols2` is
+dispatched only for `n_q <= 32/ncols2`).  A separate W=5..8 band instantiation was considered
+(`TODO.md` #99) and deliberately not cut: the measured `-ncmoe 40`, 32k-context, q8_0-KV, n_max 7 arm
+(verify width 5..8) is **unchanged within noise** -- r125 248.8 / 239.6 t/s vs r126 241.2 / 249.7 (and the
+n_max 3 arm, which never used the row: 197.4 / 196.5 vs 196.8 / 197.2), so the 16-warp row's kernel-level
+~17 % was not reaching the wall clock on a MoE-bound decode.  Restoring it later needs a compile-time band
+flag, not a row (GREEDY-PURITY.md §51).
+
+**Measured** (gfx1201, 1 GPU, Qwen3.6-35B-A3B UD Q4_K_M, fully resident, `-fa 1 -ctk q8_0 -ctv q8_0`,
+`-p 512 -n 0`, `llama-bench`):
+
+| build | d0 | d32768 | d65536 | d98304 |
+|---|---:|---:|---:|---:|
+| r125 | 4541 | 2488 | 1620 | 1210 |
+| **r126** | **4624** | **2957** | **2023** | **1632** |
+| upstream @ master | 3600 | 2273 | 1661 | 1366 |
+
+So the delivery goes from -10 % below upstream at d98304 to **+20 % above it**, with the short-context lead
+intact (+28 % over upstream at d0).  The reporter's streaming regime (`-ncmoe 24`, cache off) was already
+faster than upstream at every depth and is unchanged by this row (it is prefill-only).
+
+**Gates** (the build is the tree re-cut from `patches/`, `~/bin/build-llama-rocm`):
+
+* `test-backend-ops -o FLASH_ATTN_EXT` (gfx1201, HIP_VISIBLE_DEVICES=0): **6391/6391**, 2/2 backends.
+* `scripts/gate-prefill-logits.sh`: **PASS** at the standard point (mean KLD 0.000000, same-top-p 100.000 %).
+* **The head-256 changed shape is a family switch, and it was judged as one.**  The standard gate model
+  (dense 27B, head 128) does not exercise the row, so a base was recorded from the r125 build on
+  Qwen3.6-35B-A3B (head 256) and the r126 build compared: mean KLD **0.005073**, same-top-p **97.118 %** --
+  over the absolute limits, so `--family-switch` measured a same-kernel reordering control on the spot
+  (r126, `-ub 512` vs `-ub 256`) at the same point (base PPL 5.82, inside the calibrated domain):
+  **0.007251 / 96.912 %**.  The candidate is no worse than the control on both metrics, which is the §46
+  calibration -> **PASS**.  (Raw logs: `~/.cache/rdna-boosts/gates/prefill-logit-gfx1201-Qwen3.6-35B-A3B-*`.)
+* **Same-seed greedy text, `plain == draft-mtp`:** 35B-A3B UD Q4_K_M 1 GPU `-ncmoe 40` q8_0 KV
+  (`359ff4337837` both); 4B Q8_0 3 GPU `-sm tensor` (`7e6229b260f6` both), `ROCBLAS_USE_HIPBLASLT=0`.
+* **MTP Protocol A** (35B-A3B UD Q4_K_M, 1 GPU, prose `prompts/prose-rdna-boosts.txt`, `-n 3000`, bf16 KV,
+  `--reasoning off`, canonical flags + `--n-cpu-moe 40`): plain **72.3 t/s**, `draft-mtp` **158.6 t/s**
+  (**2.19x**).  The absolute t/s is below the r125 entry's 81.0/171.2 because that arm's exact command is not
+  recorded in the r125 entry (this arm is the canonical dense Protocol A plus the MoE offload); judge the
+  ratio and the purity arms, both healthy.  llama-cli at default verbosity does not print the acceptance
+  counter; the draft-depth behaviour is covered by the unchanged band arm above.
+* No prefill kernel *family* change beyond the config row; `gate-prefill-logits.sh` is the instrument for it
+  and both points are green.
+
+**Shipped.**  `v14-097cf33d9-r126` tagged and pushed; the delivery commit carries `release.json`
+(`760ac6aaf` / `6abcc1a92`) and the regenerated 14 blocks + `rdna-boosts-all.patch`.  The fork branch
+`rdna-boosts` is refreshed from the set in a clean checkout at `097cf33d9` (strict 14/14, tree
+`6abcc1a92`) and force-pushed to the personal fork; container images are built/pushed off-host by the
+`radiance` watcher.  See the `Shipped` lines of the tag/CI run for the exact SHAs.
+
+**Docs:** `patches/README.md` (block 05), `GREEDY-PURITY.md` §51 (prototype -> shipped), `TODO.md` (#98
+closed, #97's RDNA4 half closed, #99 parked), `README.md`/`ENVIRONMENT.md` unchanged (no flag, no default).
+
 ## 261024.006 (no release) -- issue #214: the reporter's box was never on the arena (r123 is not their fix), the band clamp fires on a slab-declined config, and their real regression is deep-context prefill
 
 **Docs only so far: no patch, `release.json` or tree change; `scripts/validate-set.sh` is unaffected.**  The

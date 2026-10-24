@@ -1,4 +1,4 @@
-From c45ea853b5dee4da372238f4b09fec21be7870e9 Mon Sep 17 00:00:00 2001
+From 968909eb5f693461af0db849230d768a0ecbe528 Mon Sep 17 00:00:00 2001
 From: Stew Forster <ci@rdna-boosts.invalid>
 Date: Thu, 22 Oct 2026 07:24:50 -0500
 Subject: [PATCH 11/13] rdna-boosts: block 11: qwen4exp (model,

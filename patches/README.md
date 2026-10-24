@@ -272,18 +272,21 @@ almost all of them `template-instances/*.cu`.
 * **The FA chooser band rule (F1)**: a quantized K/V cache took VEC for `n_q <= 2` and TILE from `n_q = 3`;
   both VEC conditions sit inside the band, so the branch is deleted and the band is TILE
   (`GREEDY-PURITY.md` §14).
-* **Known defect (TODO #98, 2026-10-24) — the RDNA4 MMA band row is also the prefill row.**
-  `ggml_cuda_fattn_mma_get_config_rdna` (`fattn-mma-f16.cuh`) selects its two RDNA4 GQA-8/head-256 band rows
-  on `ncols` alone, and the 64-column row is reached by **both** the W=5..8 verify band and every wide
-  prefill (`ncols1 = 8, ncols2 = 8`); `__launch_bounds__` bakes the band geometry (16 warps, occupancy 1,
-  `nbatch_K2/V2` 64, combine 32) into that instantiation, so prefill runs it instead of upstream's 256-thread
-  row.  Measured on gfx1201 (35B-A3B Q4_K_M, q8_0 K/V, 1 GPU): the FA kernel takes 28.74 s vs upstream's
-  19.63 s for the same 980 dispatches at `pp512 @ d98304` (\-26 % on the kernel, \-10 % end to end); the
-  prototype row swap (`(256, 2, 64, 128, 128, 64, 1, true)`) gives **+36 % at d98304, +19 % at d32768,
-  +3 % at d0, 20 % above upstream master at d98304**.  The plain swap also gives up the W=5..8 band gain, so
-  the fix is a query-width-keyed instantiation split (band row only when `n_q <= 8`) and it owes
-  `scripts/gate-prefill-logits.sh` (the row changes the KV-row split/combine order).  Detail:
-  `WORKLOG.md` 261024.006, `TODO.md` #97/#98.
+* **The RDNA4 MMA band row is prefill-free (r126, TODO #98 closed).**  `ggml_cuda_fattn_mma_get_config_rdna`
+  (`fattn-mma-f16.cuh`) used to carry two RDNA4 GQA-8/head-256 band rows selected on `ncols` alone.  The
+  64-column row was reached by **both** the W=5..8 verify band and every wide prefill (`ncols1 = 8,
+  ncols2 = 8`), and since `nthreads`/`occupancy` feed `__launch_bounds__` the band geometry (16 warps,
+  occupancy 1, `nbatch_K2/V2` 64, combine 32) was compiled into the prefill kernel instead of upstream's
+  256-thread / occupancy-2 row: the FA kernel took 28.74 s vs upstream's 19.63 s for the same 980 dispatches
+  at `pp512 @ d98304` (\-10 % end to end).  The 64-column band row is **deleted** (prefill falls through to
+  `(256, 2, 64, 128, 128, 64, 1, true)`), which measured **+36 % at d98304, +19 % at d32768, +3 % at d0** and
+  puts the delivery 20 % above upstream at depth.  The 32-column band row stays; its dispatch (`n_q <=
+  32/ncols2`) can never be prefill, and the comment says so.  The W=5..8 band arm measured unchanged within
+  noise (`-ncmoe 40`, 32k, q8_0 KV, n_max 7: 248.8/239.6 vs 241.2/249.7 t/s), so no separate instantiation was
+  cut; a future one must key on a compile-time band flag, not on `ncols` (`GREEDY-PURITY.md` §51, `TODO.md`
+  #99).  Gates: `FLASH_ATTN_EXT` 6391/6391, prefill-logit PASS at the standard point, and the head-256 shape
+  PASS in `--family-switch` mode against a same-kernel `-ub` control (candidate 0.005073/97.118 vs control
+  0.007251/96.912).  `WORKLOG.md` 261024.007.
 * **Native quantized K/V (V4/V5)**: the sub-F16 quant types (`q8_0`/`q4_0`/`q4_1`/`q5_0`/`q5_1`/`iq4_nl`)
   read the cache natively instead of a whole-cache F16 conversion per decode step — a decode-*depth* win,
   and the margin that lets a high-context MTP config load (`GREEDY-PURITY.md` §34).
