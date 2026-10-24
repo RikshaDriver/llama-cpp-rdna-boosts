@@ -64,3 +64,10 @@ Chain tip `632a8a568`, tree `8c092e6a8b17812404c151578feea1e333399be4`.
 | 08 | `ggml-cuda.cu` top-k MoE group fusion (#29181) + our `ggml_cuda_topk_moe_fusion_disabled` | INTEGRATE | upstream's group-fusion matcher kept; the `_disabled()` helper exists once (moved into the fuse TU with the dispatcher) | build green | — |
 | 08 | `topk-moe.cu` `n_groups`/`n_group_used` (upstream) vs our `sorted` flag / DPP lane exchange | INTEGRATE | union: the args struct carries all three; both helper families kept | build green; `GGML_CUDA_TOPK_SORTED=0` still the A/B | — |
 | 10 | dispatcher move vs upstream's rung-3 additions in the same region | INTEGRATE | same 3-way merge recipe as rung 1 (base = old chain's block-09 file, ours = block-10's new file, theirs = HEAD's region): 1 conflict (our `gdn_norm_gate_try_fuse` helper) resolved by keeping ours; upstream's additions now live in `ggml-cuda-try-fuse.cu` | 0 markers; build green | keep the recipe for rungs 5-9 |
+
+## Session 1 (2026-10-24) — rung 4, checkpoint `5aeac37a3`
+
+| block | upstream | class | decision | evidence | follow-up |
+|---|---|---|---|---|---|
+| 05 | `5aeac37a3` fattn: do not check oob if `k_VKQ_max == k_VKQ_max - nbatch_fa` (#30572) | SUBSUMES | our block-05 loop already used the strict `<` boundary and captured `k_VKQ_0_cur` for the group-masked skip, so upstream's change is already in our shape; kept our version and upstream's boundary semantics | FLASH_ATTN_EXT 6402/6402; prefill-logit unchanged (0.000657 / 98.755 %); plain == draft-mtp (sha 0cd2d424a564, same as rung 3) | the RDNA2 checked tail (ncols2 > 1) is still ours and still needed — re-check `TODO #97` at rung 9 |
+| 11 | `ff5a23376` qwen4exp SCALE→SIGMOID→SCALE→hc_post fusion (#30602) | INTEGRATE | applied clean (block 11 owns the qwen4exp/HC files); the r97 rule still holds — the fused op is only used when a Meta (tensor-split) device is involved, the chain stays on one device | build green; the qwen4exp gates are block 11's and run at rung 7/9 (no qwen4exp model in this rung's quick set) | run `test-llama-archs -a deepseek4/qwen4exp` + the Flash-Next coherence pair once (ladder rung 7/9) |
