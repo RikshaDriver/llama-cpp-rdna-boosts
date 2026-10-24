@@ -16,9 +16,12 @@ upstream moves.  It is not a changelog — the current release, tip/tree and per
 | canonical chain | `release.json .tip` / `.tree` |
 | release identity | `release.json .release` (`v<blocks>-<base>-r<N>`) |
 
-The fork point has been held since the V2.0 set was cut: every `rN` is a **block amendment** at the same
-base, never a re-base, so the block series and its recorded trees stay comparable.  A re-base is a
-deliberate event with its own `WORKLOG.md` entry.
+**This release is a re-base** (`v14-3f03b1772-r127`): the set was replayed from `097cf33d9` (2026-10-12)
+onto **`3f03b1772`** (2026-10-24) — 261 upstream commits, including a chunked GDN prefill kernel, a MoE
+cache rewritten to SLRU, chunked CUDA graphs, a 4 GiB pinned-host cap, a fused QSA mask op and reworked
+MMQ/MMVQ tuning.  Between re-bases every `rN` is a **block amendment** at the same base, so the block series
+and its recorded trees stay comparable.  A re-base is a deliberate event with its own `WORKLOG.md` entry
+and a record in [`archive/docs/baseline-history.md`](archive/docs/baseline-history.md).
 
 ## What the patches are
 
@@ -32,7 +35,7 @@ wrapper, allocator/graph-layout fixes).
 | 00 | foundation: band uniformity, Meta wrapper, allocator | the decode/verify band rule, `ggml-backend-meta` split state, `ggml-alloc` view release, the multi-ubatch logits readback |
 | 01 | hybrid HIP all-reduce | the internal AR for small tensors + per-size hybrid dispatch vs RCCL |
 | 02 | adaptive MTP draft depth | `--spec-type draft-mtp-adaptive` and its controller |
-| 03 | chunked gated-delta-net prefill | bf16/WMMA chunked GDN (two arch-segregated kernels) + the recurrent rollback tracker |
+| 03 | chunked gated-delta-net prefill | bf16/WMMA chunked GDN (two arch-segregated kernels) + the recurrent rollback tracker; **the only chunked GDN kernel the delivery dispatches** — upstream's RDNA3.5 MMA kernel stays reachable only where this path stands down (`kda`, `S_v` outside {16,32,64,128}, or `GGML_CUDA_GDN_CHUNKED=0` for A/B) |
 | 04 | BF16 KV cache + native-BF16 flash attention | the bf16 cache type and its native FA arm |
 | 05 | flash-attention band / native quantized K-V / derived kq mask | the RDNA FA band kernels, native KV staging, the derived mask |
 | 06 | MMB quantized prefill GEMM | bf16-WMMA dequant-weight GEMM and its tuning |

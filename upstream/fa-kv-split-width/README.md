@@ -1,5 +1,9 @@
 # Upstream-PR proposal — ggml-cuda: make the FA KV split query-width independent for small batches
 
+> **Re-base status (2026-10-24):** cut against `097cf33d9`; the patch still applies cleanly
+> (`git apply --check`) to the current fork point `3f03b1772`, but it was **not re-validated**
+> there.  Not part of the delivery.
+
 > **Upstream candidate** · status: prepared 2026-09-10; validated on gfx1201 against the delivery (issue #25) · not filed.
 > Delivery: **block 00** (`ntiles_dst_eff`) · patch: [`UPSTREAM-PR-fa-kv-split-width.patch`](UPSTREAM-PR-fa-kv-split-width.patch) (this directory).
 

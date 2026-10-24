@@ -1,5 +1,9 @@
 # UPSTREAM-PR: ggml-backend: order a cross-device split-input copy after the destination's queued work
 
+> **Re-base status (2026-10-24):** cut against `097cf33d9`; this patch does **not** apply to the
+> current fork point `3f03b1772` — it needs a re-cut before it can be filed or measured there.
+> Not part of the delivery (nothing here blocks a release).
+
 > **Upstream candidate** · status: prepared 2026-10-05; the fork form is validated, the upstream form applies clean to `a55e952b8` but is not built against upstream · not filed.
 > Delivery: **block 09** (issue #103 / PR #104) · patch: [`UPSTREAM-PR-sched-cross-device-input-order.patch`](UPSTREAM-PR-sched-cross-device-input-order.patch) (this directory).
 

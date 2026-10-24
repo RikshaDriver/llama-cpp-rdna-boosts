@@ -1,5 +1,9 @@
 # UPSTREAM-PR: keep host-resident MoE expert weights pinned (don't downgrade `MUL_MAT_ID` to the mmap)
 
+> **Re-base status (2026-10-24):** cut against `097cf33d9`; the patch still applies cleanly
+> (`git apply --check`) to the current fork point `3f03b1772`, but it was **not re-validated**
+> there.  Not part of the delivery.
+
 > **Upstream candidate** · status: prepared 2026-09-27; applies clean to master `84e76d8a2`; validated on 2x R9700 (+83 % `-sm tensor -ncmoe 99` pp8192, bit-identical text) · not filed.
 > Delivery: **block 09** (host-resident MoE) · patch: [`UPSTREAM-PR-moe-host-expert-pinning.patch`](UPSTREAM-PR-moe-host-expert-pinning.patch) (this directory).
 

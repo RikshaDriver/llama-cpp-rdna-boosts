@@ -1,5 +1,9 @@
 # UPSTREAM-PR: per-device host buffer types + host-expert op offload placement
 
+> **Re-base status (2026-10-24):** cut against `097cf33d9`; this patch does **not** apply to the
+> current fork point `3f03b1772` — it needs a re-cut before it can be filed or measured there.
+> Not part of the delivery (nothing here blocks a release).
+
 > **Upstream candidate** · status: prepared 2026-10-05; applies clean to `a55e952b8`; validated on 2x / 3x R9700 · not filed.
 > Delivery: **block 09** (host-expert offload placement) · patch: [`UPSTREAM-PR-per-device-host-buffers.patch`](UPSTREAM-PR-per-device-host-buffers.patch) (this directory).
 

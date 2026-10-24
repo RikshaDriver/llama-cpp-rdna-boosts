@@ -1,5 +1,12 @@
 # upstream/ — standalone upstream-PR candidates
 
+## Base (2026-10-24 re-base)
+
+Every candidate here was cut against `097cf33d9`.  After the `v14-3f03b1772-r127` re-base, each
+sub-directory's README carries a **Re-base status** line: 9 patches still apply cleanly
+(`git apply --check`) to `3f03b1772` but have not been re-validated there, and 8 need a re-cut.  None of
+this blocks a release — nothing in `upstream/` is part of the delivery.
+
 Each candidate is a **self-contained change that could be filed as a PR against unadulterated
 `ggml-org/llama.cpp`**, in its own sub-directory:
 

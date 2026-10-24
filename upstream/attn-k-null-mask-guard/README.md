@@ -1,5 +1,9 @@
 # Upstream-PR proposal — llama: `llm_graph_input_attn_k` tolerates an absent kq mask
 
+> **Re-base status (2026-10-24):** cut against `097cf33d9`; the patch still applies cleanly
+> (`git apply --check`) to the current fork point `3f03b1772`, but it was **not re-validated**
+> there.  Not part of the delivery.
+
 > **Upstream candidate** · status: prepared 2026-09-10; verified on unadulterated master `9cf3bf256` (CPU). **Hardening only** — no reachable null-mask path upstream today · not filed.
 > Delivery: **block 05** (part of the old block-15 *W2* QSA derived-bias/visibility work) · patch: [`UPSTREAM-PR-attn-k-null-mask-guard.patch`](UPSTREAM-PR-attn-k-null-mask-guard.patch) (this directory).
 

@@ -1,4 +1,4 @@
-From dfc8ca3932eb11766604e3ad28e520b39cf89c06 Mon Sep 17 00:00:00 2001
+From 9404122da69a7f70ec0833734b5b6bff010d1d4a Mon Sep 17 00:00:00 2001
 From: Stew Forster <ci@rdna-boosts.invalid>
 Date: Wed, 21 Oct 2026 10:40:31 -0500
 Subject: [PATCH 05/13] rdna-boosts: block 05: flash-attention band, native
@@ -168,7 +168,7 @@ equivalent switch; the campaign above exists to close the gap.
  ggml/src/ggml-cuda/fattn-mma-f16.cuh          | 1065 ++++++++++++++---
  ggml/src/ggml-cuda/fattn-rdna.cuh             |  464 +++++++
  ggml/src/ggml-cuda/fattn-tile.cu              |   44 +-
- ggml/src/ggml-cuda/fattn-tile.cuh             |  587 +++++++--
+ ggml/src/ggml-cuda/fattn-tile.cuh             |  589 +++++++--
  ggml/src/ggml-cuda/fattn-vec.cuh              |   14 +-
  ggml/src/ggml-cuda/fattn.cu                   |  215 +++-
  ggml/src/ggml-cuda/ggml-cuda.cu               |   82 ++
@@ -441,12 +441,12 @@ equivalent switch; the campaign above exists to close the gap.
  src/llama-context.cpp                         |  217 +++-
  src/llama-context.h                           |   11 +-
  src/llama-cparams.h                           |    2 +
- src/llama-graph.cpp                           |  183 ++-
+ src/llama-graph.cpp                           |  182 ++-
  src/llama-graph.h                             |   60 +
  src/llama-kv-cache.cpp                        |  182 +++
  src/llama-kv-cache.h                          |   14 +
  tests/test-backend-ops.cpp                    |  156 ++-
- 289 files changed, 5033 insertions(+), 607 deletions(-)
+ 289 files changed, 5032 insertions(+), 609 deletions(-)
  create mode 100644 ggml/src/ggml-cuda/fattn-rdna.cuh
  create mode 100644 ggml/src/ggml-cuda/template-instances/fattn-mma-f16-band-fetch-ahead-ncols1_4-ncols2_8-dkq256-dv256.cu
  create mode 100644 ggml/src/ggml-cuda/template-instances/fattn-mma-f16-band-fetch-ahead-ncols1_8-ncols2_8-dkq256-dv256.cu
@@ -713,7 +713,7 @@ equivalent switch; the campaign above exists to close the gap.
  create mode 100644 ggml/src/ggml-cuda/template-instances/fattn-vec-instance-q8_0-iq4_nl.cu
 
 diff --git a/docs/build.md b/docs/build.md
-index 7286ec58d..91f2441d1 100644
+index 42c726127..16744cd78 100644
 --- a/docs/build.md
 +++ b/docs/build.md
 @@ -331,7 +331,7 @@ The following compilation options are also available to tweak performance:
@@ -726,7 +726,7 @@ index 7286ec58d..91f2441d1 100644
  
  ## MUSA
 diff --git a/ggml/CMakeLists.txt b/ggml/CMakeLists.txt
-index 3eacd4cd5..8ed0be5c5 100644
+index 35252a83a..b039945dc 100644
 --- a/ggml/CMakeLists.txt
 +++ b/ggml/CMakeLists.txt
 @@ -205,7 +205,7 @@ option(GGML_CUDA_NO_PEER_COPY               "ggml: do not use peer to peer copie
@@ -739,10 +739,10 @@ index 3eacd4cd5..8ed0be5c5 100644
  option(GGML_CUDA_GRAPHS                     "ggml: use CUDA graphs (llama.cpp only)"          ${GGML_CUDA_GRAPHS_DEFAULT})
  option(GGML_CUDA_NCCL                       "ggml: use NVIDIA Collective Comm. Library"       ON)
 diff --git a/ggml/cmake/common.cmake b/ggml/cmake/common.cmake
-index f3610298f..54a621261 100644
+index 42b65a580..1537c3b69 100644
 --- a/ggml/cmake/common.cmake
 +++ b/ggml/cmake/common.cmake
-@@ -52,7 +52,7 @@ endfunction()
+@@ -58,7 +58,7 @@ endfunction()
  
  # Determines which FlashAttention vector kernel template instances to compile, returns them in OUT_SRCS.
  function(ggml_cuda_fattn_vec_instances DIR OUT_SRCS)
@@ -752,10 +752,10 @@ index f3610298f..54a621261 100644
      string(TOLOWER "${GGML_CUDA_FA_QUANTS}" FA_QUANTS)
      string(STRIP   "${FA_QUANTS}" FA_QUANTS)
 diff --git a/ggml/include/ggml.h b/ggml/include/ggml.h
-index 5a3d66a99..f19e5f4f3 100644
+index f7f83956d..b2fb3c877 100644
 --- a/ggml/include/ggml.h
 +++ b/ggml/include/ggml.h
-@@ -2512,6 +2512,23 @@ extern "C" {
+@@ -2530,6 +2530,23 @@ extern "C" {
              struct ggml_tensor * a,
              struct ggml_tensor * sinks);
  
@@ -780,10 +780,10 @@ index 5a3d66a99..f19e5f4f3 100644
      GGML_API struct ggml_tensor * ggml_flash_attn_back(
             struct ggml_context * ctx,
 diff --git a/ggml/src/ggml-cpu/ops.cpp b/ggml/src/ggml-cpu/ops.cpp
-index c7e7c47a7..a4759c258 100644
+index 5735f96f8..1e9cfc80b 100644
 --- a/ggml/src/ggml-cpu/ops.cpp
 +++ b/ggml/src/ggml-cpu/ops.cpp
-@@ -8839,6 +8839,21 @@ void ggml_compute_forward_top_k(
+@@ -8935,6 +8935,21 @@ void ggml_compute_forward_top_k(
      }
  }
  
@@ -805,7 +805,7 @@ index c7e7c47a7..a4759c258 100644
  static void ggml_compute_forward_flash_attn_ext_f16_one_chunk(
          const ggml_compute_params * params,
          ggml_tensor * dst,
-@@ -8853,6 +8868,10 @@ static void ggml_compute_forward_flash_attn_ext_f16_one_chunk(
+@@ -8949,6 +8964,10 @@ static void ggml_compute_forward_flash_attn_ext_f16_one_chunk(
      const ggml_tensor * mask  = dst->src[3];
      const ggml_tensor * sinks = dst->src[4];
  
@@ -816,7 +816,7 @@ index c7e7c47a7..a4759c258 100644
      GGML_TENSOR_LOCALS(int64_t, neq, q,   ne)
      GGML_TENSOR_LOCALS(size_t,  nbq, q,   nb)
      GGML_TENSOR_LOCALS(int64_t, nek, k,   ne)
-@@ -8964,7 +8983,8 @@ static void ggml_compute_forward_flash_attn_ext_f16_one_chunk(
+@@ -9060,7 +9079,8 @@ static void ggml_compute_forward_flash_attn_ext_f16_one_chunk(
          // ref: https://arxiv.org/pdf/2112.05682.pdf
  
          for (int64_t ic = ic_start; ic < ic_end; ++ic) {
@@ -826,7 +826,7 @@ index c7e7c47a7..a4759c258 100644
              if (mv == -INFINITY) {
                  continue;
              }
-@@ -9087,6 +9107,10 @@ static void ggml_compute_forward_flash_attn_ext_tiled(
+@@ -9183,6 +9203,10 @@ static void ggml_compute_forward_flash_attn_ext_tiled(
      const ggml_tensor * mask  = dst->src[3];
      const ggml_tensor * sinks = dst->src[4];
  
@@ -837,7 +837,7 @@ index c7e7c47a7..a4759c258 100644
      GGML_TENSOR_LOCALS(int64_t, neq, q,   ne)
      GGML_TENSOR_LOCALS(size_t,  nbq, q,   nb)
      GGML_TENSOR_LOCALS(int64_t, nek, k,   ne)
-@@ -9224,12 +9248,14 @@ static void ggml_compute_forward_flash_attn_ext_tiled(
+@@ -9320,12 +9344,14 @@ static void ggml_compute_forward_flash_attn_ext_tiled(
              const int kv_tile = (int)std::min((int64_t)KV_TILE_SZ, nek1 - ic);
  
              // skip the tile entirely if all the masks are -inf
@@ -3904,7 +3904,7 @@ index 000000000..2d056f238
 +        gqa_ratio > 4 && gqa_ratio <= ggml_cuda_fattn_band_wmma_gqa_max() && logit_softcap == 0.0f && kv_ok;
 +}
 diff --git a/ggml/src/ggml-cuda/fattn-tile.cu b/ggml/src/ggml-cuda/fattn-tile.cu
-index 037b19258..c6ddd9d9d 100644
+index 96c73f268..54a08ded6 100644
 --- a/ggml/src/ggml-cuda/fattn-tile.cu
 +++ b/ggml/src/ggml-cuda/fattn-tile.cu
 @@ -6,16 +6,42 @@ static void ggml_cuda_flash_attn_ext_tile_case_type(ggml_backend_cuda_context &
@@ -3960,7 +3960,7 @@ index 037b19258..c6ddd9d9d 100644
  
  void ggml_cuda_flash_attn_ext_tile(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
 diff --git a/ggml/src/ggml-cuda/fattn-tile.cuh b/ggml/src/ggml-cuda/fattn-tile.cuh
-index 4d3562638..087c85200 100644
+index 8216e701e..087c85200 100644
 --- a/ggml/src/ggml-cuda/fattn-tile.cuh
 +++ b/ggml/src/ggml-cuda/fattn-tile.cuh
 @@ -312,8 +312,47 @@ static constexpr __host__ __device__ uint32_t ggml_cuda_fattn_tile_get_config_am
@@ -4597,11 +4597,12 @@ index 4d3562638..087c85200 100644
      if (ncols2 == 1) {
          // Branch with out-of-bounds checks.
          int k_VKQ_0 = blockIdx.y*nbatch_fa;
-         while (k_VKQ_0 < k_VKQ_max - nbatch_fa) {
+-        while (k_VKQ_0 <= k_VKQ_max - nbatch_fa) {
 -            constexpr bool oob_check = false;
 -            flash_attn_tile_iter<warp_size, nwarps, ncols1, ncols2, DKQ, DV, nbatch_fa, nbatch_K, use_logit_softcap, oob_check>
 -                (Q_tmp, K_h2, V_h2, maskh, ne01, logit_softcap, slope, KQ, KV_tmp,
 -                stride_K2, stride_V2, stride_mask, KQ_max, KQ_sum, VKQ, k_VKQ_0, k_VKQ_max, col_Q_0);
++        while (k_VKQ_0 < k_VKQ_max - nbatch_fa) {
 +            const int k_VKQ_0_cur = k_VKQ_0;
              k_VKQ_0 += gridDim.y*nbatch_fa;
 +            if (kq_blocks != nullptr && fattn_kq_group_masked(kq_blocks_tile, k_VKQ_0_cur/nbatch_fa, nbatch_fa)) {
@@ -4886,7 +4887,7 @@ index 4d3562638..087c85200 100644
  EXTERN_DECL_FATTN_TILE_CASES( 40,  40);
  EXTERN_DECL_FATTN_TILE_CASES( 64,  64);
 diff --git a/ggml/src/ggml-cuda/fattn-vec.cuh b/ggml/src/ggml-cuda/fattn-vec.cuh
-index 57a285565..5c1b61c11 100644
+index 74f282047..88d60a3dc 100644
 --- a/ggml/src/ggml-cuda/fattn-vec.cuh
 +++ b/ggml/src/ggml-cuda/fattn-vec.cuh
 @@ -20,11 +20,13 @@ template<int D, int ncols, ggml_type type_K, ggml_type type_V, bool use_logit_so
@@ -4925,7 +4926,7 @@ index 57a285565..5c1b61c11 100644
              max_bias, m0, m1, n_head_log2, logit_softcap,
              ne00, ne01, ne02, ne03,
                    nb01, nb02, nb03,
-@@ -512,7 +518,7 @@ static __global__ void flash_attn_ext_vec(
+@@ -514,7 +520,7 @@ static __global__ void flash_attn_ext_vec(
          dst_meta[((sequence*int(ne01.z) + ic0 + tid)*ne02 + head)*gridDim.y + blockIdx.y] = make_float2(KQ_max[tid], KQ_sum[tid]);
      }
  #else
@@ -4934,7 +4935,7 @@ index 57a285565..5c1b61c11 100644
          max_bias, m0, m1, n_head_log2, logit_softcap,
          ne00, ne01, ne02, ne03,
                nb01, nb02, nb03,
-@@ -538,7 +544,7 @@ void ggml_cuda_flash_attn_ext_vec_case_impl(ggml_backend_cuda_context & ctx, ggm
+@@ -540,7 +546,7 @@ void ggml_cuda_flash_attn_ext_vec_case_impl(ggml_backend_cuda_context & ctx, ggm
      const bool need_f16_K = type_K == GGML_TYPE_F16;
      const bool need_f16_V = type_V == GGML_TYPE_F16;
      constexpr size_t nbytes_shared = 0;
@@ -4944,7 +4945,7 @@ index 57a285565..5c1b61c11 100644
  
  template <int D, ggml_type type_K, ggml_type type_V>
 diff --git a/ggml/src/ggml-cuda/fattn.cu b/ggml/src/ggml-cuda/fattn.cu
-index aefc67522..46398eba1 100644
+index 04d31465e..ce927fcd3 100644
 --- a/ggml/src/ggml-cuda/fattn.cu
 +++ b/ggml/src/ggml-cuda/fattn.cu
 @@ -190,6 +190,17 @@ static void ggml_cuda_flash_attn_ext_mma_f16_switch_ncols1(ggml_backend_cuda_con
@@ -5049,7 +5050,7 @@ index aefc67522..46398eba1 100644
              GGML_ASSERT(use_gqa_opt);
  
              GGML_ASSERT(Q->ne[2] % K->ne[2] == 0);
-@@ -490,6 +531,24 @@ static fattn_vec_case_t ggml_cuda_get_fattn_vec_case(const int64_t head_size, co
+@@ -489,6 +530,24 @@ static fattn_vec_case_t ggml_cuda_get_fattn_vec_case(const int64_t head_size, co
      FATTN_VEC_CASES_ALL_D(Q8_0, BF16)
      FATTN_VEC_CASES_ALL_D(BF16, BF16)
  
@@ -5074,7 +5075,7 @@ index aefc67522..46398eba1 100644
      return nullptr;
  }
  
-@@ -521,7 +580,11 @@ enum best_fattn_kernel {
+@@ -520,7 +579,11 @@ enum best_fattn_kernel {
      BEST_FATTN_KERNEL_MMA_F16 = 400,
  };
  
@@ -5087,7 +5088,7 @@ index aefc67522..46398eba1 100644
  static bool ggml_cuda_fattn_kv_type_supported(const ggml_type type) {
      switch (type) {
          case GGML_TYPE_F32:
-@@ -531,6 +594,7 @@ static bool ggml_cuda_fattn_kv_type_supported(const ggml_type type) {
+@@ -530,6 +593,7 @@ static bool ggml_cuda_fattn_kv_type_supported(const ggml_type type) {
          case GGML_TYPE_Q4_1:
          case GGML_TYPE_Q5_0:
          case GGML_TYPE_Q5_1:
@@ -5095,7 +5096,7 @@ index aefc67522..46398eba1 100644
          case GGML_TYPE_Q8_0:
              return true;
          default:
-@@ -556,9 +620,12 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
+@@ -555,9 +619,12 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
      float max_bias = 0.0f;
      memcpy(&max_bias, (const float *) KQV->op_params + 1, sizeof(float));
  
@@ -5109,7 +5110,7 @@ index aefc67522..46398eba1 100644
      for (const ggml_tensor * t : {Q, K, V, mask}) {
          if (t == nullptr || ggml_is_quantized(t->type)) {
              continue;
-@@ -697,25 +764,79 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
+@@ -696,25 +763,79 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
      }
  
      // AMD WMMA is faster than the tile kernel if the wide tiles with high arithmetic intensity can be utilized.
@@ -5203,7 +5204,7 @@ index aefc67522..46398eba1 100644
      return BEST_FATTN_KERNEL_TILE;
  }
  
-@@ -736,17 +857,28 @@ size_t ggml_cuda_flash_attn_ext_get_alloc_size(int device, const ggml_tensor * d
+@@ -735,17 +856,28 @@ size_t ggml_cuda_flash_attn_ext_get_alloc_size(int device, const ggml_tensor * d
  
      switch (kernel) {
          case BEST_FATTN_KERNEL_TILE: {
@@ -5242,7 +5243,7 @@ index aefc67522..46398eba1 100644
          case BEST_FATTN_KERNEL_VEC: {
              const bool f16_fallback = ggml_cuda_get_fattn_vec_case(Q->ne[0], K->type, V->type) == nullptr;
              need_f16_K = K->type == GGML_TYPE_F32 || f16_fallback;
-@@ -756,8 +888,12 @@ size_t ggml_cuda_flash_attn_ext_get_alloc_size(int device, const ggml_tensor * d
+@@ -755,8 +887,12 @@ size_t ggml_cuda_flash_attn_ext_get_alloc_size(int device, const ggml_tensor * d
              break;
      }
  
@@ -5256,7 +5257,7 @@ index aefc67522..46398eba1 100644
  
      return f16_extra.end - (uintptr_t) dst->data;
  }
-@@ -780,5 +916,16 @@ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst
+@@ -779,5 +915,16 @@ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst
  }
  
  bool ggml_cuda_flash_attn_ext_supported(int device, const ggml_tensor * dst) {
@@ -5275,10 +5276,10 @@ index aefc67522..46398eba1 100644
 +    return true;
  }
 diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
-index bda04bc63..cda66f1bf 100644
+index e349da30e..2b1d680d4 100644
 --- a/ggml/src/ggml-cuda/ggml-cuda.cu
 +++ b/ggml/src/ggml-cuda/ggml-cuda.cu
-@@ -73,6 +73,7 @@
+@@ -74,6 +74,7 @@
  #include "ggml.h"
  
  #include <algorithm>
@@ -5286,7 +5287,7 @@ index bda04bc63..cda66f1bf 100644
  #include <array>
  #include <atomic>
  #include <charconv>
-@@ -4887,6 +4888,26 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph
+@@ -5085,6 +5086,26 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph
  static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgraph, const bool use_cuda_graph, const bool cuda_graph_update_required, const void * graph_key) {
      bool graph_evaluated_or_captured = false;
  
@@ -5313,7 +5314,7 @@ index bda04bc63..cda66f1bf 100644
      // flag used to determine whether it is an integrated_gpu
      const bool integrated            = ggml_cuda_info().devices[cuda_ctx->device].integrated;
  
-@@ -5053,12 +5074,21 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
+@@ -5267,12 +5288,21 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
                  GGML_UNUSED(integrated);
  #endif  // NDEBUG
  
@@ -5335,7 +5336,7 @@ index bda04bc63..cda66f1bf 100644
                  if (!is_concurrent_event_active) {
                      try_launch_concurrent_event(node);
                 }
-@@ -5112,6 +5142,58 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
+@@ -5322,6 +5352,58 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
          graph_evaluated_or_captured = true;
  #endif  // USE_CUDA_GRAPH
      }
@@ -8521,10 +8522,10 @@ index 75d4d60e8..97a8531cb 100644
      add_compile_definitions(GGML_CUDA_NO_FA)
  endif()
 diff --git a/ggml/src/ggml.c b/ggml/src/ggml.c
-index f34b5de51..68aa913ce 100644
+index ffa557de4..78f4ffa1c 100644
 --- a/ggml/src/ggml.c
 +++ b/ggml/src/ggml.c
-@@ -5568,6 +5568,17 @@ enum ggml_prec ggml_flash_attn_ext_get_prec(
+@@ -5611,6 +5611,17 @@ enum ggml_prec ggml_flash_attn_ext_get_prec(
      return (enum ggml_prec) prec_i32;
  }
  
@@ -8542,7 +8543,7 @@ index f34b5de51..68aa913ce 100644
  void ggml_flash_attn_ext_set_n_kv_max(
          struct ggml_tensor * a,
          int32_t              n_kv_max) {
-@@ -5577,6 +5588,34 @@ void ggml_flash_attn_ext_set_n_kv_max(
+@@ -5620,6 +5631,34 @@ void ggml_flash_attn_ext_set_n_kv_max(
      ggml_set_op_params_i32(a, 4, n_kv_max);
  }
  
@@ -8578,7 +8579,7 @@ index f34b5de51..68aa913ce 100644
          struct ggml_tensor * a,
          struct ggml_tensor * sinks) {
 diff --git a/src/llama-context.cpp b/src/llama-context.cpp
-index 6a972bff0..f5d25416d 100644
+index 5063a8848..c67660b2d 100644
 --- a/src/llama-context.cpp
 +++ b/src/llama-context.cpp
 @@ -121,6 +121,18 @@ struct llm_fused_op_probe {
@@ -8600,7 +8601,7 @@ index 6a972bff0..f5d25416d 100644
  };
  
  static const llm_fused_op_probe llm_fused_op_flash_attn_probe = {
-@@ -165,6 +177,81 @@ static const llm_fused_op_probe llm_fused_op_dsv4_hc_post_probe = {
+@@ -171,6 +183,81 @@ static const llm_fused_op_probe llm_fused_op_top_k_mask_probe = {
      /*.n_tokens_per_seq =*/ 1,
  };
  
@@ -8682,7 +8683,7 @@ index 6a972bff0..f5d25416d 100644
  llama_context::llama_context(
          const llama_model & model,
                llama_context_params params) :
-@@ -183,6 +270,8 @@ llama_context::llama_context(
+@@ -189,6 +276,8 @@ llama_context::llama_context(
  
      const auto & hparams = model.hparams;
  
@@ -8691,7 +8692,7 @@ index 6a972bff0..f5d25416d 100644
      cparams.n_seq_max = std::max(1u, params.n_seq_max);
      if (cparams.n_seq_max > LLAMA_MAX_SEQ) {
          throw std::runtime_error("n_seq_max must be <= " + std::to_string(LLAMA_MAX_SEQ));
-@@ -320,6 +409,19 @@ llama_context::llama_context(
+@@ -326,6 +415,19 @@ llama_context::llama_context(
      cparams.flash_attn = params.flash_attn_type != LLAMA_FLASH_ATTN_TYPE_DISABLED;
      cparams.auto_fa    = params.flash_attn_type == LLAMA_FLASH_ATTN_TYPE_AUTO;
  
@@ -8711,7 +8712,7 @@ index 6a972bff0..f5d25416d 100644
      cparams.fused_gdn_ar = true;
      cparams.fused_gdn_ch = true;
      cparams.auto_fgdn    = false;
-@@ -608,19 +710,23 @@ void llama_context::resolve_fused_ops(const llama_memory_context_i * mctx, uint3
+@@ -618,19 +720,23 @@ void llama_context::resolve_fused_ops(const llama_memory_context_i * mctx, uint3
              return;
          }
  
@@ -8737,7 +8738,7 @@ index 6a972bff0..f5d25416d 100644
              GGML_ASSERT(node.il >= 0);
  
              ggml_backend_t backend_fused = ggml_backend_sched_get_tensor_backend(sched.get(), node.tensor);
-@@ -640,11 +746,46 @@ void llama_context::resolve_fused_ops(const llama_memory_context_i * mctx, uint3
+@@ -650,11 +756,46 @@ void llama_context::resolve_fused_ops(const llama_memory_context_i * mctx, uint3
                  device_mismatch = true;
                  break;
              }
@@ -8784,7 +8785,7 @@ index 6a972bff0..f5d25416d 100644
          } else {
              enabled = true;
              LLAMA_LOG_INFO("%s: %s enabled\n", func, probe.name);
-@@ -656,6 +797,29 @@ void llama_context::resolve_fused_ops(const llama_memory_context_i * mctx, uint3
+@@ -666,6 +807,29 @@ void llama_context::resolve_fused_ops(const llama_memory_context_i * mctx, uint3
          cparams.auto_fa = false;
      }
  
@@ -8814,7 +8815,7 @@ index 6a972bff0..f5d25416d 100644
      if (cparams.auto_fgdn) {
          LLAMA_LOG_INFO("%s: resolving fused Gated Delta Net support:\n", func);
          resolve(llm_fused_op_gdn_ar_probe, cparams.fused_gdn_ar);
-@@ -717,6 +881,18 @@ void llama_context::sched_new(size_t max_nodes, bool parallel) {
+@@ -733,6 +897,18 @@ void llama_context::sched_new(size_t max_nodes, bool parallel) {
      ggml_backend_sched_set_realloc_callback(sched.get(), sched_graph_realloc, this);
  }
  
@@ -8833,7 +8834,7 @@ index 6a972bff0..f5d25416d 100644
  void llama_context::sched_reserve() {
      if (!sched_need_reserve) {
          return;
-@@ -733,6 +909,10 @@ void llama_context::sched_reserve() {
+@@ -749,6 +925,10 @@ void llama_context::sched_reserve() {
      const uint32_t n_seqs = cparams.n_seq_max;
      const uint32_t n_tokens = std::min(cparams.n_ctx, cparams.n_ubatch);
  
@@ -8844,7 +8845,7 @@ index 6a972bff0..f5d25416d 100644
      const size_t max_nodes = this->graph_max_nodes(n_tokens);
  
      LLAMA_LOG_DEBUG("%s: max_nodes = %zu\n", __func__, max_nodes);
-@@ -777,13 +957,14 @@ void llama_context::sched_reserve() {
+@@ -793,13 +973,14 @@ void llama_context::sched_reserve() {
      // reserve pp (prompt processing) graph first so that buffers are only allocated once
      {
          auto * gf = graph_reserve(n_tokens, n_seqs, n_outputs_pp, mctx.get(),
@@ -8861,7 +8862,7 @@ index 6a972bff0..f5d25416d 100644
              }
              if (!gf) {
                  throw std::runtime_error("failed to allocate compute pp buffers");
-@@ -802,7 +983,7 @@ void llama_context::sched_reserve() {
+@@ -820,7 +1001,7 @@ void llama_context::sched_reserve() {
          n_splits_tg = n_splits_pp;
          n_nodes_tg  = n_nodes_pp;
      } else {
@@ -8870,7 +8871,7 @@ index 6a972bff0..f5d25416d 100644
          if (!gf) {
              throw std::runtime_error("failed to allocate compute tg buffers");
          }
-@@ -824,10 +1005,10 @@ void llama_context::sched_reserve() {
+@@ -842,10 +1023,10 @@ void llama_context::sched_reserve() {
                  // [TAG_RESERVE_DIAG_DECAY]
                  // the `inp_diag_decay` tensor size scales with `n_seq_tokens^2` which
                  // makes `n_seqs == 1` use more memory for the compute graph compared to `n_seqs > 1`
@@ -8883,7 +8884,7 @@ index 6a972bff0..f5d25416d 100644
          };
  
          if (!gf) {
-@@ -1000,7 +1181,7 @@ bool llama_context::memory_update(bool optimize) {
+@@ -1018,7 +1199,7 @@ bool llama_context::memory_update(bool optimize) {
  
          const uint32_t n_outputs_max = std::min(n_tokens, cparams.n_outputs_max);
  
@@ -8892,7 +8893,7 @@ index 6a972bff0..f5d25416d 100644
          if (!gf) {
              LLAMA_LOG_ERROR("%s: failed to reserve graph after the memory update\n", __func__);
          }
-@@ -2707,7 +2888,8 @@ static void ubatch_prepare_reserve(
+@@ -2729,7 +2910,8 @@ static void ubatch_prepare_reserve(
  }
  
  ggml_cgraph * llama_context::graph_reserve(
@@ -8902,7 +8903,7 @@ index 6a972bff0..f5d25416d 100644
      LLAMA_LOG_DEBUG("%s: reserving a graph for ubatch with n_tokens = %4u, n_seqs = %2u, n_outputs = %4u\n", __func__, n_tokens, n_seqs, n_outputs_l);
      GGML_ASSERT(n_outputs_l >= 1);
  
-@@ -2739,7 +2921,22 @@ ggml_cgraph * llama_context::graph_reserve(
+@@ -2761,7 +2943,22 @@ ggml_cgraph * llama_context::graph_reserve(
  
      auto * res = gf_res_reserve.get();
  
@@ -8927,7 +8928,7 @@ index 6a972bff0..f5d25416d 100644
      res->reset();
  
 diff --git a/src/llama-context.h b/src/llama-context.h
-index f4646fb7d..80f98ad01 100644
+index c7a121857..d120285ce 100644
 --- a/src/llama-context.h
 +++ b/src/llama-context.h
 @@ -258,8 +258,17 @@ public:
@@ -8950,7 +8951,7 @@ index f4646fb7d..80f98ad01 100644
      bool set_sampler(llama_seq_id seq_id, llama_sampler * sampler);
  
 diff --git a/src/llama-cparams.h b/src/llama-cparams.h
-index a3f8efff8..ab25f7565 100644
+index e36b78ac8..ff45dee81 100644
 --- a/src/llama-cparams.h
 +++ b/src/llama-cparams.h
 @@ -40,6 +40,8 @@ struct llama_cparams {
@@ -8963,7 +8964,7 @@ index a3f8efff8..ab25f7565 100644
      bool fused_gdn_ch;       // use fused gated delta net (chunked)
      bool auto_fgdn;
 diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
-index acf17e7f0..51b0f02b0 100644
+index 8e796af4b..659b09d40 100644
 --- a/src/llama-graph.cpp
 +++ b/src/llama-graph.cpp
 @@ -27,11 +27,17 @@
@@ -9067,7 +9068,7 @@ index acf17e7f0..51b0f02b0 100644
  
      return res;
  }
-@@ -556,7 +629,9 @@ bool llm_graph_input_attn_kv::can_reuse(const llm_graph_params & params) {
+@@ -570,7 +643,9 @@ bool llm_graph_input_attn_kv::can_reuse(const llm_graph_params & params) {
      res &= self_k_idxs->ne[0] == params.ubatch.n_tokens;
    //res &= self_v_idxs->ne[0] == params.ubatch.n_tokens; // TODO: need to move this to the unified cache and check there
  
@@ -9078,7 +9079,7 @@ index acf17e7f0..51b0f02b0 100644
  
      return res;
  }
-@@ -564,7 +639,11 @@ bool llm_graph_input_attn_kv::can_reuse(const llm_graph_params & params) {
+@@ -578,7 +653,11 @@ bool llm_graph_input_attn_kv::can_reuse(const llm_graph_params & params) {
  void llm_graph_input_attn_k::set_input(const llama_ubatch * ubatch) {
      mctx->set_input_k_idxs(self_k_idxs, ubatch);
  
@@ -9091,7 +9092,7 @@ index acf17e7f0..51b0f02b0 100644
  }
  
  bool llm_graph_input_attn_k::can_reuse(const llm_graph_params & params) {
-@@ -578,7 +657,7 @@ bool llm_graph_input_attn_k::can_reuse_impl(const llm_graph_params & params) {
+@@ -592,7 +671,7 @@ bool llm_graph_input_attn_k::can_reuse_impl(const llm_graph_params & params) {
  
      res &= self_k_idxs->ne[0] == params.ubatch.n_tokens;
  
@@ -9100,21 +9101,20 @@ index acf17e7f0..51b0f02b0 100644
  
      return res;
  }
-@@ -1150,7 +1229,12 @@ void llm_graph_input_mem_hybrid::set_input(const llama_ubatch * ubatch) {
+@@ -1164,8 +1243,10 @@ void llm_graph_input_mem_hybrid::set_input(const llama_ubatch * ubatch) {
      mctx->get_attn()->set_input_k_idxs(inp_attn->self_k_idxs, ubatch);
      mctx->get_attn()->set_input_v_idxs(inp_attn->self_v_idxs, ubatch);
  
--    mctx->get_attn()->set_input_kq_mask(inp_attn->self_kq_mask, ubatch, cparams.causal_attn);
+-    // leave the mask unallocated if all attention layers have their own (e.g. qwen4exp QSA)
+-    if (inp_attn->self_kq_mask->buffer) {
 +    // the mask is left unallocated when the graph does not need it: the qwen4exp QSA
 +    // derived-visibility path never reads it (the top-k and the flash attention derive the cell
 +    // visibility from the compact per-cell/per-query keys instead), so there is nothing to fill
 +    if (inp_attn->self_kq_mask && inp_attn->self_kq_mask->buffer) {
-+        mctx->get_attn()->set_input_kq_mask(inp_attn->self_kq_mask, ubatch, cparams.causal_attn);
-+    }
+         mctx->get_attn()->set_input_kq_mask(inp_attn->self_kq_mask, ubatch, cparams.causal_attn);
+     }
  
-     if (inp_attn->self_k_rot) {
-         mctx->get_attn()->set_input_k_rot(inp_attn->self_k_rot);
-@@ -2897,9 +2981,26 @@ ggml_tensor * llm_graph_context::build_attn_mha(
+@@ -2993,9 +3074,26 @@ ggml_tensor * llm_graph_context::build_attn_mha(
              v = ggml_cast(ctx0, v, GGML_TYPE_F16);
          }
  
@@ -9142,7 +9142,7 @@ index acf17e7f0..51b0f02b0 100644
  
          ggml_flash_attn_ext_add_sinks(cur, sinks);
          GGML_ASSERT(n_kv_max >= 0 && n_kv_max <= INT32_MAX);
-@@ -3072,12 +3173,8 @@ ggml_tensor * llm_graph_context::build_attn(
+@@ -3180,12 +3278,8 @@ ggml_tensor * llm_graph_context::build_attn(
      return cur;
  }
  
@@ -9157,7 +9157,7 @@ index acf17e7f0..51b0f02b0 100644
  
      auto inp = std::make_unique<llm_graph_input_attn_kv>(hparams, cparams, mctx_cur);
  
-@@ -3087,7 +3184,7 @@ static std::unique_ptr<llm_graph_input_attn_kv> build_attn_inp_kv_impl(
+@@ -3195,7 +3289,7 @@ static std::unique_ptr<llm_graph_input_attn_kv> build_attn_inp_kv_impl(
          inp->self_k_idxs = mctx_cur->build_input_k_idxs(ctx0, ubatch);
          inp->self_v_idxs = mctx_cur->build_input_v_idxs(ctx0, ubatch);
  
@@ -9166,7 +9166,7 @@ index acf17e7f0..51b0f02b0 100644
          inp->self_kq_mask_cnv = inp->self_kq_mask;
      }
  
-@@ -3100,7 +3197,7 @@ static std::unique_ptr<llm_graph_input_attn_kv> build_attn_inp_kv_impl(
+@@ -3208,7 +3302,7 @@ static std::unique_ptr<llm_graph_input_attn_kv> build_attn_inp_kv_impl(
  llm_graph_input_attn_kv * llm_graph_context::build_attn_inp_kv() const {
      const auto * mctx_cur = static_cast<const llama_kv_cache_context *>(mctx);
  
@@ -9175,7 +9175,7 @@ index acf17e7f0..51b0f02b0 100644
  
      return (llm_graph_input_attn_kv *) res->add_input(std::move(inp));
  }
-@@ -3189,12 +3286,8 @@ ggml_tensor * llm_graph_context::build_attn(
+@@ -3297,12 +3391,8 @@ ggml_tensor * llm_graph_context::build_attn(
      return cur;
  }
  
@@ -9190,7 +9190,7 @@ index acf17e7f0..51b0f02b0 100644
  
      auto inp = std::make_unique<llm_graph_input_attn_k>(hparams, cparams, mctx_cur);
  
-@@ -3203,7 +3296,7 @@ static std::unique_ptr<llm_graph_input_attn_k> build_attn_inp_k_impl(
+@@ -3311,7 +3401,7 @@ static std::unique_ptr<llm_graph_input_attn_k> build_attn_inp_k_impl(
  
          inp->self_k_idxs = mctx_cur->build_input_k_idxs(ctx0, ubatch);
  
@@ -9199,7 +9199,7 @@ index acf17e7f0..51b0f02b0 100644
          inp->self_kq_mask_cnv = inp->self_kq_mask;
      }
  
-@@ -3213,7 +3306,7 @@ static std::unique_ptr<llm_graph_input_attn_k> build_attn_inp_k_impl(
+@@ -3321,7 +3411,7 @@ static std::unique_ptr<llm_graph_input_attn_k> build_attn_inp_k_impl(
  llm_graph_input_attn_k * llm_graph_context::build_attn_inp_k() const {
      const auto * mctx_cur = static_cast<const llama_kv_cache_context *>(mctx);
  
@@ -9208,7 +9208,7 @@ index acf17e7f0..51b0f02b0 100644
  
      return (llm_graph_input_attn_k *) res->add_input(std::move(inp));
  }
-@@ -3573,19 +3666,15 @@ ggml_tensor * llm_graph_context::build_attn(
+@@ -3708,19 +3798,15 @@ ggml_tensor * llm_graph_context::build_attn(
      return cur;
  }
  
@@ -9231,7 +9231,7 @@ index acf17e7f0..51b0f02b0 100644
          inp->self_kq_mask_mla_cnv = inp->self_kq_mask_mla;
      }
  
-@@ -3596,7 +3685,7 @@ static std::unique_ptr<llm_graph_input_attn_k_dsa> build_attn_inp_k_dsa_impl(
+@@ -3731,7 +3817,7 @@ static std::unique_ptr<llm_graph_input_attn_k_dsa> build_attn_inp_k_dsa_impl(
          auto cparams_copy = cparams;
          cparams_copy.flash_attn = cparams.fused_lid;
  
@@ -9240,7 +9240,7 @@ index acf17e7f0..51b0f02b0 100644
          inp->self_kq_mask_lid_cnv = inp->self_kq_mask_lid;
  
          inp->self_k_rot_lid = mctx_cur->get_lid()->build_input_k_rot(ctx0);
-@@ -3608,7 +3697,7 @@ static std::unique_ptr<llm_graph_input_attn_k_dsa> build_attn_inp_k_dsa_impl(
+@@ -3743,7 +3829,7 @@ static std::unique_ptr<llm_graph_input_attn_k_dsa> build_attn_inp_k_dsa_impl(
  llm_graph_input_attn_k_dsa * llm_graph_context::build_attn_inp_k_dsa() const {
      const auto * mctx_cur = static_cast<const llama_kv_cache_dsa_context *>(mctx);
  
@@ -9249,7 +9249,7 @@ index acf17e7f0..51b0f02b0 100644
  
      return (llm_graph_input_attn_k_dsa *) res->add_input(std::move(inp));
  }
-@@ -3616,14 +3705,14 @@ llm_graph_input_attn_k_dsa * llm_graph_context::build_attn_inp_k_dsa() const {
+@@ -3751,14 +3837,14 @@ llm_graph_input_attn_k_dsa * llm_graph_context::build_attn_inp_k_dsa() const {
  llm_graph_input_attn_k_dsa_iswa * llm_graph_context::build_attn_inp_k_dsa_iswa() const {
      const auto * mctx_cur = static_cast<const llama_kv_cache_dsa_iswa_context *>(mctx);
  
@@ -9266,7 +9266,7 @@ index acf17e7f0..51b0f02b0 100644
      inp_swa->self_kq_mask_cnv = inp_swa->self_kq_mask;
  
      auto inp = std::make_unique<llm_graph_input_attn_k_dsa_iswa>(std::move(inp_dsa), std::move(inp_swa), mctx_cur);
-@@ -3645,7 +3734,7 @@ llm_graph_input_attn_kv_msa * llm_graph_context::build_attn_inp_kv_msa(bool msa_
+@@ -3780,7 +3866,7 @@ llm_graph_input_attn_kv_msa * llm_graph_context::build_attn_inp_kv_msa(bool msa_
          inp->self_k_idxs = mctx_base->build_input_k_idxs(ctx0, ubatch);
          inp->self_v_idxs = mctx_base->build_input_v_idxs(ctx0, ubatch);
  
@@ -9275,7 +9275,7 @@ index acf17e7f0..51b0f02b0 100644
          inp->self_kq_mask_cnv = inp->self_kq_mask;
      }
  
-@@ -3671,7 +3760,7 @@ llm_graph_input_attn_kv_iswa * llm_graph_context::build_attn_inp_kv_iswa() const
+@@ -3806,7 +3892,7 @@ llm_graph_input_attn_kv_iswa * llm_graph_context::build_attn_inp_kv_iswa() const
          inp->self_k_idxs = mctx_cur->get_base()->build_input_k_idxs(ctx0, ubatch);
          inp->self_v_idxs = mctx_cur->get_base()->build_input_v_idxs(ctx0, ubatch);
  
@@ -9284,7 +9284,7 @@ index acf17e7f0..51b0f02b0 100644
          inp->self_kq_mask_cnv = inp->self_kq_mask;
      }
  
-@@ -3681,7 +3770,7 @@ llm_graph_input_attn_kv_iswa * llm_graph_context::build_attn_inp_kv_iswa() const
+@@ -3816,7 +3902,7 @@ llm_graph_input_attn_kv_iswa * llm_graph_context::build_attn_inp_kv_iswa() const
          inp->self_k_idxs_swa = mctx_cur->get_swa()->build_input_k_idxs(ctx0, ubatch);
          inp->self_v_idxs_swa = mctx_cur->get_swa()->build_input_v_idxs(ctx0, ubatch);
  
@@ -9293,7 +9293,7 @@ index acf17e7f0..51b0f02b0 100644
          inp->self_kq_mask_swa_cnv = inp->self_kq_mask_swa;
      }
  
-@@ -3702,7 +3791,7 @@ llm_graph_input_attn_k_iswa * llm_graph_context::build_attn_inp_k_iswa() const {
+@@ -3837,7 +3923,7 @@ llm_graph_input_attn_k_iswa * llm_graph_context::build_attn_inp_k_iswa() const {
      {
          inp->self_k_idxs = mctx_cur->get_base()->build_input_k_idxs(ctx0, ubatch);
  
@@ -9302,7 +9302,7 @@ index acf17e7f0..51b0f02b0 100644
          inp->self_kq_mask_cnv = inp->self_kq_mask;
      }
  
-@@ -3711,7 +3800,7 @@ llm_graph_input_attn_k_iswa * llm_graph_context::build_attn_inp_k_iswa() const {
+@@ -3846,7 +3932,7 @@ llm_graph_input_attn_k_iswa * llm_graph_context::build_attn_inp_k_iswa() const {
  
          inp->self_k_idxs_swa = mctx_cur->get_swa()->build_input_k_idxs(ctx0, ubatch);
  
@@ -9311,7 +9311,7 @@ index acf17e7f0..51b0f02b0 100644
          inp->self_kq_mask_swa_cnv = inp->self_kq_mask_swa;
      }
  
-@@ -3885,7 +3974,7 @@ llm_graph_input_mem_hybrid * llm_graph_context::build_inp_mem_hybrid() const {
+@@ -4020,7 +4106,7 @@ llm_graph_input_mem_hybrid * llm_graph_context::build_inp_mem_hybrid() const {
      const auto * mctx_cur = static_cast<const llama_memory_hybrid_context *>(mctx);
  
      auto inp_rs   = build_rs_inp_impl     (ctx0, ubatch, mctx_cur->get_recr());
@@ -9320,7 +9320,7 @@ index acf17e7f0..51b0f02b0 100644
  
      auto inp = std::make_unique<llm_graph_input_mem_hybrid>(cparams, std::move(inp_attn), std::move(inp_rs), mctx_cur);
  
-@@ -3896,7 +3985,7 @@ llm_graph_input_mem_hybrid_k * llm_graph_context::build_inp_mem_hybrid_k() const
+@@ -4031,7 +4117,7 @@ llm_graph_input_mem_hybrid_k * llm_graph_context::build_inp_mem_hybrid_k() const
      const auto * mctx_cur = static_cast<const llama_memory_hybrid_context *>(mctx);
  
      auto inp_rs   = build_rs_inp_impl     (ctx0, ubatch, mctx_cur->get_recr());
@@ -9329,7 +9329,7 @@ index acf17e7f0..51b0f02b0 100644
  
      auto inp = std::make_unique<llm_graph_input_mem_hybrid_k>(cparams, std::move(inp_attn), std::move(inp_rs), mctx_cur);
  
-@@ -3917,7 +4006,7 @@ llm_graph_input_mem_hybrid_iswa * llm_graph_context::build_inp_mem_hybrid_iswa()
+@@ -4052,7 +4138,7 @@ llm_graph_input_mem_hybrid_iswa * llm_graph_context::build_inp_mem_hybrid_iswa()
          inp_attn->self_k_idxs = attn_ctx->get_base()->build_input_k_idxs(ctx0, ubatch);
          inp_attn->self_v_idxs = attn_ctx->get_base()->build_input_v_idxs(ctx0, ubatch);
  
@@ -9338,7 +9338,7 @@ index acf17e7f0..51b0f02b0 100644
          inp_attn->self_kq_mask_cnv = inp_attn->self_kq_mask;
      }
  
-@@ -3925,7 +4014,7 @@ llm_graph_input_mem_hybrid_iswa * llm_graph_context::build_inp_mem_hybrid_iswa()
+@@ -4060,7 +4146,7 @@ llm_graph_input_mem_hybrid_iswa * llm_graph_context::build_inp_mem_hybrid_iswa()
          inp_attn->self_k_idxs_swa = attn_ctx->get_swa()->build_input_k_idxs(ctx0, ubatch);
          inp_attn->self_v_idxs_swa = attn_ctx->get_swa()->build_input_v_idxs(ctx0, ubatch);
  
@@ -9348,7 +9348,7 @@ index acf17e7f0..51b0f02b0 100644
      }
  
 diff --git a/src/llama-graph.h b/src/llama-graph.h
-index f2d7d6e73..0a12fc537 100644
+index 114dc5d92..13729e2a5 100644
 --- a/src/llama-graph.h
 +++ b/src/llama-graph.h
 @@ -47,6 +47,7 @@ enum llm_graph_type {
@@ -9359,7 +9359,7 @@ index f2d7d6e73..0a12fc537 100644
      LLM_FUSED_OP_GDN_AR,
      LLM_FUSED_OP_GDN_CH,
      LLM_FUSED_OP_LIGHTNING_INDEXER,
-@@ -412,6 +413,39 @@ public:
+@@ -417,6 +418,39 @@ public:
      const llama_kv_cache_context * mctx;
  };
  
@@ -9399,8 +9399,8 @@ index f2d7d6e73..0a12fc537 100644
  class llm_graph_input_attn_k_dsa : public llm_graph_input_i {
  public:
      llm_graph_input_attn_k_dsa(
-@@ -1012,6 +1046,13 @@ struct llm_graph_qkv {
-     ggml_tensor * v; // [n_embd_head, n_head_kv, n_tokens]
+@@ -1022,6 +1056,13 @@ struct llm_graph_amax_src1 {
+     ggml_tensor * scale_s; // scale to undo on the matmul result, or nullptr
  };
  
 +// V3: the compact inputs that replace a packed kq mask in the flash attention op
@@ -9413,7 +9413,7 @@ index f2d7d6e73..0a12fc537 100644
  struct llm_graph_context {
      const llm_arch arch;
  
-@@ -1069,6 +1110,12 @@ struct llm_graph_context {
+@@ -1079,6 +1120,12 @@ struct llm_graph_context {
  
      llm_graph_result * res;
  
@@ -9426,7 +9426,7 @@ index f2d7d6e73..0a12fc537 100644
      ggml_context * ctx0 = nullptr;
      ggml_cgraph  * gf   = nullptr;
  
-@@ -1270,6 +1317,19 @@ struct llm_graph_context {
+@@ -1289,6 +1336,19 @@ struct llm_graph_context {
  
      llm_graph_input_attn_kv * build_attn_inp_kv() const;
  
@@ -9447,10 +9447,10 @@ index f2d7d6e73..0a12fc537 100644
              llm_graph_input_attn_kv * inp,
              ggml_tensor * wo,
 diff --git a/src/llama-kv-cache.cpp b/src/llama-kv-cache.cpp
-index e683e8069..b237b6162 100644
+index abc8344f7..72333f3b1 100644
 --- a/src/llama-kv-cache.cpp
 +++ b/src/llama-kv-cache.cpp
-@@ -1800,6 +1800,178 @@ void llama_kv_cache::set_input_kq_mask(ggml_tensor * dst, const llama_ubatch * u
+@@ -1805,6 +1805,178 @@ void llama_kv_cache::set_input_kq_mask(ggml_tensor * dst, const llama_ubatch * u
      //LLAMA_LOG_ERROR("%s: kq mask time: %0.3f ms\n", __func__, (t_end - t_start)/1000.0);
  }
  
@@ -9629,7 +9629,7 @@ index e683e8069..b237b6162 100644
  void llama_kv_cache::set_input_pos_bucket(ggml_tensor * dst, const llama_ubatch * ubatch) const {
      const int64_t n_tokens = ubatch->n_tokens;
  
-@@ -2939,6 +3111,16 @@ void llama_kv_cache_context::set_input_kq_mask(ggml_tensor * dst, const llama_ub
+@@ -2948,6 +3120,16 @@ void llama_kv_cache_context::set_input_kq_mask(ggml_tensor * dst, const llama_ub
      kv->set_input_kq_mask(dst, ubatch, causal_attn);
  }
  
@@ -9679,10 +9679,10 @@ index 9bfb8f231..6e34d8a54 100644
      void set_input_v_rot(ggml_tensor * dst) const;
  
 diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
-index 20ffe8b8d..cae0a505b 100644
+index 2f7b8ced3..704fd36fc 100644
 --- a/tests/test-backend-ops.cpp
 +++ b/tests/test-backend-ops.cpp
-@@ -8463,9 +8463,12 @@ struct test_flash_attn_ext : public test_case {
+@@ -8702,9 +8702,12 @@ struct test_flash_attn_ext : public test_case {
      const bool kv_view; // create K/V as views of a larger buffer (like a KV cache)
      const bool v_is_view_of_k;
      const int64_t n_kv_max;
@@ -9696,7 +9696,7 @@ index 20ffe8b8d..cae0a505b 100644
      }
  
      double max_nmse_err() override {
-@@ -8482,9 +8485,12 @@ struct test_flash_attn_ext : public test_case {
+@@ -8721,9 +8724,12 @@ struct test_flash_attn_ext : public test_case {
      test_flash_attn_ext(int64_t hsk = 128, int64_t hsv = 128, int64_t nh = 32, std::array<int64_t, 2> nr23 = {1, 1}, int64_t kv = 96, int64_t nb = 8,
                          bool mask = true, bool sinks = false, float max_bias = 0.0f, float logit_softcap = 0.0f, ggml_prec prec = GGML_PREC_F32,
                          ggml_type type_K = GGML_TYPE_F16, ggml_type type_V = GGML_TYPE_F16, std::array<int32_t, 4> permute = {0, 1, 2, 3},
@@ -9711,7 +9711,7 @@ index 20ffe8b8d..cae0a505b 100644
  
      ggml_tensor * build_graph(ggml_context * ctx) override {
          const int64_t hsk_padded = GGML_PAD(hsk, ggml_blck_size(type_K));
-@@ -8531,7 +8537,7 @@ struct test_flash_attn_ext : public test_case {
+@@ -8770,7 +8776,7 @@ struct test_flash_attn_ext : public test_case {
          ggml_set_name(v, "v");
  
          ggml_tensor * m = nullptr;
@@ -9720,7 +9720,7 @@ index 20ffe8b8d..cae0a505b 100644
              m = ggml_new_tensor_4d(ctx, GGML_TYPE_F16, kv, nb, 1, nr23[1]);
              ggml_set_name(m, "m");
          }
-@@ -8544,6 +8550,18 @@ struct test_flash_attn_ext : public test_case {
+@@ -8783,6 +8789,18 @@ struct test_flash_attn_ext : public test_case {
  
          ggml_tensor * out = ggml_flash_attn_ext(ctx, q, k, v, m, 1.0f/sqrtf(hsk), max_bias, logit_softcap);
          ggml_flash_attn_ext_add_sinks(out, s);
@@ -9739,7 +9739,7 @@ index 20ffe8b8d..cae0a505b 100644
          ggml_flash_attn_ext_set_n_kv_max(out, n_kv_max);
          ggml_prec_set_acc(out, prec);
          ggml_set_name(out, "out");
-@@ -8561,7 +8579,49 @@ struct test_flash_attn_ext : public test_case {
+@@ -8800,7 +8818,49 @@ struct test_flash_attn_ext : public test_case {
                      init_tensor_kq_mask_sparse(t, n_kv_max);
                  } else {
                      init_tensor_kq_mask(t);
@@ -9759,7 +9759,7 @@ index 20ffe8b8d..cae0a505b 100644
 +                        }
 +                        ggml_backend_tensor_set(t, rows.data(), 0, rows.size()*sizeof(ggml_fp16_t));
 +                    }
-+                }
+                 }
 +            } else if (strcmp(t->name, "cell_pos") == 0) {
 +                // V3 derived kq mask: the cell's position, with every 16th cell "empty" (INT32_MIN).
 +                // derived_hole additionally makes cells [1024, 1280) a contiguous never-visible run,
@@ -9784,12 +9784,12 @@ index 20ffe8b8d..cae0a505b 100644
 +                for (int64_t i = 0; i < t->ne[0]; ++i) {
 +                    data[i] = derived_hole ? (int32_t) (is_lo ? 0 : kv - 1)
 +                                           : (int32_t) (is_lo ? (2*i*kv)/(2*nb) : ((i + 1)*kv)/nb);
-                 }
++                }
 +                ggml_backend_tensor_set(t, data.data(), 0, data.size()*sizeof(int32_t));
              } else {
                  init_tensor_uniform(t);
              }
-@@ -11701,7 +11761,8 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+@@ -12150,7 +12210,8 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
                      for (float max_bias : { 0.0f, 8.0f }) {
                          if (!mask && max_bias > 0.0f) continue;
                          for (float logit_softcap : {0.0f, 10.0f}) {
@@ -9799,7 +9799,7 @@ index 20ffe8b8d..cae0a505b 100644
                              for (int nh : { 1, 4 }) {
                                  if (nh == 1 && hsk != 320 && hsk != 576) continue;
                                  for (int nr3 : { 1, 3, }) {
-@@ -11745,6 +11806,20 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+@@ -12194,6 +12255,20 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
          }
      }
  
@@ -9820,7 +9820,7 @@ index 20ffe8b8d..cae0a505b 100644
      // asymmetric head_dim (hsk != hsv) with one or both sides not 64-aligned
      test_cases.emplace_back(new test_flash_attn_ext(72, 64, 4, {1, 1}, 256, 2, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16));
      test_cases.emplace_back(new test_flash_attn_ext(64, 72, 4, {1, 1}, 256, 2, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16));
-@@ -11767,6 +11842,18 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+@@ -12216,6 +12291,18 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
      test_cases.emplace_back(new test_flash_attn_ext(64, 128, 4, {1, 1}, 128, 2, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q4_0, GGML_TYPE_Q2_0));
      test_cases.emplace_back(new test_flash_attn_ext(128, 64, 4, {1, 1}, 64, 2, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q2_0, GGML_TYPE_F16));
  
@@ -9839,7 +9839,7 @@ index 20ffe8b8d..cae0a505b 100644
      // q8_0 KV cases: decode and prompt batches, KV pad, permuted KV, feature flags, and long context
      test_cases.emplace_back(new test_flash_attn_ext(256, 256, 2, {16, 1},   113,   1, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0));
      test_cases.emplace_back(new test_flash_attn_ext(256, 256, 2, {16, 1},  1024,   1, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0));
-@@ -11863,6 +11950,43 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+@@ -12319,6 +12406,43 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
      test_cases.emplace_back(new test_flash_attn_ext(192, 128, 8, {8, 1}, 4096, 1, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16));
      test_cases.emplace_back(new test_flash_attn_ext(576, 512, 1, {20, 1}, 512, 1, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16, {0, 1, 2, 3}, true, true));
  
@@ -9883,7 +9883,7 @@ index 20ffe8b8d..cae0a505b 100644
      // FLASH_ATTN_EXT MMA, swizzled K/V tiles, power-of-two stride: nbatch_K2 = 32, 64, 128, 256.
      test_cases.emplace_back(new test_flash_attn_ext( 64,  64, 8, {8, 1}, 4096,  4, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16));
      test_cases.emplace_back(new test_flash_attn_ext(128, 128, 8, {4, 1}, 4096,  8, true,  true, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16));
-@@ -12121,6 +12245,28 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
+@@ -12635,6 +12759,28 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
          test_cases.emplace_back(new test_leaky_relu(GGML_TYPE_F32, { 17408, n_tokens, 1, 1 }, 0.1f));
      }
  

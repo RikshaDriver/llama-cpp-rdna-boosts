@@ -164,7 +164,8 @@ stub alive to serve them, and treat a `wip/` path in an old record as a historic
   Without it, the interactive chat loop blocks forever. Wrap potentially blocking commands in `timeout`.
 - **Apply method:** all 14 blocks with **`git am`**; `scripts/apply-all.sh` is the tested path. Plain
   `git apply` of the concatenated series **silently drops hunks**. Every block is a normal commit.
-- **Naming (V2.1):** the current set is **14 blocks, 00-13** (`v14-097cf33d9-r111`).  Every `block NN`
+- **Naming (V2.1):** the current set is **14 blocks, 00-13** (release `release.json .release` —
+  `v14-3f03b1772-r127` at the 2026-10-24 re-base).  Every `block NN`
   reference elsewhere in this file that is not one of the V2.1 numbers below is the **pre-V2.1 16-block
   numbering** and is kept as a historical handle.  The V2.1 map: **01** all-reduce, **02** adaptive MTP,
   **03** chunked GDN, **04** BF16 KV, **05** FA band/native/derived, **06** MMB, **07** k-quant,
@@ -205,7 +206,10 @@ stub alive to serve them, and treat a `wip/` path in an old record as a historic
   streams, the same 8 lines as deepseek4/glm5-next and the head author's own `hidden_states.mean(dim=-2)`
   capture), **gated on `cparams.embeddings_layer_inp[il]`** so a graph that taps nothing (plain decode, MTP,
   QSA) gains no node — plain decode is byte-identical and the prefill logits are unchanged (KLD −0.000000).
-  `target_layers` is `completed + 1` (the capture is a layer *output*), no index shift.  Measured on
+  `target_layers` is `completed + 1` (the capture is a layer *output*), no index shift.  **Since the
+  `3f03b1772` re-base the helper is upstream's `hc_stream_mean()`** (its own #30927 fix for the same
+  problem, node-for-node identical); the delivery dropped its `graph::build_hc_mean()` for qwen4exp
+  (deepseek4/glm5-next keep theirs).  Measured on
   Flash-Next: +40 % code / +91 % recall over plain decode at 3 GPU tensor + `-ncmoe 48`, six
   `plain == draft-dflash` text-identical arm pairs.  Index `n_layer` (the last layer's output) is **not**
   exported — it needs the pre-gather residual; no head taps the final layer.  Record:
@@ -278,10 +282,12 @@ stub alive to serve them, and treat a `wip/` path in an old record as a historic
 - **Greedy text is a per-device-count reference on the MoE tensor split (r116).**  2 vs 3 GPUs on
   `-ncmoe` + `-sm tensor` produce different text (`PPL 10.8452` vs `10.8623`, 0.16 %, the tensor split's
   own rounding class, `GREEDY-PURITY.md` §45) — it is **not** the AR's BF16 wire (`GGML_CUDA_AR_BF16_THRESHOLD=0`
-  does not reconcile it).  A **dense** tensor split and *every* `-sm layer` arm are text-identical across
-  device counts.  So gate a build change **within** each device count (as r116's own gates did); use
-  `-sm layer` when a cross-count text comparison is required; never read a 2-vs-3 text difference as a
-  purity defect.
+  does not reconcile it).  *Every* `-sm layer` arm is text-identical across device counts, and the recorded
+  **dense** cross-count pairs were too — **but a dense tensor split is not guaranteed to be** (measured
+  2026-10-24 on Qwen3.8-27B UD-Q4_K_XL: 3 GPU 850 chars vs 2 GPU 876, and r126 shows the same 897 vs 855;
+  pre-existing, not a re-base defect).  So gate a build change **within** each device count (as r116's own
+  gates did); use `-sm layer` when a cross-count text comparison is required; never read a 2-vs-3 text
+  difference as a purity defect.
 - **The disk tier is bounded by this box's SSD at ~1.8 GB/s, so the cache's currency is `L3 MiB/token`, not
   `h`.**  1 MiB/token of reads that neither VRAM nor the pinned pool holds is ~0.55 ms/token of unavoidable
   stall (~1800 t/s of pure read budget at a 1 MiB/token traffic level, ~100 t/s at 18 MiB/token).  Every
@@ -535,7 +541,13 @@ stub alive to serve them, and treat a `wip/` path in an old record as a historic
 - **Block 03 (GDN; old block 02):** the chunked prefill is K-independent with threshold `max(K>16?K:16, n_rs_batch)`,
   `n_rs_batch = common_speculative_n_max()+1`; `GGML_CUDA_GDN_CHUNKED=0` forces the sequential kernel
   (correct, bit-identical, slow). The pure `none == draft-mtp` range is `n_max <= 7`.
-  `GREEDY-PURITY.md` §27, `WORKLOG.md` 2026-09-12.
+  **Our chunked kernel is the only one the delivery dispatches, on every device class** (r127 gfx1151
+  A/B): upstream's `gated_delta_net_mma` (in the 2026-10 window) *is* eligible on RDNA3.5 at
+  `n_tokens >= 2048` (qwen35's `H_k = ssm.group_count = 16` satisfies its gate) but our branch returns
+  first — measured gfx1151 pp2048 interleaved **3232 vs 3131 t/s (+3.2 %)** for ours, prefill-logit
+  **KLD 0.000074 / 99.637 %**.  Upstream's MMA only runs behind our stand-down (`kda`, `S_v` outside
+  {16,32,64,128}, or the `=0` kill switch): never add a second chunked kernel per device class.
+  `GREEDY-PURITY.md` §27, `patches/README.md` (block 03), `WORKLOG.md` 2026-09-12.
 - **The rollback bound is enforced by `n_rs_batch`, not observed — do not re-derive it.**  `common`
   sets `cparams.n_rs_batch = common_speculative_n_max() + 1` over **every** speculator type (draft
   simple/mtp/adaptive/eagle3/dflash/dspark *and* ngram simple/map/mod/cache, so ngram-mod's default
@@ -587,6 +599,14 @@ stub alive to serve them, and treat a `wip/` path in an old record as a historic
   and acceptance.  Any new *fingerprint* added to the key (an object address, a generation counter, a
   per-allocation pointer) re-introduces the churn if it moves across a rebuild — the r25 PR #106-0002
   data-fingerprint key that was dropped for the slab is the same trap from the other direction.
+  **Since the `3f03b1772` re-base the captured graph is a *vector* of per-chunk executables**
+  (upstream's chunked CUDA graphs, #30804): `ggml_cuda_graph` has no `graph`/`instance` members, capture
+  ends inside `ggml_cuda_graph_launch_chunk()`, and anything that used to run "just before
+  `cudaStreamEndCapture`" (the WIP AR-stage hook) now runs before the **last** chunk's launch.  The HIP
+  `hipGraphExecUpdate` leak workaround (`GGML_HIP_GRAPH_FORCE_UPDATE`) lives inside upstream's
+  `ggml_cuda_graph_update_executable(cudaGraphExec_t &, cudaGraph_t)`, i.e. it re-instantiates one chunk
+  per recapture.  3-GPU 27B MTP decode measured 84.2/84.8 t/s at rung 8 vs 79.8 before it (+5.5 %),
+  text unchanged.
   Record: `archive/work/graph-key-churn/`.
 - **There is NO periodic per-device decode stall left after r115 (TODO #89 closed, 2026-10-22).  Do not
   re-chase it.**  The ~300 ms that `CUDAGC_SLOW` still reports at 3 devices is a **one-time lazy HIP

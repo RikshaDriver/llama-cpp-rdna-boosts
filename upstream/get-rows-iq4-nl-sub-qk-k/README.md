@@ -1,5 +1,9 @@
 # UPSTREAM-PR: ggml-cuda — `GET_ROWS` on an `iq4_nl` row that is not a whole QK_K super-block
 
+> **Re-base status (2026-10-24):** cut against `097cf33d9`; this patch does **not** apply to the
+> current fork point `3f03b1772` — it needs a re-cut before it can be filed or measured there.
+> Not part of the delivery (nothing here blocks a release).
+
 > **Upstream candidate** · status: prepared 2026-09-13; applies clean to `790cf51aa`; validated on gfx1201, no NVIDIA hardware · not filed.
 > Delivery: **block 08** · patch: [`UPSTREAM-PR-get-rows-iq4-nl-sub-qk-k.patch`](UPSTREAM-PR-get-rows-iq4-nl-sub-qk-k.patch) (this directory).
 

@@ -1,4 +1,4 @@
-From f2a53370ed6bd75bb043e2cd2e02a37e9d5eb921 Mon Sep 17 00:00:00 2001
+From 3e1dcb56c2ffdcda4de68f030a84720b7edc03bf Mon Sep 17 00:00:00 2001
 From: Stew Forster <ci@rdna-boosts.invalid>
 Date: Wed, 21 Oct 2026 10:40:31 -0500
 Subject: [PATCH 06/13] rdna-boosts: block 06: MMB quantized prefill GEMM
@@ -52,7 +52,7 @@ determinism + bench pair).  GGML_CUDA_MMF32_LOG prints the resolved plans (diagn
  create mode 100644 tests/test-logits-width-probe.cpp
 
 diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
-index cda66f1bf..ca5ddab11 100644
+index 2b1d680d4..057dc35ee 100644
 --- a/ggml/src/ggml-cuda/ggml-cuda.cu
 +++ b/ggml/src/ggml-cuda/ggml-cuda.cu
 @@ -30,10 +30,12 @@
@@ -68,7 +68,7 @@ index cda66f1bf..ca5ddab11 100644
  #include "ggml-cuda/norm.cuh"
  #include "ggml-cuda/opt-step-adamw.cuh"
  #include "ggml-cuda/opt-step-sgd.cuh"
-@@ -697,6 +699,7 @@ static std::condition_variable ggml_cuda_lock_cv;
+@@ -759,6 +761,7 @@ static std::condition_variable ggml_cuda_lock_cv;
  static std::atomic<int> ggml_cuda_lock_counter;
  
  ggml_backend_cuda_context::~ggml_backend_cuda_context() {
@@ -76,7 +76,7 @@ index cda66f1bf..ca5ddab11 100644
      std::unique_lock<std::mutex> lock(ggml_cuda_lock);
      ggml_cuda_lock_cv.wait(lock, []{ return ggml_cuda_lock_counter.load(std::memory_order_relaxed) == 0; });
  
-@@ -2021,6 +2024,18 @@ static void ggml_cuda_mul_mat_cublas_impl(ggml_backend_cuda_context & ctx, const
+@@ -2089,6 +2092,18 @@ static void ggml_cuda_mul_mat_cublas_impl(ggml_backend_cuda_context & ctx, const
      // However, for some old NVIDIA and AMD GPUs the strided/Ex GEMM is much slower,
      //     probably because the internal kernel selection logic is suboptimal.
      if (compute_type == GGML_TYPE_F32 && ne12 == 1 && ne13 == 1) {
@@ -95,7 +95,7 @@ index cda66f1bf..ca5ddab11 100644
          CUBLAS_CHECK(
              cublasSgemm(cublas_h, CUBLAS_OP_T, CUBLAS_OP_N,
                      ne01, ne11, ne10,
-@@ -2412,13 +2427,26 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
+@@ -2480,13 +2495,26 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
      const int cc        = ggml_cuda_info().devices[ctx.device].cc;
      const int warp_size = ggml_cuda_info().devices[ctx.device].warp_size;
  
@@ -125,7 +125,7 @@ index cda66f1bf..ca5ddab11 100644
      if (ne01 == 1 && ne11 > MMVF_MAX_BATCH_SIZE && ne2 == 1 && ne3 == 1
              && src0->type == GGML_TYPE_F32
              && ggml_is_contiguous(src0) && ggml_is_contiguous(src1) && ggml_is_contiguous(dst)
-@@ -2508,6 +2536,11 @@ static void ggml_cuda_mul_mat_id(ggml_backend_cuda_context & ctx, ggml_tensor *
+@@ -2579,6 +2607,11 @@ static void ggml_cuda_mul_mat_id(ggml_backend_cuda_context & ctx, ggml_tensor *
              }
          }
  
@@ -137,7 +137,7 @@ index cda66f1bf..ca5ddab11 100644
          if (ggml_cuda_should_use_mmq(src0->type, cc, ne12, /*n_experts=*/ne02)) {
              ggml_cuda_mul_mat_q(ctx, src0, src1, ids, dst);
              return;
-@@ -4648,6 +4681,14 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph
+@@ -4841,6 +4874,14 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph
              const ggml_tensor * src1 = up->src[1];
              const ggml_tensor * ids  = up->src[2];
  
@@ -152,7 +152,7 @@ index cda66f1bf..ca5ddab11 100644
              if (ggml_cuda_should_fuse_mul_mat_vec_f(up)) {
                  ggml_cuda_mm_fusion_args_host fusion_data{};
                  fusion_data.gate      = gate->src[0];
-@@ -5218,6 +5259,8 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend,
+@@ -5428,6 +5469,8 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend,
  
      ggml_cuda_set_device(cuda_ctx->device);
  
@@ -2831,17 +2831,17 @@ index 000000000..0f31d5e4f
 +void ggml_cuda_mul_mat_f32_skinny(ggml_backend_cuda_context & ctx, int64_t m, int64_t n, int64_t k,
 +                                  int64_t ldc, const float * x, const float * y, float * dst);
 diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
-index b2526e624..241d3915b 100644
+index 87121524f..ba3ea3850 100644
 --- a/tests/CMakeLists.txt
 +++ b/tests/CMakeLists.txt
-@@ -168,6 +168,7 @@ endif ()
- 
- llama_build(test-recurrent-state-rollback.cpp)
+@@ -179,6 +179,7 @@ set(LLAMA_CONTEXT_TEST_SRC
+ )
+ llama_build(${LLAMA_CONTEXT_TEST_SRC})
  llama_build(test-recurrent-state-depth.cpp)
 +llama_build(test-logits-width-probe.cpp)
- llama_build(test-save-load-state.cpp)
  
  if (NOT WIN32 OR NOT BUILD_SHARED_LIBS)
+     # these tests are disabled on Windows because they use internal functions not exported with LLAMA_API (when building with shared libraries)
 diff --git a/tests/test-logits-width-probe.cpp b/tests/test-logits-width-probe.cpp
 new file mode 100644
 index 000000000..9b6066f4f

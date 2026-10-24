@@ -1292,3 +1292,56 @@ clean-apply sim re-verified (tree byte-identical), full build clean,
 test-backend-ops 6759/6759, dense 27B same-seed byte-identical pre vs
 post fix, 3-GPU hybrid == RCCL IDENTICAL, parallel 2-slot llama-server
 decode clean on the dense 27B and qwen4exp IQ4_XS (no asserts).
+
+## Re-base to 3f03b1772 (2026-10-24, r127)
+
+Upstream (the maintainer's fork `master`) moved **261 commits / 868 files (+96 173 / −48 196)** past
+`097cf33d9` (2026-10-12) to **`3f03b1772`** (2026-10-24).  Unlike every `rN` since V2.0 this was a
+**re-base**, not a block amendment: the 14 blocks were replayed with `git rebase --onto` in nine rungs
+(checkpointed `rebase-ckpt-1..9`, one per upstream cluster), each rung resolved semantically and gated
+before the next.  The per-rung conflict tables, the SUBSUMES/CORDON/INTEGRATE decisions and the halo
+recipes are the campaign record at `archive/work/rebase-2026-10/` (`STATE.md`, `DECISIONS.md`,
+`GOTCHAS.md`, the two surveys); the release note is `WORKLOG.md` 261024.008.
+
+What upstream had implemented in parallel, and what was decided:
+
+* **chunked GDN prefill** (`62df1815b`, #29353) — kept as a *fallback behind* the delivery's chunked
+  kernel; on gfx1151 both are eligible at ≥2048 tokens and ours measured +3.2 % (pp2048 interleaved) with
+  prefill-logit KLD 0.000074 / 99.637 % against the MMA arm.  One chunked kernel per device class.
+* **MoE cache SLRU** (`33d6135cb`, #30637) — SUBSUMES for the function body; the delivery's own
+  `MOE_EXPERT_CACHE_*` engine is independent and stays.
+* **4 GiB pinned-host cap** (`b6334e37e`, #30449) — INTEGRATE: the cap now applies to the delivery's
+  per-device host buft too, so a `-ncmoe 40` master allocates as 5 pinned parts in one multi_buffer.
+* **chunked CUDA graphs** (`280141e6d`, #30804) — INTEGRATE: the AR-stage hook moved to the last chunk's
+  capture and the HIP `hipGraphExecUpdate` workaround took upstream's new signature; 3-GPU 27B MTP decode
+  84.2/84.8 vs 79.8 t/s.
+* **fused QSA mask op** (`d454a204e`, #30640) and **QSA without kq_mask** (`5c3114268`, #30965) — CORDON
+  both times: qwen4exp keeps the delivery's derived-visibility selection (no mask tensor, −800 MiB), and
+  the QSA oracle (`FLASH_ATTN_QSA` 26/26, sparse-vs-dense PPL 2.2399/2.2429 on gfx1151) is intact.
+* **`hc_stream_mean`** (`d9ee007a0`, #30927) — SUBSUMES the delivery's `graph::build_hc_mean()` for
+  qwen4exp (identical node list); deepseek4/glm5-next keep theirs.
+* **rms_norm float4** (`623c16393`) — adopted; it moves the greedy text at a near-tie (prefill-logit
+  0.000657 / 98.755 % against the pre-r127 base: inside tolerance) and the prefill-logit base was
+  re-recorded from the r127 build once, as the campaign README required.
+
+Chain hygiene: the campaign's four fixup commits were folded into the blocks that own them and dropped, so
+the delivered chain is exactly 14 commits again; `scripts/gate-per-block-build.sh` is **14/14** (it caught
+a cross-block helper definition, a stray brace and the `ml`/`ml_l` rename fallout, all fixed in their
+blocks).  Canonical chain rebuilt by `scripts/apply-all.sh` at `3f03b1772`: tip `0c28ef86c`, tree
+`f46264b1fe565a016940e6fc7858cf50e3b11a9d`, 14/14 strict `git am`; `validate-set.sh` green.
+Set regenerated with `scripts/make-patches.sh` (base `3f03b1772`, tip `0c28ef86c`) and `release.json`
+written by `scripts/make-release.sh` (`v14-3f03b1772-r127`).
+
+Gates re-run at the new base: per-block build 14/14; dense 27B / 35B-A3B / Flash-Next / DFlash2 coherence
+(`plain == <speculator>` byte-identical; 58.0 vs 106.7 t/s on Flash-Next MTP); prefill-logit PASS then
+re-recorded; op tests FLASH_ATTN_EXT 6402/6402, FLASH_ATTN_QSA 26/26, GATED_DELTA_NET 55/55, HC_MIX 30/30,
+TOP_K_MASK 28/28, MUL_MAT 2445/2445, MUL_MAT_ID 931/931; `test-llama-archs` qwen4exp/deepseek4/glm5-next
+5/5 each; band gate in the rung-3 band.  **gfx1151 (Strix Halo, halo) got its first full validation**:
+build 0 errors, the GDN A/B and prefill-logit above, the QSA sparse-vs-dense ratio, Flash-Next
+`plain == draft-mtp` (34.8 → 57.8 t/s), DFlash2 `plain == draft-dflash` (61.6 → 104.8 t/s) and the five
+op tests at the same counts as gfx1201.
+
+One documented claim was corrected on the evidence: a **dense** `-sm tensor` split is *not* guaranteed to
+produce the same greedy text across device counts (27B UD-Q4_K_XL: 3 GPU 850 chars vs 2 GPU 876; r126
+shows 897 vs 855, so it predates the re-base).  `AGENTS.md` and `TODO.md` now say so; every `-sm layer` arm
+and every within-count comparison is unaffected.

@@ -1,5 +1,9 @@
 # UPSTREAM-PR: ggml-backend-meta: let the tensor split op-offload host weights (and serve byte ranges on mirrored tensors)
 
+> **Re-base status (2026-10-24):** cut against `097cf33d9`; the patch still applies cleanly
+> (`git apply --check`) to the current fork point `3f03b1772`, but it was **not re-validated**
+> there.  Not part of the delivery.
+
 > **Upstream candidate** · status: prepared 2026-09-27; measured standalone on pristine master (505.49 → 1690.26 t/s) · not filed.
 > Delivery: **block 09** (op-offload H2D staging) · patch: [`UPSTREAM-PR-meta-offload-op.patch`](UPSTREAM-PR-meta-offload-op.patch) (this directory).
 

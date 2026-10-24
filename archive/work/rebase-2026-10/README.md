@@ -1,10 +1,10 @@
 # rebase-2026-10 — re-cut the 14-block set onto `3f03b1772`
 
-**Status: the RE-BASE IS DONE (session 2, 2026-10-24) — only the SHIP remains, and that is a separate,
-maintainer-approved session.**  The chain is complete at base `3f03b1772`: 14 blocks, tip `cd2c8f488`,
+**Status: CLOSED — shipped as `v14-3f03b1772-r127` (2026-10-24).**  This directory is the campaign's
+record (moved out of `wip/` on release, per the WIP rule).  The chain is complete at base `3f03b1772`: 14 blocks, tip `cd2c8f488`,
 tree `f46264b1...`, per-block build gate 14/14, all rung gates green (see `STATE.md`).  Nothing has been
-tagged, pushed or written to `release.json` / `patches/` — this directory is still campaign documentation
-only.
+tagged, pushed or written to `release.json` / `patches/` by the campaign itself; the ship was a separate,
+maintainer-approved session that reused exactly this chain (see `WORKLOG.md` 261024.008).
 
 This is the handover a fresh session should start from.  **Paste
 [`KICKOFF-PROMPT.md`](KICKOFF-PROMPT.md) into the new session**; it is the self-contained task brief

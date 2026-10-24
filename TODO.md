@@ -11,9 +11,9 @@ Details never live here: they live in `AGENTS.md`, `patches/README.md`, `MANIFES
 **Numbers are never reused.**  `#NN` is a permanent handle: an old `WORKLOG.md` entry that cites `TODO #74`
 still means the same subject after that item is closed and removed from this file.  New items append.
 
-**Current state:** the **14-block V2.1 set** (block 00 + blocks 01-13) at fork point **`097cf33d9`**,
-release **`v14-097cf33d9-r125`**.  `release.json` is the source of truth for the tip/tree and hashes; the
-top of `WORKLOG.md` is the newest record.
+**Current state:** the **14-block V2.1 set** (block 00 + blocks 01-13) at fork point **`3f03b1772`**
+(the 2026-10-24 re-base), release **`v14-3f03b1772-r127`**.  `release.json` is the source of truth for the
+tip/tree and hashes; the top of `WORKLOG.md` is the newest record.
 
 | # | subject | kind | status |
 |---|---|---|---|
@@ -23,6 +23,8 @@ top of `WORKLOG.md` is the newest record.
 | **79** | RDNA3_0 verify-band fusions: no multi-device measurement, and gfx1101/gfx1102 untested | platform validation | open (shipped default-on in r95; needs a 2+ card gfx1100 box).  `ssh fingon` is single-RDNA3 (`ROCm0`; its second rocm-smi entry is an iGPU and is not a HIP device), so it does **not** cover the multi-device arm — it validates single-GPU gfx1100 only.  gfx1101/gfx1102 still have no hardware |
 | **70** | harden the expert-cache re-arm / wide-aux growth against a starved arena | robustness | open |
 | **36** | genuine CPU/GPU overlap for the MoE misses | performance | open, scoping (`wip/moe-cpu-overlap/`) |
+| **100** | `HC_COMBINE` has no test case (`test-backend-ops -o HC_COMBINE` runs 0/0), so the op has no oracle | test coverage | open (pre-existing; `HC_MIX` has 30 cases) |
+| **101** | drop the `ml`→`ml_l` parameter rename in `llama-model.cpp` (pure churn: it re-skinned every re-base conflict in that file) | cleanup | open (proposed 2026-10-24; keep `ml_l` until the next re-base to avoid another tree rewrite) |
 
 Accepted limitations that are deliberately **not** fixed are listed at the end — do not re-report them.
 
@@ -185,6 +187,12 @@ fraction at 43 % residency; if it is <20 %, park it.  Design space and gates:
 [`wip/moe-cpu-overlap/`](wip/moe-cpu-overlap/README.md).
 
 ## Documented, deliberately NOT fixed (accepted limitations — do not re-report)
+
+* **A dense `-sm tensor` split is not guaranteed to produce the same greedy text across device counts**
+  (AGENTS "Greedy text is a per-device-count reference" was corrected 2026-10-24).  Qwen3.8-27B
+  UD-Q4_K_XL, prose prompt, seed 42: 3 GPU 850 chars vs 2 GPU 876; the r126 build shows the same
+  (897 vs 855), so it is the tensor split's rounding class, not a delivery defect.  Every `-sm layer`
+  arm *is* text-identical across counts.  Gate a change within a device count.
 
 
 - **A Windows VRAM overcommit is not catchable: it surfaces as a device loss, not an allocation failure

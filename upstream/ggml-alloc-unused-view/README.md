@@ -1,5 +1,9 @@
 # Upstream-PR proposal — ggml alloc: release view sources whose views are never consumed
 
+> **Re-base status (2026-10-24):** cut against `097cf33d9`; the patch still applies cleanly
+> (`git apply --check`) to the current fork point `3f03b1772`, but it was **not re-validated**
+> there.  Not part of the delivery.
+
 > **Upstream candidate** · status: prepared 2026-09-10; repro + `test-alloc`/`test-batch-alloc` verified on unadulterated master `9cf3bf256` · not filed.
 > Delivery: **block 00** (the `ggml-alloc` view release) · patch: [`UPSTREAM-PR-ggml-alloc-unused-view.patch`](UPSTREAM-PR-ggml-alloc-unused-view.patch) (this directory).
 

@@ -1,5 +1,9 @@
 # llama: make `--lazy-mode off` keep `TENSOR_READ_LAZY` tensors resident under `--load-mode mmap`
 
+> **Re-base status (2026-10-24):** cut against `097cf33d9`; this patch does **not** apply to the
+> current fork point `3f03b1772` — it needs a re-cut before it can be filed or measured there.
+> Not part of the delivery (nothing here blocks a release).
+
 **Status:** upstream-PR candidate, cut against `097cf33d9`; **in the delivery as block 00** (r122).
 `UPSTREAM-PR-lazy-mode-off-resident.patch` applies clean to unadulterated `097cf33d9`.
 

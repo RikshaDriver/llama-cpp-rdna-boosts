@@ -11,8 +11,8 @@ support, and an attention-memory campaign that frees several GiB of VRAM.
 whether it is a kill-switch (default-on, set to disable), an opt-in, a tuning value, or a diagnostic.
 
 It ships as **14 patches** (block 00 + blocks 01-13) for a clean llama.cpp checkout at the fork point
-**`097cf33d9`** (upstream master).  Each block is one `git am` commit, and the series is linear (a block
-assumes its predecessors), so the set is applied whole.  The current release is **`v14-097cf33d9-r122`**: the release
+**`3f03b1772`** (upstream master).  Each block is one `git am` commit, and the series is linear (a block
+assumes its predecessors), so the set is applied whole.  The current release is **`v14-3f03b1772-r127`**: the release
 identity (fork point, canonical tip/tree, block count and per-artifact sha256) is
 [`release.json`](release.json), and the release note for it -- and for every earlier `rN` -- is the top of
 [`WORKLOG.md`](WORKLOG.md) (newest first; it is the only dated record).  This README describes the set,
@@ -20,7 +20,7 @@ not the changelog.
 
 ```bash
 git clone https://github.com/ggml-org/llama.cpp && cd llama.cpp
-git checkout 097cf33d9
+git checkout 3f03b1772
 bash <path-to-this-repo>/scripts/apply-all.sh .   # creates branch rdna-boosts (14 commits)
 
 # OPTIONAL: a beta candidate on top (NOT the release tree -- for beta testing only)
@@ -39,7 +39,7 @@ bash <path-to-this-repo>/scripts/apply-all.sh --include-beta .   # 14 blocks + b
 ## Releases
 
 Frozen deliveries are published as GitHub Releases and tagged in this repo
-(the tag is the release identity: `v12-<fork-point>-r<N>`, e.g. **`v12-097cf33d9-r93`**; the `v16-*`
+(the tag is the release identity: `v14-<fork-point>-r<N>`, e.g. **`v14-3f03b1772-r127`**; the `v16-*`
 tags are the historical 16-block set.  `r1` is the
 re-base of the set onto that fork point and every later `rN` is a dated change recorded in
 [`WORKLOG.md`](WORKLOG.md), newest first).
@@ -245,7 +245,7 @@ Applying the 14 patches to the fork point in [`release.json`](release.json) ther
 
 ```bash
 git clone https://github.com/ggml-org/llama.cpp && cd llama.cpp
-git checkout 097cf33d9          # the base recorded in release.json
+git checkout 3f03b1772          # the base recorded in release.json
 bash <path-to-this-repo>/scripts/apply-all.sh .   # 14/14 strict, tree checked against release.json
 ```
 
@@ -485,7 +485,8 @@ next cell from the *shared* head, so that residue follows the co-resident sessio
 history.  Identical concurrent repetitions can differ, and a concurrent run can differ from the same
 request run solo, at the rounding level (a greedy near-tie can flip).  **Use `--no-kv-unified` when
 strict reproducibility is required.**  This is inherent to upstream's unified-KV design — it reproduces
-on unmodified upstream `097cf33d9` — and not a defect introduced by this patch set; the analysis,
+on unmodified upstream (the same behaviour was measured on `097cf33d9`) — and not a defect introduced by this
+patch set; the analysis,
 reproducers and the exact rule are preserved (closed 2026-10-19) at
 `archive/work/kv-cell-offset-nondeterminism/` (`RESOLUTION.md`).  A fix requires period-granular
 per-sequence cell *ownership* in the unified pool — an upstream allocator redesign with no throughput

@@ -1,4 +1,4 @@
-From 39c784aa4d89d42f744a25815123a2616d7c6200 Mon Sep 17 00:00:00 2001
+From b137f5c4271720fbfc15b348d2e2a8f89bb99326 Mon Sep 17 00:00:00 2001
 From: Stew Forster <ci@rdna-boosts.invalid>
 Date: Wed, 21 Oct 2026 10:40:31 -0500
 Subject: [PATCH 01/13] rdna-boosts: block 01: hybrid HIP all-reduce
@@ -9,8 +9,8 @@ Sources: old 12 (whole block).
  ggml/src/ggml-cuda/allreduce-hip.cu | 1795 +++++++++++++++++++++++++++
  ggml/src/ggml-cuda/allreduce.cu     |   27 +-
  ggml/src/ggml-cuda/allreduce.cuh    |   21 +
- ggml/src/ggml-cuda/ggml-cuda.cu     |  565 ++++++++-
- 4 files changed, 2364 insertions(+), 44 deletions(-)
+ ggml/src/ggml-cuda/ggml-cuda.cu     |  566 ++++++++-
+ 4 files changed, 2365 insertions(+), 44 deletions(-)
  create mode 100644 ggml/src/ggml-cuda/allreduce-hip.cu
 
 diff --git a/ggml/src/ggml-cuda/allreduce-hip.cu b/ggml/src/ggml-cuda/allreduce-hip.cu
@@ -1894,10 +1894,10 @@ index 76205d323..a2e1f41dd 100644
 +void ggml_cuda_ar_stage_hook_run(int device, cudaStream_t stream,
 +                                 const float * data, int64_t count);
 diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
-index b4cb68702..924313277 100644
+index cbc47bcc3..621e690ce 100644
 --- a/ggml/src/ggml-cuda/ggml-cuda.cu
 +++ b/ggml/src/ggml-cuda/ggml-cuda.cu
-@@ -980,21 +980,129 @@ struct ggml_backend_cuda_comm_context {
+@@ -1042,21 +1042,129 @@ struct ggml_backend_cuda_comm_context {
  
      ggml_cuda_ar_pipeline *     ar_pipeline = nullptr;
  
@@ -2028,7 +2028,7 @@ index b4cb68702..924313277 100644
  // AllReduce via NCCL. Reduces as FP32 for small tensors and BF16 for large
  // tensors (bandwidth-bound), then converts back to FP32.
  static bool ggml_backend_cuda_comm_allreduce_nccl(
-@@ -1014,9 +1122,19 @@ static bool ggml_backend_cuda_comm_allreduce_nccl(
+@@ -1076,9 +1184,19 @@ static bool ggml_backend_cuda_comm_allreduce_nccl(
          GGML_ASSERT(ggml_is_contiguously_allocated(tensors[i]));
      }
  
@@ -2049,7 +2049,7 @@ index b4cb68702..924313277 100644
          for (size_t i = 0; i < n_backends; ++i) {
              if ((tensors[i]->flags & GGML_TENSOR_FLAG_COMPUTE) == 0) {
                  ggml_backend_cuda_context * cuda_ctx = (ggml_backend_cuda_context *) comm_ctx->backends[i]->context;
-@@ -1024,12 +1142,18 @@ static bool ggml_backend_cuda_comm_allreduce_nccl(
+@@ -1086,12 +1204,18 @@ static bool ggml_backend_cuda_comm_allreduce_nccl(
                  CUDA_CHECK(cudaMemsetAsync(tensors[i]->data, 0, ggml_nbytes(tensors[i]), cuda_ctx->stream()));
              }
          }
@@ -2071,7 +2071,7 @@ index b4cb68702..924313277 100644
          return true;
      }
  
-@@ -1052,12 +1176,18 @@ static bool ggml_backend_cuda_comm_allreduce_nccl(
+@@ -1114,12 +1238,18 @@ static bool ggml_backend_cuda_comm_allreduce_nccl(
          CUDA_CHECK(cudaGetLastError());
      }
  
@@ -2093,7 +2093,7 @@ index b4cb68702..924313277 100644
  
      for (size_t i = 0; i < n_backends; ++i) {
          ggml_backend_cuda_context * cuda_ctx = (ggml_backend_cuda_context *) comm_ctx->backends[i]->context;
-@@ -1078,7 +1208,7 @@ static bool ggml_backend_cuda_comm_allreduce_internal(
+@@ -1140,7 +1270,7 @@ static bool ggml_backend_cuda_comm_allreduce_internal(
      GGML_ASSERT(comm_ctx->ar_pipeline != nullptr);
  
      const size_t n_backends = comm_ctx->backends.size();
@@ -2102,7 +2102,7 @@ index b4cb68702..924313277 100644
      GGML_ASSERT(tensors[0] != nullptr);
  
      const int64_t   ne   = ggml_nelements(tensors[0]);
-@@ -1158,29 +1288,31 @@ static void ggml_backend_cuda_comm_init_none(ggml_backend_cuda_comm_context * re
+@@ -1220,29 +1350,31 @@ static void ggml_backend_cuda_comm_init_none(ggml_backend_cuda_comm_context * re
      ret->try_allreduce = ggml_backend_cuda_comm_try_allreduce_butterfly;
  }
  
@@ -2144,7 +2144,7 @@ index b4cb68702..924313277 100644
      }
  
      const size_t n = ret->dev_ids.size();
-@@ -1188,26 +1320,320 @@ static void ggml_backend_cuda_comm_init_nccl(ggml_backend_cuda_comm_context * re
+@@ -1250,26 +1382,320 @@ static void ggml_backend_cuda_comm_init_nccl(ggml_backend_cuda_comm_context * re
      ncclResult_t rc = ncclCommInitAll(ret->comms.data(), (int) n, ret->dev_ids.data());
      if (rc == ncclSuccess) {
          ret->try_allreduce = ggml_backend_cuda_comm_try_allreduce_nccl;
@@ -2474,7 +2474,7 @@ index b4cb68702..924313277 100644
  static void * ggml_backend_cuda_comm_init(ggml_backend_t * backends, size_t n_backends) {
      for (size_t i = 0; i < n_backends; i++) {
          if (!ggml_backend_is_cuda(backends[i])) {
-@@ -1223,38 +1649,89 @@ static void * ggml_backend_cuda_comm_init(ggml_backend_t * backends, size_t n_ba
+@@ -1285,38 +1711,89 @@ static void * ggml_backend_cuda_comm_init(ggml_backend_t * backends, size_t n_ba
      }
  
      const char * env = getenv("GGML_CUDA_ALLREDUCE");
@@ -2574,15 +2574,15 @@ index b4cb68702..924313277 100644
  }
  
  // host buffer type
-@@ -4596,6 +5073,18 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
-                 graph->graph = nullptr;
-             }
+@@ -4804,6 +5281,19 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
  
-+            // WIP fused-stage: capture the AR stage kernel as the graph's LAST
-+            // node so each device's wire staging + arrival token are ready at
-+            // subgraph-end instead of after the separate AR kernel's dispatch
-+            // (which carries a per-device graph->kernel premium).  No-op when
-+            // the internal AR pipeline isn't in fused mode.
+ #ifdef USE_CUDA_GRAPH
+         if (use_cuda_graph && cuda_graph_update_required) { // End CUDA graph capture
++            // WIP fused-stage: capture the AR stage kernel as the LAST node of
++            // the LAST chunk so each device's wire staging + arrival token are
++            // ready at subgraph-end instead of after the separate AR kernel's
++            // dispatch (which carries a per-device graph->kernel premium).
++            // No-op when the internal AR pipeline isn't in fused mode.
 +            if (cgraph->n_nodes > 0 && cgraph->nodes[cgraph->n_nodes-1] != nullptr) {
 +                const ggml_tensor * last = cgraph->nodes[cgraph->n_nodes-1];
 +                ggml_cuda_ar_stage_hook_run(cuda_ctx->device, cuda_ctx->stream(),
@@ -2590,9 +2590,10 @@ index b4cb68702..924313277 100644
 +                                            ggml_nelements(last));
 +            }
 +
-             CUDA_CHECK(cudaStreamEndCapture(cuda_ctx->stream(), &graph->graph));
-             graph_evaluated_or_captured = true; // CUDA graph has been captured
++            // ends the capture of this (last) chunk, then updates/instantiates and launches it
+             ggml_cuda_graph_launch_chunk(cuda_ctx, graph, n_chunks++);
  
+             // drop the chunks left over from a longer graph
 -- 
 2.56.0
 

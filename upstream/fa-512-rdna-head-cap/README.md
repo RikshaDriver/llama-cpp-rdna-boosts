@@ -1,5 +1,9 @@
 # upstream: let RDNA4 use the WMMA flash-attention kernel for head 512 (Gemma 4 global layers)
 
+> **Re-base status (2026-10-24):** cut against `097cf33d9`; the patch still applies cleanly
+> (`git apply --check`) to the current fork point `3f03b1772`, but it was **not re-validated**
+> there.  Not part of the delivery.
+
 > **Upstream candidate** · status: prepared 2026-10-19; applies clean to `097cf33d9` and builds and runs there (ROCm 10.1.0, gfx1201) · not filed.
 > Delivery: **block 05** (r92, issue #188) — the fork keeps its own tuned 512 row · patch: [`UPSTREAM-PR-fa-512-rdna-head-cap.patch`](UPSTREAM-PR-fa-512-rdna-head-cap.patch) (this directory).
 

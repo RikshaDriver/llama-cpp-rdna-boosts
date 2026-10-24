@@ -1,5 +1,92 @@
 # WORKLOG - dated delivery records
 
+## 261024.008 (r127) -- re-base onto `3f03b1772` (261 upstream commits): 14 blocks replayed, no block renumbered, gfx1151 validated
+
+**Release:** `v14-3f03b1772-r127`.  `release.json` base `3f03b1772` (base tree `14370bd49a`), canonical tip
+`0c28ef86c`, tree `f46264b1fe565a016940e6fc7858cf50e3b11a9d`, 14 blocks.  `scripts/validate-set.sh` green
+(checksums, fresh-tarball **strict 14/14** `git am`, applied tree == recorded tree); a strict `git am` of
+the regenerated set onto a clean `3f03b1772` reproduces the tree exactly.  **No block was renumbered,
+merged or split**; the changes are amendments inside the owning blocks plus a re-cut of every patch.
+
+**Why.**  The old fork point (`097cf33d9`, 2026-10-12) was 12 days and **261 commits / 868 files
+(+96 173 / −48 196)** behind the maintainer's fork master.  Upstream had meanwhile implemented several of
+the same things differently — a chunked GDN prefill kernel, the MoE cache rewritten to a 50/50 SLRU, a
+4 GiB pinned-host cap, chunked CUDA graphs, a fused QSA mask op, QSA selection without the kq_mask, MMQ /
+MMVQ retunes, `hc_stream_mean` for the DFlash layer-input tap — so this was a **semantic** re-base: every
+collision was decided (SUBSUMES / CORDON / INTEGRATE) with a measurement or a bit-identity argument, not
+mechanically unioned.  The campaign record, per-rung conflict tables and the halo recipes are in
+[`archive/work/rebase-2026-10/`](archive/work/rebase-2026-10/README.md) (`STATE.md`, `DECISIONS.md`,
+`GOTCHAS.md`).
+
+**What landed, by block** (the full per-block detail is `patches/README.md`):
+
+* **03** — upstream's RDNA3.5 MMA chunked kernel is eligible at `n_tokens >= 2048` on gfx1151 but stays
+  **behind** ours: it runs only where our chunked path stands down.  **One chunked kernel per device
+  class** is the rule; measured below.
+* **08** — upstream's hadamard-folded weight split (`cur_mm` for the weight, the primal `cur` for the LoRA
+  delta) adopted; the top-k MoE A/B helper is now defined where the matcher lives.
+* **10** — the moved fusion dispatcher takes upstream's chunked-graph shape: our WIP AR-stage hook runs
+  before the **last chunk's** capture, the HIP `hipGraphExecUpdate` leak workaround lives inside upstream's
+  new `ggml_cuda_graph_update_executable(cudaGraphExec_t &, cudaGraph_t)`, and the recapture condition is
+  `instances.empty() || mem_gen` moved.
+* **11** — **CORDON, twice**: upstream's fused QSA mask op (`GGML_OP_TOP_K_MASK`, #30640) and its
+  "selection without kq_mask" rework (#30965) both leave qwen4exp on the delivery's derived-visibility
+  selection (`additive` + `run_top_k`, no mask tensor) — the -800 MiB win and the QSA oracle are intact.
+  Upstream's `hc_stream_mean()` **subsumes** our `graph::build_hc_mean()` for qwen4exp (identical node
+  list), so our copy is gone; deepseek4/glm5-next keep theirs.
+* **12** — the op-count `static_assert`s were recomputed with both sides' ops (**108** after block 11,
+  **109** after block 12; the old chain's "107…!= 108" message typo is fixed).
+* **00/07/08/09/10** — the campaign's four *fixup* commits were **folded into the blocks that own them**
+  and dropped, so the chain is exactly 14 commits again.  `scripts/gate-per-block-build.sh` then found
+  three defects a tip-only build cannot see and they are fixed in their blocks: block 08 used
+  `ggml_cuda_topk_moe_fusion_disabled()` that only block 10 defined; block 09 carried a stray `}`; and
+  every block tree carried `ml.` where the delivery renamed the loader parameter to `ml_l` (two of those
+  were hard build errors).
+
+**Gates** (all on this box unless noted; the build is `~/llama-rebase/build-rocm`, ROCm 10.1.0):
+
+| gate | result |
+|---|---|
+| per-block build (`gate-per-block-build.sh`, fresh dir per commit) | **14/14 built, 0 failed** |
+| coherence, dense 27B UD-Q4_K_XL `-sm tensor` 3 GPU, prose prompt, -n 200, seed 42 | `plain == draft-mtp`, 850 chars `0cd2d424a564`; 48.7 / 84.9 t/s |
+| coherence, 35B-A3B UD-Q4_K_M `-sm tensor -ncmoe 40` | `plain == draft-mtp`, text identical; 19.7 / 33.0 t/s |
+| coherence, Flash-Next GSQ (qwen4exp), 3 GPU tensor `-ncmoe 48`, `--load-mode none --lazy-mode off` | `plain == draft-mtp`, 243 chars `e792bee1d6f0`; -n 200: **58.0 vs 106.7 / 105.5 t/s** |
+| DFlash2 (35B-A3B + DFlash2 Q8_0 drafter) | `plain == draft-dflash`, text identical; 35.2 t/s |
+| prefill logits (`gate-prefill-logits.sh`) | PASS — **0.000657 / 98.755 %** against the r126-recorded base; then **re-recorded from this build** (`base PPL 5.9339`, self-check 0.000000 / 99.980 %) — the base moved with the re-base, as the campaign README required |
+| op tests gfx1201 | FLASH_ATTN_EXT **6402/6402**, FLASH_ATTN_QSA **26/26**, GATED_DELTA_NET **55/55**, HC_MIX **30/30**, TOP_K_MASK **28/28**, MUL_MAT **2445/2445**, MUL_MAT_ID **931/931** |
+| `test-llama-archs` | qwen4exp 5/5 (4.63e-14 GPU / 2.94e-12 Meta), deepseek4 5/5, glm5-next 5/5 |
+| band gate (`llama-batched-bench -npl 1,4,8`, 27B, 512/128, 2nd run) | pp 1608.6/1800.8/1825.4, tg 48.0/156.3/242.7 (rung-3 record 1589/1781/1823 and 47.7/144.1/230.7 — same band) |
+| **gfx1151 (halo)**, r127 build `BUILD_DIR=build-r9` | build 0 errors; GDN A/B pp2048 interleaved **3232 vs 3131 t/s (+3.2 %)** ours vs upstream MMA, prefill-logit **KLD 0.000074 / 99.637 %**; QSA sparse-vs-dense PPL **2.2399 / 2.2429**; Flash-Next `plain == draft-mtp` (330 chars `2b61b08095a1`, 34.8 → 57.8 t/s); DFlash2 `plain == draft-dflash` (206 chars `cf7f8b23f404`, 61.6 → 104.8 t/s); op tests QSA 26/26, GDN 55/55, FA_EXT 6402/6402, HC_MIX 30/30, TOP_K_MASK 28/28 |
+
+**Banked performance notes.**  Rung 8's chunked CUDA graphs gave 3-GPU 27B MTP decode **84.2/84.8 t/s vs
+79.8** (+5.5 %) with identical text — the r115 graph-key work is what makes that band clean.  Nothing else
+in rungs 7-9 moved the dense decode numbers (the greedy text is byte-identical to rungs 3-8).
+
+**Two findings that changed the docs rather than the code:**
+
+1. **`AGENTS.md`'s "a dense `-sm tensor` split is text-identical across device counts" was wrong.**  On
+   Qwen3.8-27B UD-Q4_K_XL (prose prompt, seed 42) 3 GPU gives 850 chars and 2 GPU 876 — and the **r126**
+   build shows the same (897 vs 855), so it is the tensor split's rounding class, not a re-base defect.
+   `AGENTS.md` and `TODO.md` (accepted limitations) now say so; within one device count `plain ==
+   draft-mtp` holds, which is the gate.
+2. **GDN on RDNA3.5 is decided** (the campaign's last open question): keep ours, +3.2 % interleaved and
+   KLD 0.000074 against upstream's MMA arm; `AGENTS.md`'s block-03 bullet now carries the rule and the
+   numbers.
+
+**Artifacts and mechanics.**  `patches/` + `rdna-boosts-all.patch` regenerated from the **canonical chain
+rebuilt by `scripts/apply-all.sh` at `3f03b1772`** (not from the campaign worktree), `release.json` written
+by `scripts/make-release.sh`, then `validate-set.sh`.  Docs moved in the same commit: `README.md`,
+`BASELINE.md` (+ a `archive/docs/baseline-history.md` record), `MANIFESTS.md`, `patches/README.md`
+(re-sized block index, block-03 GDN rule, block-11 op-count/`hc_stream_mean` notes), `AGENTS.md` (release
+id, the §45 correction, the GDN rule, the chunked-graph shape), `TODO.md` (current state, #100 `HC_COMBINE`
+has no oracle, #101 drop the `ml`→`ml_l` rename churn), `CONTAINERS.md`, `upstream/*` (per-candidate
+re-base status: 9 still apply to `3f03b1772`, 8 need a re-cut), `wip/CAMPAIGNS.md`, and the campaign moved
+out of `wip/` to `archive/work/rebase-2026-10/`.
+
+**Not done here (deliberately).**  No container image was built on this box — the `radiance` watcher picks
+the tag up; the fork's `rdna-boosts` branch was refreshed from a clean clone at the new base and pushed
+only to `git@github.com:stew675/llama.cpp.git`; `beta/` has no candidates.
+
 ## 261024.007 (r126) -- the RDNA4 MMA band row is no longer also the prefill row: deep-context prefill recovers (block 05, TODO #98 closed)
 
 **Change:** **block 05**.  `release.json` tip `760ac6aaf`, tree `6abcc1a92`;

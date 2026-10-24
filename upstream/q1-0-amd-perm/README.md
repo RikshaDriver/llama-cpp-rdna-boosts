@@ -1,5 +1,9 @@
 # `ggml-cuda`: use `__builtin_amdgcn_perm` for the Q1_0 table lookups
 
+> **Re-base status (2026-10-24):** cut against `097cf33d9`; this patch does **not** apply to the
+> current fork point `3f03b1772` — it needs a re-cut before it can be filed or measured there.
+> Not part of the delivery (nothing here blocks a release).
+
 > **Upstream candidate** · status: prepared 2026-10-11; applies clean to `a55e952b8`; bit-identical (16.7M randomized cases); **no Q1_0 model locally**, so no speed claim · not filed.
 > Delivery: **block 07** (Q1_0) · patch: [`UPSTREAM-PR-q1-0-amd-perm.patch`](UPSTREAM-PR-q1-0-amd-perm.patch) (this directory).
 

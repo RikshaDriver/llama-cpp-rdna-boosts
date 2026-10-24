@@ -1,5 +1,9 @@
 # UPSTREAM-PR: ggml-backend-meta — resolve unallocated aliases in the split state, and report a failed sub-allocation instead of aborting
 
+> **Re-base status (2026-10-24):** cut against `097cf33d9`; the patch still applies cleanly
+> (`git apply --check`) to the current fork point `3f03b1772`, but it was **not re-validated**
+> there.  Not part of the delivery.
+
 > **Upstream candidate** · status: prepared 2026-10-18 from issue #170; applies clean to `097cf33d9` and builds there; validated at 24 GiB-card parity · not filed.
 > Delivery: **block 00**; the fork-local companion (gate the meta `offload_op` hook to `MUL_MAT_ID`) is **block 09** · patch: [`UPSTREAM-PR-meta-split-unalloc-alias-and-alloc-fail.patch`](UPSTREAM-PR-meta-split-unalloc-alias-and-alloc-fail.patch) (this directory).
 

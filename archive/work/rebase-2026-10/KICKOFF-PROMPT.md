@@ -15,9 +15,9 @@ We have various models for testing in sub-directories under /llm/models/
 
 1. `AGENTS.md` (report findings before shipping; push policy; default-on policy; WIP/promotion rules;
    critical facts).  Every rule there applies.
-2. `wip/rebase-2026-10/README.md`, `GOTCHAS.md`, `SURVEY-2026-10-24.md` (the handover, the collision
+2. `archive/work/rebase-2026-10/README.md`, `GOTCHAS.md`, `SURVEY-2026-10-24.md` (the handover, the collision
    inventory and the trial-apply survey).
-3. `wip/rebase-2026-10/STATE.md` and `DECISIONS.md` if they exist (the previous session's checkpoint and
+3. `archive/work/rebase-2026-10/STATE.md` and `DECISIONS.md` if they exist (the previous session's checkpoint and
    decisions).  **Create them if this is session 1** (templates below).
 4. `BASELINE.md` (drift policy) and `archive/work/r50-rebase/README.md` +
    `archive/work/patch-block-reorg/REBASE-RESILIENCE.md` (the previous re-base and the cordon pass, done
@@ -26,7 +26,7 @@ We have various models for testing in sub-directories under /llm/models/
 ## Hard rules for this task
 
 * **Do not ship, tag, push or touch `release.json`, `patches/` or the delivery branch** during the re-base.
-  The only repo files you may change are `wip/rebase-2026-10/*` and (at the final session, with the
+  The only repo files you may change are `archive/work/rebase-2026-10/*` and (at the final session, with the
   maintainer's go-ahead) the current-state docs, artifacts and release metadata.
 * **Never push to upstream** (`ggml-org/llama.cpp`).  The only permitted push target is the personal fork
   (`git@github.com:stew675/llama.cpp.git`), and only at release time.

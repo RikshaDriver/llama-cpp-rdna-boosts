@@ -117,7 +117,8 @@ Open questions / findings for the maintainer:
   6. `invalidate_cuda_graphs()` now counts `graph->instances.size()` (upstream's chunked-graph shape);
      the HIP `GGML_HIP_GRAPH_FORCE_UPDATE` workaround now applies per chunk instance (rung 8).
 
-Next session = the SHIP (separate, maintainer-approved):
+Next session = the SHIP (**DONE — `v14-3f03b1772-r127`, `WORKLOG.md` 261024.008**; the checklist below is
+kept as the record of what that session had to do):
   * docs current-state headers: `release.json` (via `scripts/make-release.sh`), `BASELINE.md`,
     `MANIFESTS.md`, `README.md`, `patches/README.md`, `AGENTS.md` (fork point `3f03b1772`, the §45
     correction, the block-03 GDN fact), `TODO.md`, `CONTAINERS.md`, `upstream/*/README.md`,

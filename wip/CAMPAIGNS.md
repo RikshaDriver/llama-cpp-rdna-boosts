@@ -22,7 +22,21 @@ is the signature of a stub, not of a campaign.
 |---|---|---|
 | [`fp8-support/`](fp8-support/README.md) | native FP8 E4M3 for RDNA4 | PARKED (2026-09-26) — rebased and building, fully RDNA4-gated, but **gate 2 failed** (the fp8 4B is 0.69x Q8_0 where cllm had 1.16x, because the delivery's MMB/GEMM work made Q8_0 +32 % and the fp8 WMMA path did not follow).  Resume actions are in `PLAN.md`.  Not closed — paused behind the delivery work |
 | [`moe-cpu-overlap/`](moe-cpu-overlap/README.md) | genuine CPU/GPU overlap for the expert misses (the Strata shape) | OPEN / scoping (TODO #36) — **work in flight**: the note refutes the earlier "cannot be done" verdict for the interleaved shape and sets out the pipeline to try |
-| [`rebase-2026-10/`](rebase-2026-10/README.md) | re-cut the 14-block set onto `3f03b1772` (the maintainer's fork `master`, current upstream 2026-10-24; old base `097cf33d9`, 261 commits behind) | OPEN / scoping (2026-10-24) — **not started**: a handover for a fresh session (paste `KICKOFF-PROMPT.md`; details in `README.md`, `GOTCHAS.md`, `SURVEY-2026-10-24.md`).  Semantic collisions: upstream's GDN chunked kernel (block 03), MoE-cache SLRU (09), pinned-host 4 GiB cap (00/09/10), chunked CUDA graphs (10), QSA/hc_post fusions (11), MMQ/MMVQ retunes (06/07/08).  No rebase was performed |
+
+**Shipped (r127, 2026-10-24, no block renumbered — the whole set re-based).**  `rebase-2026-10/` left
+`wip/` for [`archive/work/rebase-2026-10/`](../archive/work/rebase-2026-10/README.md): the 14-block set was
+replayed from `097cf33d9` (2026-10-12) onto **`3f03b1772`** (2026-10-24, 261 upstream commits) and shipped as
+**`v14-3f03b1772-r127`**.  Every block kept its number; the chain is 14 commits with no fixup commits
+(the four rung fixups were folded into the blocks that own them), `scripts/gate-per-block-build.sh` is
+**14/14**, and `validate-set.sh` is green on a fresh tarball.  Conflicts were resolved semantically, not
+mechanically: upstream's chunked GDN kernel stays *behind* ours (gfx1151 A/B: ours +3.2 %, KLD 0.000074),
+upstream's fused QSA mask op exists but qwen4exp keeps the delivery's derived-visibility selection
+(CORDON, twice — #30640 and #30965), upstream's `hc_stream_mean()` subsumed our `build_hc_mean()`, the
+chunked CUDA graphs moved our AR-stage hook to the last chunk's capture, and the op count was recomputed
+(109 at the tip).  RDNA3.5 was validated on `halo` for the first time (GDN A/B, QSA sparse-vs-dense PPL
+2.2399/2.2429, Flash-Next `plain == draft-mtp`, DFlash2 `plain == draft-dflash`, op tests).  The campaign
+record (`README.md`, `STATE.md`, `DECISIONS.md`, `GOTCHAS.md`, the surveys) is preserved under
+`archive/work/rebase-2026-10/`; see `WORKLOG.md` 261024.008.
 
 **Promoted (r123, 2026-10-24, block 09).**  `ngram-mod-host-experts/` left `wip/` for
 [`archive/work/ngram-mod-host-experts/`](../archive/work/ngram-mod-host-experts/EVIDENCE-2026-10-24.md):

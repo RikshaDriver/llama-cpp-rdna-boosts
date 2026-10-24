@@ -1,5 +1,9 @@
 # UPSTREAM-PR: ggml-cuda: keep the decode/verify band on one flash-attention kernel family
 
+> **Re-base status (2026-10-24):** cut against `097cf33d9`; this patch does **not** apply to the
+> current fork point `3f03b1772` — it needs a re-cut before it can be filed or measured there.
+> Not part of the delivery (nothing here blocks a release).
+
 > **Upstream candidate** · status: written and validated against the delivery (3x gfx1201, NVIDIA/Ada arm included) · not filed.
 > Delivery: **block 05** (the F1 decode/verify band rule; written as the old block-08 amendment) · patch: [`UPSTREAM-PR-fa-decode-verify-kernel-family.patch`](UPSTREAM-PR-fa-decode-verify-kernel-family.patch) (this directory).
 

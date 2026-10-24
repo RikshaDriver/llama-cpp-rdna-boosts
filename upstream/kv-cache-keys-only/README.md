@@ -1,5 +1,9 @@
 # Upstream-PR proposal — llama: keys-only KV caches (drop the dead indexer V buffer)
 
+> **Re-base status (2026-10-24):** cut against `097cf33d9`; the patch still applies cleanly
+> (`git apply --check`) to the current fork point `3f03b1772`, but it was **not re-validated**
+> there.  Not part of the delivery.
+
 > **Upstream candidate** · status: prepared 2026-09-10; verified on unadulterated master `9cf3bf256` (CPU) — indexer KV 72.00 → 24.00 MiB at ctx 8192, same-seed text byte-identical · not filed.
 > Delivery: **block 11** (qwen4exp indexer) + **block 08** (the `v_enabled` plumbing) · patch: [`UPSTREAM-PR-kv-cache-keys-only.patch`](UPSTREAM-PR-kv-cache-keys-only.patch) (this directory).
 

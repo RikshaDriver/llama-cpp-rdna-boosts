@@ -1,5 +1,9 @@
 # UPSTREAM-PR: make the CUDA fused MoE router bit-identical to the generic chain (and the argsort stable)
 
+> **Re-base status (2026-10-24):** cut against `097cf33d9`; this patch does **not** apply to the
+> current fork point `3f03b1772` — it needs a re-cut before it can be filed or measured there.
+> Not part of the delivery (nothing here blocks a release).
+
 > **Upstream candidate** · status: prepared 2026-09-13; applies clean to `790cf51aa`; validated on gfx1201 · not filed.
 > Delivery: **block 08** (the fused MoE router bit-identity amendment) · patch: [`UPSTREAM-PR-moe-router-tie-break.patch`](UPSTREAM-PR-moe-router-tie-break.patch) (this directory).
 

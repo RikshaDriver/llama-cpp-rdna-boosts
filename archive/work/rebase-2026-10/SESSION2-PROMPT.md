@@ -9,18 +9,18 @@ continue the ladder from rung 7.
 
 1. `AGENTS.md` — every rule applies (report findings before shipping; push only to the personal fork;
    default-on policy; WIP/promotion rules; critical facts).
-2. `wip/rebase-2026-10/STATE.md` — the current checkpoint, hashes, what was decided, what is pending.
-3. `wip/rebase-2026-10/RUNG7-SURVEY.md` — the live conflict map for the step you are about to do, plus
+2. `archive/work/rebase-2026-10/STATE.md` — the current checkpoint, hashes, what was decided, what is pending.
+3. `archive/work/rebase-2026-10/RUNG7-SURVEY.md` — the live conflict map for the step you are about to do, plus
    the resolution plan.
-4. `wip/rebase-2026-10/DECISIONS.md` — the append-only conflict table for sessions so far (use the same
+4. `archive/work/rebase-2026-10/DECISIONS.md` — the append-only conflict table for sessions so far (use the same
    format; append, never edit old sections).
-5. `wip/rebase-2026-10/GOTCHAS.md` and `SURVEY-2026-10-24.md` — the collision inventory (what each
+5. `archive/work/rebase-2026-10/GOTCHAS.md` and `SURVEY-2026-10-24.md` — the collision inventory (what each
    remaining upstream commit does to which block).
 
 ## Hard rules (unchanged)
 
 * **Do not ship, tag, push or touch `release.json`, `patches/` or the delivery branch.**  The only repo
-  files you may change are `wip/rebase-2026-10/*`.  The final re-cut is a separate, maintainer-approved
+  files you may change are `archive/work/rebase-2026-10/*`.  The final re-cut is a separate, maintainer-approved
   session.
 * **Never push to upstream.**  The only permitted push target is `git@github.com:stew675/llama.cpp.git`
   and only at release time.

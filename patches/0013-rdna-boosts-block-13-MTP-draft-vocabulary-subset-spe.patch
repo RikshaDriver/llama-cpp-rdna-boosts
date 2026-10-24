@@ -1,4 +1,4 @@
-From 760ac6aaf26738925498896ed579d0ef02356b1b Mon Sep 17 00:00:00 2001
+From 0c28ef86c51e4e46c7f5631f1829dee0cc413468 Mon Sep 17 00:00:00 2001
 From: Stew Forster <ci@rdna-boosts.invalid>
 Date: Thu, 22 Oct 2026 05:53:08 -0500
 Subject: [PATCH 13/13] rdna-boosts: block 13: MTP draft vocabulary subset
@@ -64,10 +64,10 @@ Co-authored-by: Martino B <martino2k6@users.noreply.github.com>
  create mode 100644 tests/test-mtp-draft-vocab.cpp
 
 diff --git a/common/arg.cpp b/common/arg.cpp
-index 8b210305b..8f984658d 100644
+index 4c2e0fa63..5a3a44ff5 100644
 --- a/common/arg.cpp
 +++ b/common/arg.cpp
-@@ -4196,6 +4196,14 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
+@@ -4225,6 +4225,14 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
              params.speculative.draft.n_max = value;
          }
      ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_LOOKUP, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_DRAFT_N_MAX"));
@@ -83,10 +83,10 @@ index 8b210305b..8f984658d 100644
          {"--spec-draft-n-min"}, "N",
          string_format("minimum number of draft tokens to use for speculative decoding (default: %d)", params.speculative.draft.n_min),
 diff --git a/common/common.cpp b/common/common.cpp
-index 786099f9c..2210c7300 100644
+index 182ca82cd..13fcbb24f 100644
 --- a/common/common.cpp
 +++ b/common/common.cpp
-@@ -1279,7 +1279,8 @@ common_init_result::common_init_result(common_params & params, bool model_only,
+@@ -1290,7 +1290,8 @@ common_init_result::common_init_result(common_params & params, bool model_only,
          auto mparams_dft = common_model_params_to_llama(params_dft);
          auto cparams_dft = common_context_params_to_llama(params_dft);
          if (spec_mtp) {
@@ -97,10 +97,10 @@ index 786099f9c..2210c7300 100644
          cparams_dft.n_rs_seq = 0;
  
 diff --git a/common/common.h b/common/common.h
-index fe86bdb35..26d1c0e0f 100644
+index eef808c72..1c45ab40e 100644
 --- a/common/common.h
 +++ b/common/common.h
-@@ -359,6 +359,9 @@ struct common_params_speculative_draft {
+@@ -360,6 +360,9 @@ struct common_params_speculative_draft {
      bool cache_type_k_set = false;
      bool cache_type_v_set = false;
  
@@ -111,10 +111,10 @@ index fe86bdb35..26d1c0e0f 100644
      common_cpu_params cpuparams_batch;
  
 diff --git a/common/speculative.cpp b/common/speculative.cpp
-index d72f54296..9f7008a4d 100644
+index edc125b4e..69028e25a 100644
 --- a/common/speculative.cpp
 +++ b/common/speculative.cpp
-@@ -2921,7 +2921,8 @@ common_speculative_init_result::common_speculative_init_result(
+@@ -3025,7 +3025,8 @@ common_speculative_init_result::common_speculative_init_result(
      auto cparams = common_context_params_to_llama(params);
  
      if (spec_mtp) {
@@ -125,10 +125,10 @@ index d72f54296..9f7008a4d 100644
          // LLAMA_MTP_DRAFT_OP_OFFLOAD=0: keep the draft context's host-resident ops (e.g. the MTP
          // layer's experts under -otd exps=CPU) on the host instead of offloading them to the device
 diff --git a/ggml/src/ggml-backend-meta.cpp b/ggml/src/ggml-backend-meta.cpp
-index 60e5233e8..e76fb184a 100644
+index 3403902cc..4ac6055e7 100644
 --- a/ggml/src/ggml-backend-meta.cpp
 +++ b/ggml/src/ggml-backend-meta.cpp
-@@ -2248,6 +2248,59 @@ static void ggml_backend_meta_get_tensor_impl(ggml_backend_t backend, ggml_backe
+@@ -2249,6 +2249,59 @@ static void ggml_backend_meta_get_tensor_impl(ggml_backend_t backend, ggml_backe
      const ggml_backend_meta_split_state split_state = ggml_backend_meta_get_split_state(tensor, /*assume_sync =*/ false);
      GGML_ASSERT(ggml_is_contiguous(tensor) || split_state.axis == GGML_BACKEND_SPLIT_AXIS_MIRRORED);
  
@@ -189,7 +189,7 @@ index 60e5233e8..e76fb184a 100644
          GGML_ASSERT(split_state.axis >= 0 && split_state.axis < GGML_MAX_DIMS);
          GGML_ASSERT(split_state.nr[0] != 0);
 diff --git a/include/llama.h b/include/llama.h
-index dfb6acd01..93d6ff478 100644
+index b08013bd4..e992a835c 100644
 --- a/include/llama.h
 +++ b/include/llama.h
 @@ -402,6 +402,7 @@ extern "C" {
@@ -201,10 +201,10 @@ index dfb6acd01..93d6ff478 100644
          enum llama_context_type      ctx_type;          // set the context type (e.g. MTP)
          enum llama_rope_scaling_type rope_scaling_type; // RoPE scaling type, from `enum llama_rope_scaling_type`
 diff --git a/src/llama-context.cpp b/src/llama-context.cpp
-index 0dd35850f..c932a4961 100644
+index 205e0e53d..f94a8fd20 100644
 --- a/src/llama-context.cpp
 +++ b/src/llama-context.cpp
-@@ -798,6 +798,22 @@ llama_context::llama_context(
+@@ -808,6 +808,22 @@ llama_context::llama_context(
              }
          }
  
@@ -227,7 +227,7 @@ index 0dd35850f..c932a4961 100644
          sched_reserve();
  
          // wip/first-prefill-latency: reserve the wide prefill work region in the slab BEFORE the MoE
-@@ -3757,6 +3773,7 @@ llm_graph_params llama_context::graph_params(
+@@ -3779,6 +3795,7 @@ llm_graph_params llama_context::graph_params(
          /*.prec_policy =*/ &model.prec_policy,
          /*.hdmd        =*/ model.hdmd.rot.empty() ? nullptr : &model.hdmd,
          /*.samplers    =*/ sampling.samplers,
@@ -235,7 +235,7 @@ index 0dd35850f..c932a4961 100644
          /*.n_outputs   =*/ n_outputs,
          /*.cb          =*/ graph_get_cb(),
          /*.res         =*/ res,
-@@ -5228,6 +5245,7 @@ llama_context_params llama_context_default_params() {
+@@ -5250,6 +5267,7 @@ llama_context_params llama_context_default_params() {
          /*.n_outputs_max_per_seq       =*/ 1,
          /*.n_threads                   =*/ GGML_DEFAULT_N_THREADS, // TODO: better default
          /*.n_threads_batch             =*/ GGML_DEFAULT_N_THREADS,
@@ -244,7 +244,7 @@ index 0dd35850f..c932a4961 100644
          /*.rope_scaling_type           =*/ LLAMA_ROPE_SCALING_TYPE_UNSPECIFIED,
          /*.pooling_type                =*/ LLAMA_POOLING_TYPE_UNSPECIFIED,
 diff --git a/src/llama-context.h b/src/llama-context.h
-index 2881d2b1f..93b81173b 100644
+index 845ee8ce4..9b4421c45 100644
 --- a/src/llama-context.h
 +++ b/src/llama-context.h
 @@ -355,6 +355,9 @@ private:
@@ -258,7 +258,7 @@ index 2881d2b1f..93b81173b 100644
      llama_moe_cache_ptr moe_cache;
  
 diff --git a/src/llama-cparams.h b/src/llama-cparams.h
-index de2e648fd..37b12129a 100644
+index 4b3c7fcba..192fa9f97 100644
 --- a/src/llama-cparams.h
 +++ b/src/llama-cparams.h
 @@ -22,6 +22,8 @@ struct llama_cparams {
@@ -271,10 +271,10 @@ index de2e648fd..37b12129a 100644
      float rope_freq_scale;
  
 diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
-index 924ccbf5d..73cc44920 100644
+index 21f4c2578..643e2f56d 100644
 --- a/src/llama-graph.cpp
 +++ b/src/llama-graph.cpp
-@@ -1644,6 +1644,7 @@ llm_graph_context::llm_graph_context(const llm_graph_params & params) :
+@@ -1658,6 +1658,7 @@ llm_graph_context::llm_graph_context(const llm_graph_params & params) :
      prec_policy      (params.prec_policy),
      hdmd             (params.hdmd),
      samplers         (params.samplers),
@@ -283,10 +283,10 @@ index 924ccbf5d..73cc44920 100644
      res              (params.res),
      ctx0             (res->get_ctx()),
 diff --git a/src/llama-graph.h b/src/llama-graph.h
-index 76b0b7102..d26937bcf 100644
+index c2317fe60..735380a2a 100644
 --- a/src/llama-graph.h
 +++ b/src/llama-graph.h
-@@ -99,6 +99,7 @@ struct llama_cross {
+@@ -101,6 +101,7 @@ struct llama_cross {
  };
  
  struct llm_graph_params;
@@ -294,7 +294,7 @@ index 76b0b7102..d26937bcf 100644
  
  //
  // llm_graph_input
-@@ -846,6 +847,8 @@ struct llm_graph_params {
+@@ -851,6 +852,8 @@ struct llm_graph_params {
  
      std::map<llama_seq_id, llama_sampler *> samplers;
  
@@ -303,7 +303,7 @@ index 76b0b7102..d26937bcf 100644
      static bool samplers_equal(
            const std::map<llama_seq_id, llama_sampler *> & lhs,
            const std::map<llama_seq_id, llama_sampler *> & rhs) {
-@@ -940,6 +943,8 @@ struct llm_graph_params {
+@@ -945,6 +948,8 @@ struct llm_graph_params {
              cparams.embeddings_nextn        == other.cparams.embeddings_nextn        &&
              cparams.embeddings_nextn_masked == other.cparams.embeddings_nextn_masked &&
              cparams.causal_attn             == other.cparams.causal_attn             &&
@@ -312,7 +312,7 @@ index 76b0b7102..d26937bcf 100644
              arch  == other.arch  &&
              gtype == other.gtype &&
              cvec  == other.cvec  &&
-@@ -1111,6 +1116,8 @@ struct llm_graph_context {
+@@ -1121,6 +1126,8 @@ struct llm_graph_context {
  
      std::map<llama_seq_id, llama_sampler *> samplers;
  
@@ -322,7 +322,7 @@ index 76b0b7102..d26937bcf 100644
  
      llm_graph_result * res;
 diff --git a/src/llama-model.cpp b/src/llama-model.cpp
-index 71d464c20..bb3feba3f 100644
+index e453b2026..69ab8b75d 100644
 --- a/src/llama-model.cpp
 +++ b/src/llama-model.cpp
 @@ -23,6 +23,7 @@
@@ -341,7 +341,7 @@ index 71d464c20..bb3feba3f 100644
  #include <numeric>
  #include <regex>
  #include <sstream>
-@@ -1304,6 +1306,10 @@ struct llama_model::impl {
+@@ -1331,6 +1333,10 @@ struct llama_model::impl {
      bool has_tensor_overrides;
  
      std::vector<float> tensor_split_owned;
@@ -352,7 +352,7 @@ index 71d464c20..bb3feba3f 100644
  };
  
  bool llama_prec_policy::apply(ggml_tensor * res) const {
-@@ -2891,6 +2897,149 @@ const ggml_tensor * llama_model::get_tensor(const char * name_l) const {
+@@ -2929,6 +2935,149 @@ const ggml_tensor * llama_model::get_tensor(const char * name_l) const {
      return it->second;
  }
  
@@ -503,10 +503,10 @@ index 71d464c20..bb3feba3f 100644
      return hparams.is_swa(il) ? hparams.rope_freq_base_train_swa : cparams.rope_freq_base;
  }
 diff --git a/src/llama-model.h b/src/llama-model.h
-index b56921b28..7bba6859c 100644
+index 5f409bf15..e308f70b6 100644
 --- a/src/llama-model.h
 +++ b/src/llama-model.h
-@@ -680,6 +680,21 @@ struct llama_hadamard {
+@@ -709,6 +709,21 @@ struct llama_hadamard {
      llama_hadamard_rotations inv; // latent lookup table -> inverse transform
  };
  
@@ -528,7 +528,7 @@ index b56921b28..7bba6859c 100644
  struct llama_model {
      llm_type type = LLM_TYPE_UNKNOWN;
      llm_arch arch = LLM_ARCH_UNKNOWN;
-@@ -849,6 +864,12 @@ struct llama_model {
+@@ -913,6 +928,12 @@ struct llama_model {
  
      const struct ggml_tensor * get_tensor(const char * name) const;
  
@@ -542,7 +542,7 @@ index b56921b28..7bba6859c 100644
      float get_rope_freq_scale(const llama_cparams & cparams, int il) const;
  
 diff --git a/src/models/gemma4-assistant.cpp b/src/models/gemma4-assistant.cpp
-index 2b6560a88..52016fa1b 100644
+index cfca82e80..b8deda29e 100644
 --- a/src/models/gemma4-assistant.cpp
 +++ b/src/models/gemma4-assistant.cpp
 @@ -193,7 +193,21 @@ llama_model_gemma4_assistant::graph::graph(const llama_model & model, const llm_
@@ -569,10 +569,10 @@ index 2b6560a88..52016fa1b 100644
      res->t_logits = logits;
  
 diff --git a/src/models/qwen35.cpp b/src/models/qwen35.cpp
-index ecc02a112..1d9900bc8 100644
+index 8a4e43411..8dc00a6ff 100644
 --- a/src/models/qwen35.cpp
 +++ b/src/models/qwen35.cpp
-@@ -661,7 +661,18 @@ llama_model_qwen35::graph_mtp::graph_mtp(const llama_model & model, const llm_gr
+@@ -656,7 +656,18 @@ llama_model_qwen35::graph_mtp::graph_mtp(const llama_model & model, const llm_gr
      ggml_tensor * head_w = layer.nextn.shared_head_head ? layer.nextn.shared_head_head : model.output;
      ggml_tensor * head_s = layer.nextn.shared_head_head ? layer.nextn.shared_head_head_s : model.output_s;
      GGML_ASSERT(head_w && "QWEN35 MTP: missing LM head (nextn.shared_head_head or model.output)");
@@ -593,10 +593,10 @@ index ecc02a112..1d9900bc8 100644
  
      res->t_logits = cur;
 diff --git a/src/models/qwen35moe.cpp b/src/models/qwen35moe.cpp
-index 118deeb2a..e7f6bc6a8 100644
+index 939f10f7f..3d0d3688e 100644
 --- a/src/models/qwen35moe.cpp
 +++ b/src/models/qwen35moe.cpp
-@@ -734,7 +734,18 @@ llama_model_qwen35moe::graph_mtp::graph_mtp(const llama_model & model, const llm
+@@ -728,7 +728,18 @@ llama_model_qwen35moe::graph_mtp::graph_mtp(const llama_model & model, const llm
      ggml_tensor * head_w = layer.nextn.shared_head_head ? layer.nextn.shared_head_head : model.output;
      ggml_tensor * head_s = layer.nextn.shared_head_head ? layer.nextn.shared_head_head_s : model.output_s;
      GGML_ASSERT(head_w && "QWEN35MOE MTP: missing LM head (nextn.shared_head_head or model.output)");
@@ -617,10 +617,10 @@ index 118deeb2a..e7f6bc6a8 100644
  
      res->t_logits = cur;
 diff --git a/src/models/qwen4exp.cpp b/src/models/qwen4exp.cpp
-index cc8abd94d..d50a63f71 100644
+index 626c0f292..96a5d1200 100644
 --- a/src/models/qwen4exp.cpp
 +++ b/src/models/qwen4exp.cpp
-@@ -1312,7 +1312,22 @@ llama_model_qwen4exp::graph_mtp::graph_mtp(const llama_model & model, const llm_
+@@ -1326,7 +1326,22 @@ llama_model_qwen4exp::graph_mtp::graph_mtp(const llama_model & model, const llm_
          GGML_ASSERT(head_w && "QWEN4EXP MTP: the target model has no LM head to borrow");
      }
  
@@ -643,19 +643,19 @@ index cc8abd94d..d50a63f71 100644
 +    }
      cb(cur, "result_output", -1);
      res->t_logits = cur;
- 
+ }
 diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
-index a4f88b006..27a31157f 100644
+index 5095e1e90..ebe1fa178 100644
 --- a/tests/CMakeLists.txt
 +++ b/tests/CMakeLists.txt
-@@ -169,6 +169,7 @@ endif ()
- llama_build(test-recurrent-state-rollback.cpp)
+@@ -180,6 +180,7 @@ set(LLAMA_CONTEXT_TEST_SRC
+ llama_build(${LLAMA_CONTEXT_TEST_SRC})
  llama_build(test-recurrent-state-depth.cpp)
  llama_build(test-logits-width-probe.cpp)
 +llama_build(test-mtp-draft-vocab.cpp) # needs a qwen35/qwen35moe model with an MTP head: -m MODEL
  # multi-sequence gate/beta fusion regression (issue #204): no model needed, skips without a CUDA device
  llama_build_and_test(test-fusion-gate-beta-multiseq.cpp LINK ggml)
- llama_build(test-save-load-state.cpp)
+ 
 diff --git a/tests/test-mtp-draft-vocab.cpp b/tests/test-mtp-draft-vocab.cpp
 new file mode 100644
 index 000000000..ca514151a

@@ -1,6 +1,7 @@
 # The delivery patches — what each block is and what it does
 
-**14 blocks** (block 00 + blocks 01-13) against `release.json.base`, one `git am` commit each.  This file
+**14 blocks** (block 00 + blocks 01-13) against `release.json.base` (**`3f03b1772`** as of
+`v14-3f03b1772-r127`, the 2026-10-24 re-base), one `git am` commit each.  This file
 is the per-block reference: what a block contains, what it changes, the knobs its code reads and the
 purity notes that constrain it.  It is **not** a changelog — the release-by-release record is
 [`../WORKLOG.md`](../WORKLOG.md), the apply order and verification contract is
@@ -33,19 +34,19 @@ only as a rough shape.
 
 | # | patch | subject | +/− | files |
 |---|---|---|---|---|
-| 00 | `0000-…-block-00-foundation-band-uniformity-Meta` | foundation: band uniformity, Meta wrapper, allocator | +1250 / −1001 | 48 |
-| 01 | `0001-…-block-01-hybrid-HIP-all-reduce-RDNA4-gat` | hybrid HIP all-reduce | +2364 / −45 | 4 |
-| 02 | `0002-…-block-02-adaptive-MTP-draft-depth` | adaptive MTP draft depth | +1068 / −41 | 22 |
+| 00 | `0000-…-block-00-foundation-band-uniformity-Meta` | foundation: band uniformity, Meta wrapper, allocator | +1314 / −1000 | 54 |
+| 01 | `0001-…-block-01-hybrid-HIP-all-reduce-RDNA4-gat` | hybrid HIP all-reduce | +2365 / −44 | 4 |
+| 02 | `0002-…-block-02-adaptive-MTP-draft-depth` | adaptive MTP draft depth | +1186 / −54 | 24 |
 | 03 | `0003-…-block-03-chunked-gated-delta-net-prefill` | chunked GDN prefill + rollback tracker | +3182 / −15 | 22 |
 | 04 | `0004-…-block-04-BF16-KV-cache-and-native-BF16-f` | BF16 KV cache + native-BF16 FA | +630 / −214 | 8 |
-| 05 | `0005-…-block-05-flash-attention-band-native-qua` | FA band / native quantized K-V / derived kq mask | +5005 / −605 | 289 |
-| 06 | `0006-…-block-06-MMB-quantized-prefill-GEMM` | MMB quantized prefill GEMM | +2618 / −3 | 5 |
-| 07 | `0007-…-block-07-k-quant-boosts-mmvq-VDR-Q6_K-MM` | k-quant boosts (VDR, Q6_K MMQ, Q1_0, grid pad) | +884 / −140 | 9 |
-| 08 | `0008-…-block-08-fused-kernels-old-08-fusions-ol` | fused kernels + fused MoE | +5369 / −445 | 36 |
-| 09 | `0009-…-block-09-host-resident-MoE-iface-schedul` | host-resident MoE: iface, scheduler, cache, slab hooks (+ r120: the second draft scheduler's slot is per arch, DFlash2 fix) | +14702 / −534 | 65 |
-| 10 | `0010-…-block-10-slab-fusion-dispatcher-async-in` | slab + fusion dispatcher + async input ring (infrastructure) | +11794 / −4753 | 75 |
-| 11 | `0011-…-block-11-qwen4exp-model-hyper-connection` | qwen4exp model/QSA/HC/lazy reader/indexer cache | +11775 / −419 | 46 |
-| 12 | `0012-…-block-12-campaign-remainder-CPU-wins-bac` | campaign remainder (+ r106: Meta `ALL_GATHER`, DFlash2 `-sm tensor`, slab narrow-2; + r111/r112: `--host-experts pool` drops the pinned master; FRAC 80 + O_DIRECT defaults; + r119: batched state restore) | +2959 / −680 | 33 |
+| 05 | `0005-…-block-05-flash-attention-band-native-qua` | FA band / native quantized K-V / derived kq mask | +5032 / −609 | 289 |
+| 06 | `0006-…-block-06-MMB-quantized-prefill-GEMM` | MMB quantized prefill GEMM | +2877 / −3 | 7 |
+| 07 | `0007-…-block-07-k-quant-boosts-mmvq-VDR-Q6_K-MM` | k-quant boosts (VDR, Q6_K MMQ, Q1_0, grid pad) | +879 / −137 | 9 |
+| 08 | `0008-…-block-08-fused-kernels-old-08-fusions-ol` | fused kernels + fused MoE | +5424 / −440 | 35 |
+| 09 | `0009-…-block-09-host-resident-MoE-iface-schedul` | host-resident MoE: iface, scheduler, cache, slab hooks (+ r120: the second draft scheduler's slot is per arch, DFlash2 fix) | +14889 / −518 | 65 |
+| 10 | `0010-…-block-10-slab-fusion-dispatcher-async-in` | slab + fusion dispatcher + async input ring (infrastructure) | +12058 / −4870 | 75 |
+| 11 | `0011-…-block-11-qwen4exp-model-hyper-connection` | qwen4exp model/QSA/HC/lazy reader/indexer cache | +11776 / −433 | 46 |
+| 12 | `0012-…-block-12-campaign-remainder-CPU-wins-bac` | campaign remainder (+ r106: Meta `ALL_GATHER`, DFlash2 `-sm tensor`, slab narrow-2; + r111/r112: `--host-experts pool` drops the pinned master; FRAC 80 + O_DIRECT defaults; + r119: batched state restore) | +2939 / −722 | 33 |
 | 13 | `0013-…-block-13-MTP-draft-vocabulary-subset-spe` | MTP draft vocabulary subset (`--spec-draft-mtp-vocab N`, opt-in) | +569 / −6 | 19 |
 
 Block 05's file count is `template-instances/*.cu` (the FA kernel instantiations); block 10 is the
@@ -233,6 +234,15 @@ regression: **run `scripts/gate-prefill-logits.sh` on any change here.**
 
 **Gates.**  `test-backend-ops -o GATED_DELTA_NET`, `test-recurrent-state-depth`,
 `test-recurrent-state-rollback` (compare the per-arm FAIL/PASS *set*, never the count — it is per box).
+
+**This is the only chunked GDN kernel the delivery dispatches (r127, gfx1151 A/B).**  Upstream's
+`gated_delta_net_mma` kernel (in the re-base window, `62df1815b`) is *eligible* on RDNA3.5 at
+`n_tokens >= 2048` — qwen35's GDN layers have `H_k = ssm.group_count = 16`, which satisfies its
+`H_k == 16` / `H in {16,32,48,64}` gate — but our chunked branch returns first, so it only runs where
+our path stands down (`kda`, `S_v` outside `{16,32,64,128}`, or `GGML_CUDA_GDN_CHUNKED=0`).  Measured on
+gfx1151 (halo, r127 chain, qwen35 4B Q8_0, pp2048, interleaved): **ours 3232 t/s vs upstream's MMA
+3131 t/s (+3.2 %)**; prefill-logit A/B (qwen35 9B Q8_0, ctx512 x 40) **mean KLD 0.000074 / same-top-p
+99.637 %**.  Keep exactly one chunked kernel per device class: do not add a second.
 
 ---
 
@@ -965,6 +975,16 @@ slab/dispatcher/ring code of its own beyond the arms implemented in its own TUs.
 before changing the device gather or the head zero.
 
 ---
+
+**Notes for the 3f03b1772 re-base (r127).**  Upstream's fused QSA-mask op (`GGML_OP_TOP_K_MASK`, #30640)
+exists in the op tables next to this block's six ops (`FLASH_ATTN_QSA`, `INDEXER_TOPK/SCORE/FILL`,
+`HC_MIX`, `HC_COMBINE`) and `GGML_OP_COUNT` is **108** after this block (109 after block 12's
+`ALL_GATHER`).  qwen4exp does **not** use it: the QSA selection is still built in-kernel from the
+derived-visibility keys (`additive` + `run_top_k`, no mask tensor), which is why the -800 MiB win
+survives upstream's #30640/#30965 reworks.  The DFlash layer-input tap is upstream's
+`hc_stream_mean()` (v148 `d9ee007a0`) — it is the same collapse this block used to carry as
+`graph::build_hc_mean()` (TODO #94), so the delivery dropped its own copy; deepseek4 and glm5-next
+keep their `build_hc_mean`.
 
 ## Block 12 — campaign remainder
 
