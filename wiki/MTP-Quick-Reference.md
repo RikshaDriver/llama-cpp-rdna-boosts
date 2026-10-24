@@ -33,7 +33,7 @@ see **[MTP & Adaptive MTP](MTP-and-Adaptive-MTP)**.
 | `--spec-draft-n-start N` | `0` (→ `cap − 3`) | First verify round's depth, clamped to `[floor, cap]`. `0` keeps the default. |
 | `--spec-ngram-mod-n-match K` | `24` | ngram-mod minimum match length. Use **45** for the recall combo. |
 | `--spec-draft-p-min P` | — | Minimum draft probability; used by some server configs. |
-| `-ctkd` / `-ctvd TYPE` | **follows `-ctk` / `-ctv`** (r125) | The draft context's KV cache type. Leave it unset: it follows the main model's KV type, so `-ctk q4_0 -ctv q4_0` shrinks the draft's cache too (on a 27B at `-c 131072`: 512 MiB -> 144 MiB). Set it to pin the draft's own type (f16 included). Output is unchanged either way. Decode is neutral on the 27B/MoE payloads (the draft just uses the native quantized-KV FA arm) and costs ~3 % on a fast small model (4B Q8_0 3-GPU tensor, q8_0 KV: 239.8 -> 232.8 t/s); `-ctkd f16 -ctvd f16` restores the f16 draft. |
+| `-ctkd` / `-ctvd TYPE` | **follows `-ctk` / `-ctv`** (r125) | The draft context's KV cache type. Leave it unset: it follows the main model's KV type, so `-ctk q4_0 -ctv q4_0` shrinks the draft's cache too (on a 27B at `-c 131072`: 512 MiB -> 144 MiB). Set it to pin the draft's own type (f16 included). Output is unchanged either way. Decode is neutral on the 27B/MoE payloads and costs 1.5-3 % on a fast small model under `-sm tensor` (4B Q8_0 3-GPU tensor, q8_0 KV: 237.9 -> 234.3 t/s); `-ctkd f16 -ctvd f16` restores the f16 draft. |
 | `-lv 4` | off | Print the `draft acceptance` / `acc per pos` lines. |
 
 Environment equivalents exist for the server (e.g. `LLAMA_ARG_SPEC_DRAFT_N_START`).

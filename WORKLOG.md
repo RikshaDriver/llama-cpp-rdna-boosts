@@ -65,11 +65,22 @@ the MoE arm still prints the line.
 * **The change's cost, measured rather than assumed.**  At `-ctk q4_0 -c 102400 -n 3000` three alternating
   reps gave **80.8-80.9 (r124) vs 80.6-80.7 t/s (r125)** and at `-c 8192 -n 400` **56.4-56.6 vs 56.4-56.5**,
   i.e. neutral; an earlier 3-rep A/B that showed "-2 %" was run-order drift (the f16 arm always ran first),
-  which the repeat caught.  The cost is real but confined to a **fast small model**: 4B Q8_0, 3 GPU
-  `-sm tensor`, `-ctk q8_0 -ctv q8_0`, MTP n3 = **239.0 / 239.6 / 240.9 vs 232.7 / 233.0 / 232.7 t/s
-  (-2.9 %)** with identical text and acceptance, because the draft attends with 1-4 rows over a quantized
-  cache; `-ctkd f16 -ctvd f16` restores it (a small model is fast enough that nobody loses sleep over
-  2.9 %, and nobody running a 4B on three cards has a VRAM problem).
+  which the repeat caught.  The cost is real but confined to **one arm shape**: a *fast small model under
+  `-sm tensor`*.  4B Q8_0, 3 GPU tensor, `-ctk q8_0 -ctv q8_0`, MTP n3: **-1.5 %** (same binary, alternating
+  A/B: 237.7 / 236.1 / 240.0 t/s with `-ctkd f16 -ctvd f16` vs 232.0 / 237.2 / 233.7 with the q8_0 draft),
+  **-1.9 %** (r124 vs r125, three ordered pairs) and **-2.9 %** (the first three ordered pairs) -- call it
+  **1.5-3 %, mean ~2 %** -- with identical text and acceptance.  It is **not** "the FA kernel is slower": a
+  rocprofv3 kernel trace of both arms is identical in kernel names, counts and total GPU time (771.28 vs
+  771.00 ms over a 60-token run, delta -0.28 ms = -0.04 %), and `GGML_CUDA_DISABLE_GRAPHS=1` (-1.6 %) and
+  `LLAMA_DRAFT_SCHED2=0` do not change it.  What does change is the *graph composition*: the CUDA backend
+  evaluates **1536 more `MUL_MAT` nodes** and **390 fewer `SET_ROWS`** over 200 tokens (`GGML_CUDA_GCDBG`),
+  i.e. ~4 `MUL_MAT` per draft KV row write replaces 1 `SET_ROWS`, and that is per-step host work, which is
+  where a 4 ms/token model notices it.  Writing a quantized KV row needs an F32 `src0`
+  (`ggml-cuda.cu`'s `SET_ROWS` support list) while the f16 cache accepts f16, so the quantized draft pays
+  the conversion; the **target** pays it in both arms.  `-ctkd f16 -ctvd f16` restores the old behaviour,
+  and 1 GPU and `-sm layer` are neutral (-0.2 % / +0.1 %), so it is a tensor-split + fast-model tail.  A
+  small model is fast enough, and a 4B spread over three cards is not a VRAM-constrained user, so this
+  ships documented rather than fixed.
 * `scripts/gate-prefill-logits.sh` **PASS** (mean KLD 0.000000, same-top-p 100.000 %);
   `build-rocm/bin/test-arg-parser` OK.
 

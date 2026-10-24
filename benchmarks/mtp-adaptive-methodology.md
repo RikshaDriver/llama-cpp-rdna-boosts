@@ -139,9 +139,9 @@ result, and never edit a shipped prompt in place (see `prompts/README.md`).
 > comparable, but the draft's attention reads bf16 now and an f16 draft is one flag away
 > (`-ctkd f16 -ctvd f16`).  Any arm measured with a *quantized* main KV type gets a quantized draft cache
 > too; decode is neutral on the dense 27B (56.4-56.6 vs 56.4-56.5 t/s at `-c 8192 -n 400`, 80.8-80.9 vs
-> 80.6-80.7 t/s at `-c 102400 -n 3000`), so the arms stay comparable.  A fast small model is not neutral
-> (4B Q8_0 3-GPU tensor q8_0 KV: -2.9 %), so pin `-ctkd f16 -ctvd f16` when comparing small-model arms
-> across r125.
+> 80.6-80.7 t/s at `-c 102400 -n 3000`), so the arms stay comparable.  A fast small model under `-sm tensor`
+> is not neutral (4B Q8_0 3-GPU tensor q8_0 KV: 1.5-3 % slower), so pin `-ctkd f16 -ctvd f16` when
+> comparing small-model tensor-split arms across r125.
 
 The drafting model is the **MTP head built into the target GGUF** (`blk.<block_count-1>.nextn.*`,
 `*.nextn_predict_layers`), used automatically when no `-md` is passed.  Do not pass the old standalone

@@ -181,9 +181,12 @@ Decode is unchanged within noise where the delivery is tuned: three alternating 
 56.4-56.6 (f16) vs 56.4-56.5 t/s (q4_0) at `-c 8192 -n 400`, and 80.8-80.9 vs 80.6-80.7 t/s at
 `-c 102400 -n 3000` (protocol A scale), with `ROCBLAS_USE_HIPBLASLT=0`; the MoE arm is 190.4 vs 190.8 t/s.
 The quantized draft cache simply takes the native quantized-KV FA arm (block 05) instead of the f16 one.
-A **fast small model** does pay for it: 4B Q8_0, 3 GPU `-sm tensor`, `-ctk q8_0 -ctv q8_0`, MTP n3 =
-239.0/239.6/240.9 t/s (f16 draft KV) vs 232.7/233.0/232.7 (q8_0 draft KV), **-2.9 %**, with identical text;
-`-ctkd f16 -ctvd f16` restores the f16 draft there.  A `-ctk`
+A **fast small model under `-sm tensor`** does pay for it: 4B Q8_0, 3 GPU tensor, `-ctk q8_0 -ctv q8_0`,
+MTP n3 = 237.7/236.1/240.0 t/s (f16 draft KV) vs 232.0/237.2/233.7 (q8_0 draft KV), **1.5-3 % (mean ~2 %)**,
+with identical text.  It is not kernel work -- a rocprofv3 trace of both arms is identical (-0.04 %) --
+but graph composition: a quantized KV row needs an F32 `src0` for `SET_ROWS`, so ~4 `MUL_MAT` node
+evaluations replace 1 `SET_ROWS` per draft KV write, which is per-step host time.  1 GPU and `-sm layer`
+are neutral, and `-ctkd f16 -ctvd f16` restores the f16 draft there.  A `-ctk`
 left at f16 changes nothing.  Measured with `llama-cli -c 8192 -ub 1024` and with
 the draft KV size read back from the loader (`llama_kv_cache: size = ... 1 layers ... K (q4_0)`) on both
 the dense 27B and the 35B-A3B host-expert arm.
