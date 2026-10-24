@@ -1,6 +1,6 @@
 Session: 1 (continued)    Date: 2026-10-24
 Delivery: old base 097cf33d9, chain r126 (tip 760ac6aaf, tree 6abcc1a92)
-Checkpoint: base 33d6135cb    chain tip e4a863a61    tree 1b5f20f202a43818308b414d969981db47bda3b3
+Checkpoint: base 13786fbb3    chain tip bb4825231    tree b4164f5f38ffdc40d5872690b5df57de9e8fc757
 Blocks applied: 00..13 (all 14; no renumbering, no block merged)
 Build: ok — `~/llama-rebase/build-rocm` (ROCm 10.1.0, `~/bin/build-llama-rocm`), 0 errors
 Coherence:
@@ -11,6 +11,8 @@ Coherence:
     gate measures mean KLD 0.000657 / same-top-p 98.755 % against the r126 base (PASS, limits
     0.005 / 98 %), i.e. a rounding-level move, and greedy diverges at a near-tie later in the
     stream.  plain == mtp holds on both sides of the change.
+  * rung 6 (base 13786fbb3) re-checked: plain == draft-mtp, 850 chars sha=0cd2d424a564;
+    prefill-logit identical (0.000657 / 98.755 %); FLASH_ATTN_EXT 6402/6402; GATED_DELTA_NET 55/55
   * rung 5 (base 33d6135cb) re-checked: plain == draft-mtp, 850 chars sha=0cd2d424a564;
     prefill-logit identical (0.000657 / 98.755 %); GATED_DELTA_NET 55/55; FLASH_ATTN_EXT log
     /tmp/fa-r5.log
@@ -26,8 +28,10 @@ Op tests: GATED_DELTA_NET 55/55; FLASH_ATTN_EXT run at this rung (log: /tmp/fa-r
 Band gate (llama-batched-bench -npl 1,4,8, 27B UD-Q4_K_XL 3 GPU tensor, 512/128):
   rung 3 pp 1589/1781/1823, tg 47.7/144.1/230.7  vs  r126 pp 1609/1791/1814, tg 47.7/143.0/230.4
   -> equal within noise (one first-run pp anomaly of 1151 t/s did not reproduce)
-Next rung: 13786fbb3 (ssm_conv 7 #30873, mmf tile widths #30836, graph flush #26771)
-Next action: `cd ~/llama-rebase && git rebase --onto 13786fbb3 33d6135cb rebase-work`
+Next rung: d454a204e (QSA mask op #30640, qwen4exp layer inputs #30927, MoE down-proj #30861)
+Next action: `cd ~/llama-rebase && git rebase --onto d454a204e 13786fbb3 rebase-work`  (expect the
+  heaviest block-11 collision of the campaign: upstream reworks the QSA mask into a fused op while the
+delivery's QSA path is the derived-visibility design; keep the QSA CPU oracle green)
 
 Where the work lives (NOT in the delivery repo — see the campaign rules):
   * worktree/branch: `~/llama-rebase`, branch `rebase-work`, 14 block commits
