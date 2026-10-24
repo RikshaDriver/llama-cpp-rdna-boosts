@@ -58,3 +58,59 @@ and a new `WORKLOG.md` entry.
   `HEAD^{tree} == release.json.tree` → build + gates there → `git push --force-with-lease origin
   rdna-boosts`.  The permitted target is `git@github.com:stew675/llama.cpp.git` only.
 * ccache: `ccache --max-size=30G` before `gate-per-block-build.sh`, or block 05 thrashes (45 min vs ~7).
+
+## 4. Session-2 lessons (rungs 7-9, and the ship)
+
+**Per-block build gate — run it, it earns its keep.** With a 30 GiB ccache a block costs ~1.5 min
+(early blocks) to ~7 min (FA-heavy blocks 05-12) on this box; the whole 14-block ladder is ~50 min:
+
+```sh
+cd ~/llama-cpp-rdna-boosts
+./scripts/gate-per-block-build.sh --repo ~/llama-rebase --base 3f03b1772 \
+    --tip "$(git -C ~/llama-rebase rev-parse rebase-work)" --keep-going
+```
+
+It found three real defects that a tip-only build cannot see: block 08 used
+`ggml_cuda_topk_moe_fusion_disabled()` that only block 10 defined, block 09 carried a stray `}`, and every
+block carried `ml.` where the delivery renamed the loader parameter to `ml_l`.  **Scanning the tip tree is
+not enough** — a block's own tree is what `make-patches.sh` ships.
+
+**`ml` vs `ml_l` (the rename churn).** Upstream commits that land *inside* the re-base window (and so
+arrive through the base, not through a block) write `ml.` in functions the delivery renamed to `ml_l`
+(`llama_model_base::load_hparams`, `load_tensors`).  Symptom: `member reference type
+'llama_model_loader *' is a pointer` at *some* block, not at the tip.  `grep -n '\bml\.' src/llama-model.cpp`
+and check each hit is a function that really takes a parameter called `ml`.
+
+**Chunked CUDA graphs (rung 8, #30804).** `ggml_cuda_graph` has no `graph`/`instance` members any more:
+`graph->instances` is a vector of per-chunk `cudaGraphExec_t`, and the capture is ended *inside*
+`ggml_cuda_graph_launch_chunk()`.  Anything that used to run "right before `cudaStreamEndCapture`" (our
+WIP AR-stage hook) now goes **before the last `ggml_cuda_graph_launch_chunk()` call**.  Our HIP
+`hipGraphExecUpdate` leak workaround lives inside upstream's new
+`ggml_cuda_graph_update_executable(cudaGraphExec_t &, cudaGraph_t)` signature, i.e. it now destroys and
+re-instantiates one *chunk* per recapture.
+
+**qwen4exp + MTP needs `-md`.** A Flash-Next GGUF has no `nextn` tensors, so `--spec-type draft-mtp`
+without `-md` fails with `failed to create MTP context` (expected, not a regression).  The standalone
+`mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf` (halo: in the model dir; this box:
+`/llm/models/Qwen3.8/Flash-Next/IQ4_NL/`) works: acceptance 0.53, +48 % decode, text byte-identical to
+plain.  Use `--load-mode none --lazy-mode off` for Flash-Next timing runs (PLE preloaded into RAM; the
+mapped arm is text-identical, so the load mode is numerically transparent).
+
+**`llama-batched-bench` first-run pp anomaly.** The first run after a model load can report B=1 pp ~20 %
+low (1283 vs 1608 t/s here, and a 1151 t/s outlier in session 1).  Always run the band gate twice and quote
+the second run.
+
+**halo = gfx1151 (RDNA3.5).** `ssh halo`, `~/llama.cpp` (branch `rdna-boosts`, r126 build in
+`build-rocm`), ROCm 10.1.0 at `/opt/rocm-10.1.0-gfx1151`, `~/bin/build-llama-rocm` is the gfx1151 script
+(**use `BUILD_DIR=build-r9`-style overrides — `build-rocm` is the live server build**).  Transfer a chain
+with `git bundle create /tmp/b 3f03b1772..rebase-work` + `git fetch /tmp/b …` (the base commit is already
+in halo's repo).  Recorded gfx1151 gates: GDN ours-vs-MMA KLD 0.000108 / 99.676 %
+(`prefill-logit-gfx1151-Qwen3.5-9B-Q8_0.kld`), QSA sparse-vs-dense PPL 2.2320/2.2366, Flash-Next
+plain==draft-mtp sha 201502207fcb, `FLASH_ATTN_QSA` 26/26, `GATED_DELTA_NET` 48/48, `FLASH_ATTN_EXT`
+6391/6391.  GDN A/B: `GGML_CUDA_GDN_CHUNKED=0` is the upstream-MMA arm on gfx1151 (ours preempts it
+otherwise) — interleave the arms, the APU's clocks drift within a run block.
+
+**Cross-device-count greedy text on a DENSE tensor split is NOT identical** (contrary to the AGENTS
+`§45` summary): Qwen3.8-27B UD-Q4_K_XL, prose prompt, seed 42 → 3 GPU 850 chars / 2 GPU 876 chars, and
+r126 shows the same (897 vs 855).  Within one device count `plain == draft-mtp` holds.  Gate a build
+change within a device count.

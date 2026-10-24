@@ -1,7 +1,10 @@
 # rebase-2026-10 — re-cut the 14-block set onto `3f03b1772`
 
-**Status: OPEN (campaign, 2026-10-24).  Documentation only — no rebase was performed, no branch was
-touched, nothing here is part of the delivery.**
+**Status: the RE-BASE IS DONE (session 2, 2026-10-24) — only the SHIP remains, and that is a separate,
+maintainer-approved session.**  The chain is complete at base `3f03b1772`: 14 blocks, tip `cd2c8f488`,
+tree `f46264b1...`, per-block build gate 14/14, all rung gates green (see `STATE.md`).  Nothing has been
+tagged, pushed or written to `release.json` / `patches/` — this directory is still campaign documentation
+only.
 
 This is the handover a fresh session should start from.  **Paste
 [`KICKOFF-PROMPT.md`](KICKOFF-PROMPT.md) into the new session**; it is the self-contained task brief

@@ -1,5 +1,11 @@
 # Rung 7 (`d454a204e`) conflict survey — captured live, no resolution attempted
 
+> **RESOLVED in session 2 (2026-10-24).**  All 13 hunks were resolved as the plan section describes
+> (op-table unions, the op count recomputed to 108 at block 11, `qwen4exp.cpp` kept as CORDON = the
+> delivery's derived-visibility design).  The chain went on to rungs 8 and 9 and is now final at
+> `cd2c8f488` / base `3f03b1772`.  The actual decisions and evidence are in `DECISIONS.md` (session 2,
+> rung 7) and the checkpoint summary in `STATE.md`.  This file is kept as the dated survey it was.
+
 
 ## `ggml/include/ggml-rpc.h` — 1 hunk(s)
 

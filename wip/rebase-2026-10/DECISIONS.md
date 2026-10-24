@@ -88,3 +88,74 @@ Chain tip `632a8a568`, tree `8c092e6a8b17812404c151578feea1e333399be4`.
 | 09 | `13786fbb3` CUDA: clear CUDA graphs after legacy memory pool flush (#26771) | INTEGRATE | union: upstream's `invalidate_cuda_graphs()` after `clear_pool()`/`cudaFree` in the pool, and upstream's `new_pool_for_device(ctx, device, stream_no)` signature, with our slab wide-phase members (`wide_routing`, `wide_blocks`, `set_wide_routing`) and our `g_pool_mapped` accounting kept | build green; coherence/prefill-logit/op tests unchanged from rung 5 | the r25 rule still holds: `graph_mem_freed()` on every slab shrink — a new invalidation path does not replace it |
 | 09/10 | `c9805e3...` bf16 src1 cache (upstream, in the same struct) | INTEGRATE | kept both the `bf16_src1_cache` member block and upstream's `new_pool_for_device` signature | build green | qwen4exp HC gates at rung 7 |
 | 11 | `13786fbb3`/`b68449857` mmf tile widths + the `test-backend-ops` get_rows case list | INTEGRATE | union in `tests/test-backend-ops.cpp`: upstream's `test_get_rows_after_mul_mat` loop and our IQ4_NL sub-block row-width cases (the qwen4exp indexer key row is 128) | build green; test-backend-ops compiled | — |
+
+## Session 2 (2026-10-24) — rung 7, checkpoint `1425a07fc`
+
+Base `13786fbb3` → `d454a204e`.  13 conflict hunks over 7 files (block 05: 2, block 09: 1, block 11: 10).
+Build errors: op-count asserts (108), a missing `return result; }` in the `ggml_top_k_mask()` union, and
+`ml.get_arr(LLM_KV_DECISION_LABELS)` (`ml` is a pointer in our `ml_l`-renamed function).
+
+| block | upstream | class | decision | evidence | follow-up |
+|---|---|---|---|---|---|
+| 05 | `d454a204e` QSA mask fused op (#30640) adds `llm_fused_op_top_k_mask_probe` + `LLM_FUSED_OP_TOP_K_MASK` in `llama-context.cpp`; ours adds `llm_fused_op_kq_derived_probe` + the kq-derived helpers at the same anchor | INTEGRATE (union) | kept both probe tables and both helper blocks; both `resolve()` calls live (upstream's `fused_top_k_mask`, ours `kq_mask_derived`) | `test-backend-ops -o TOP_K_MASK` 28/28 and `FLASH_ATTN_QSA` 26/26 on gfx1201 | — |
+| 05 | `llama-graph.h` `llm_graph_amax_src1` (upstream) vs our `llm_graph_kq_derived` struct, same anchor | INTEGRATE | union of both structs (the conflict shared one closing brace, so it needed a manual merge, not `both`) | build green | — |
+| 09 | `llama-cparams.h`: upstream's `fused_top_k_mask`/`auto_ftkm` vs our `fused_hc_mix`/`fused_hc_combine` | INTEGRATE | union, keep both flag pairs | build green; qwen4exp HC gates green | — |
+| 11 | `ggml.h`/`ggml.c`/`ggml-cpu.c`/`ggml-cpu/ops.h`/`ggml-rpc.h` op tables: upstream's `GGML_OP_TOP_K_MASK` vs our 6 qwen4exp ops (`FLASH_ATTN_QSA`, `INDEXER_TOPK/SCORE/FILL`, `HC_MIX`, `HC_COMBINE`) | INTEGRATE (union) | unioned every table; enum order = upstream's op first, then ours (must match `GGML_OP_NAME`/`GGML_OP_SYMBOL`) | build green; `--list-ops` shows both families | — |
+| 11 | op-count `static_assert`s | INTEGRATE (recomputed) | block 11 = **108** (`GGML_OP_COUNT != 108` — the old chain's 107-vs-108 message typo is gone), block 12 = **109** after its `ALL_GATHER`; `RPC_PROTO_PATCH_VERSION` keeps the delivery's numbering (7, then 8 at block 12) | counted the enum: 102 at the new base + 6 (block 11) + 1 (block 12) | final session: re-check the count against `--list-ops` after any further base move |
+| 11 | `src/models/qwen4exp.cpp`: upstream builds the QSA selection through the fused `TOP_K_MASK` op (`keep`/`pool_idxs`/`tail_idxs`); ours derives visibility in-kernel (`additive` + `run_top_k`, no mask tensor) | **CORDON (ours)** | kept our derived-visibility selection verbatim; upstream's branch and the whole `sel_idx`/`sel` mask scatter are dropped (its op stays available and is used by deepseek4/glm5-next only) | Flash-Next GSQ greedy text byte-identical to rung 6/7 (243 chars sha e792bee1d6f0); `test-llama-archs -a qwen4exp` 5/5; sparse-vs-dense QSA PPL 2.2320/2.2366 | upstream's rung-8 `5c3114268` also removes the kq_mask from qwen4exp — re-decide then (it converged toward our design) |
+| 11 | `tests/test-backend-ops.cpp` get_rows anchor | INTEGRATE | union: upstream's `test_mul_mat_reorder_then_big_batch` loop + our IQ4_NL sub-block rows (needs its own closing brace) | test compiles, all op runs green | — |
+
+Session-2 mechanics: the block-07 commit itself carried conflict markers (they were committed inside it
+during rung 3), so "no markers in the tree" is not a rebase invariant — scan every block tree, not just
+the tip.
+
+## Session 2 (2026-10-24) — rung 8, checkpoint `d8cf28e2c`
+
+Base `d454a204e` → `280141e6d` (chunked CUDA graphs #30804, bf16 WMMA #30885, DP4A MMQ #30837, plus 22
+other commits).  Conflicts: block 00 (`llama-graph.cpp`), 01 (`ggml-cuda.cu` graph capture), 02
+(`tests/CMakeLists.txt`), 09 (`ggml_cuda_graph_update_executable`), 10 (mem_gen recapture),
+11 (`hc_stream_mean` vs our `build_hc_mean`).
+
+| block | upstream | class | decision | evidence | follow-up |
+|---|---|---|---|---|---|
+| 00 | `d9ee007a0`/`5c19a5a75` made `build_lora_mm`/`_id` keep the primal `cur` for the LoRA delta and use `cur_mm` (Hadamard-folded) only for the weight matmul | INTEGRATE | adopted upstream's `cur_mm` split and kept our `res_l` naming (the rest of the merged function uses it) | build green; band gate unchanged; greedy text unchanged | the `res_l` rename is pure churn — propose dropping it (carried from session 1) |
+| 01 | `280141e6d` chunks the graph (`ggml_cuda_graph_launch_chunk`, `graph->instances`), removing `graph->graph`/`graph->instance` | INTEGRATE | our WIP AR-stage hook now runs **before the last chunk's** `ggml_cuda_graph_launch_chunk()` (so it lands inside the last chunk, which is what the hook wants), and upstream's leftover-chunk drop follows | 3-GPU MTP decode 84.2/84.8 t/s vs 79.8 at rung 7 (+5.5 %, the r115 graph-churn direction); plain flat | the hook is a no-op unless the fused-stage path registers one |
+| 02 | `tests/CMakeLists.txt`: upstream's `LABEL behavior` on arg-parser/model-resolution | INTEGRATE | union with our `test-speculative-adaptive.cpp` line | build green | — |
+| 09/10 | `ggml_cuda_graph_update_executable` gained upstream's `(cudaGraphExec_t &, cudaGraph_t)` signature; ours was the HIP `hipGraphExecUpdate` leak workaround (`GGML_HIP_GRAPH_FORCE_UPDATE`) | INTEGRATE | kept the HIP destroy-and-reinstantiate workaround inside upstream's new signature (it now applies per chunk instance); block 10's recapture condition uses `graph->instances.empty()` + our `mem_gen` check | build green; coherence/prefill-logit/op tests unchanged | the workaround now runs once per *chunk* on a recapture — cheap, but note it if chunk counts grow |
+| 11 | `d9ee007a0` adds `hc_stream_mean()` to qwen4exp for the DFlash layer-input tap — the same collapse as our `build_hc_mean()` (TODO #94) | **SUBSUMES** | adopted upstream's static `hc_stream_mean(ctx, x)` and **deleted** our `llama_model_qwen4exp::graph::build_hc_mean` (declaration + definition); the delivery's gating comment stays | the two helpers build the identical node list (one `view_2d` per stream, `add`, `scale 1/hc`), so numerics are unchanged: Flash-Next greedy text byte-identical (sha e792bee1d6f0) and `-n 200` decode 58.0/106.7 t/s | AGENTS' "the tap is `graph::build_hc_mean()`" sentence becomes stale — update it in the ship session (deepseek4/glm5-next keep their own `build_hc_mean`) |
+
+## Session 2 (2026-10-24) — rung 9, checkpoint `cd2c8f488` (the final base)
+
+Base `280141e6d` → `3f03b1772` (25 commits: qwen4exp QSA without kq_mask #30965, bf16 WMMA operand type
+#30885, DP4A MMQ #30837, `-sm tensor` deny for amax-rescaling arches #31081, MUL_MAT_ID -1 skip #26631,
+Metal amax rescale removal #30924, ...).  Conflicts: block 05 (`llama-graph.cpp` mask fill), block 11
+(qwen4exp, 3 hunks), and the rung-8 fixup (`invalidate_cuda_graphs` count).
+
+| block | upstream | class | decision | evidence | follow-up |
+|---|---|---|---|---|---|
+| 05 | `3f03b1772` era: `llm_graph_input_mem_hybrid::set_input` guards the mask on `self_kq_mask->buffer` (upstream) vs our null-safe `self_kq_mask && ...->buffer` | CORDON (ours) | kept the null guard (superset: our derived path can leave the mask pointer null, upstream's does not) | build green; all mask-using arches pass `test-llama-archs` | — |
+| 09 | `invalidate_cuda_graphs()` count: upstream `graph->instances.size()` vs our `!empty()` | SUBSUMES | took upstream's (a debug counter only; it counts chunks, not graphs) | build green | — |
+| 11 | `5c3114268` qwen4exp "build the QSA selection without the kq_mask": upstream keeps its `fused_top_k_mask`+`sel` mask path (now with a `keep` tensor); ours returns `top_k` straight from `run_top_k` | **CORDON (ours)** | kept ours in all three hunks (`sel`/`inp_kpool`/`build_fused_top_k_mask` gone from qwen4exp), same as rung 7 | `test-llama-archs -a qwen4exp` 5/5 (NMSE 4.63e-14 GPU / 2.94e-12 Meta); Flash-Next greedy text byte-identical to rung 7; `FLASH_ATTN_QSA` 26/26 | upstream and the delivery now agree on the *goal* (no kq_mask) but not the mechanism; a future upstream change may make ours redundant — re-check at the next re-base |
+| 09 (fold) | — | INTEGRATE | the rung-9 per-block build gate caught a stray `}` in `llama_model_get_tok_embd_rows` (block 09) left by the rung-2 concatenation | block 09 now builds standalone | — |
+| 08 (fold) | — | INTEGRATE | block 08 used `ggml_cuda_topk_moe_fusion_disabled()` but only block 10 defined it in the moved TU -> block 08 (and 09) did not build.  Defined it in block 08's `ggml-cuda.cu` next to the topk-MoE matcher; block 10's move deletes it from there and keeps the copy in `ggml-cuda-try-fuse.cu` | 14/14 per-block builds | — |
+
+## Session 2 (2026-10-24) — the per-block tree-attribution fold
+
+The four fixup commits (`rung-3 build fixes` a2c81dc0d, `rung-5 fix` 152bacabc, `rung-7 build fixes`
+84af4fda5, `rung-8 build fixes` 7e54e6eb4) were folded into the owning blocks with
+`git rebase -i` + `edit`/`drop` and `git apply -3` of each fixup's per-file hunks, then dropped:
+
+* block 00: `ml_l.get_arr(LLM_KV_DECISION_LABELS)`, `!ml_l.no_alloc` (both were build errors in EVERY block
+  tree, since upstream's line arrived with the base);
+* block 07: the `mmq-load-tiles.cuh` marker removal + the `vdr2` Q6_K impl re-add;
+* block 08: `norm.cu` dst16 brace + the `ggml_cuda_op_rms_norm_q8_1` fallback arg bug (`src0_d, mul_d` ->
+  `src0, weight`), and the `ggml_cuda_topk_moe_fusion_disabled()` definition;
+* block 09: the stray `}`;
+* block 10: the moved-dispatcher helper + the rung-5 dedup of `ggml-cuda-try-fuse.cu`;
+* block 11: `GGML_OP_COUNT == 108`, the `ggml_top_k_mask()` function close, the rpc assert;
+* block 12: `GGML_OP_COUNT == 109` and the rpc assert.
+
+Verification: the folded tip TREE is byte-identical to the pre-fold tip tree
+(`f46264b1fe565a016940e6fc7858cf50e3b11a9d`), and `scripts/gate-per-block-build.sh` reports **14/14
+built**.  Backup of the pre-fold chain: branch `fold-backup` (7e54e6eb4); `rebase-ckpt-7/8` are the
+pre-fold rungs.
