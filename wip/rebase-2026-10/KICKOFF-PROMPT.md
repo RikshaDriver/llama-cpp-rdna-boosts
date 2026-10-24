@@ -6,6 +6,11 @@ fork `master`, which is now current upstream (`3f03b1772`, 2026-10-24; 261 commi
 This is a multi-session job. Do **not** try to finish it in one session: this file defines the loop, and
 each session ends at a validated checkpoint.
 
+The repo at ~/llama.cpp/ is based from https://github.com/stew675/llama.cpp/ which has just been re-synced
+against upstream.  We generally build with ~/bin/build-llama-rocm
+
+We have various models for testing in sub-directories under /llm/models/
+
 ## Read first, in this order
 
 1. `AGENTS.md` (report findings before shipping; push policy; default-on policy; WIP/promotion rules;
