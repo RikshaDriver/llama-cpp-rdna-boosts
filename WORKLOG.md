@@ -35,6 +35,16 @@ plain **81.0 t/s**, `draft-mtp` **171.2 t/s** (2.11x), acceptance **0.73881**, m
 r123.  Only the Linux build was run here; the Windows compile is the reporter's, against the diff that
 ships.
 
+**Shipped.**  `v14-097cf33d9-r124` tagged and pushed (tag message references issue #217); the fork branch
+`rdna-boosts` was refreshed from the amended chain at `release.json.base` (strict 14/14, tree
+`221bc7dda4`, tip `355417a72`, built and gated there) and force-pushed `ef13b805d...355417a72` to the
+personal fork.  CI on the tag: **Validate delivery set** green (21 s) and **Release patch set** green
+(14 s), GitHub Release assets `patches.tar.gz` / `rdna-boosts-all.patch` / `release.json` /
+`SHA256SUMS` published.  Container images are built/pushed off-host by the `radiance` watcher.  Docs:
+`patches/README.md` (block 09 bullet + the "any new int64_t min/max must use the helpers" rule),
+`MANIFESTS.md` (block 09 verification gains the grep), `AGENTS.md` (critical fact), TODO **#95** (the other
+HIP TUs, accepted limitation).
+
 ## 261024.003 (no release) -- TODO #80 retired: the Meta split-state lookup-count headroom sits below the delivery's re-allocation rate
 
 **No source change, no release.**  `TODO.md` **#80** ("Meta split-state cache: 30+ lookups per node per
