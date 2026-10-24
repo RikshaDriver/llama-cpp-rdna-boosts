@@ -41,18 +41,26 @@ report band 0 and are never clamped (verified: 380.2 and 68.1 t/s, no clamp line
 **Gates.**  Text purity with `ROCBLAS_USE_HIPBLASLT=0` (`GREEDY-PURITY.md` §44, and the reason the first
 cross-run comparison looked like a text change): on the host-expert cell `plain` / `draft-mtp n3` /
 ngram hand-capped at 15 / ngram **auto**-clamped all hash **`9d914f47aebb`** (1793 chars), identical to the
-pre-amend build; the arm without the env var differs run-to-run as documented.  No prefill kernel or
-default-on approximate path is touched, so the prefill-logit gate does not apply; the MTP controller path is
-untouched by construction (the clamp only fires for an enabled n-gram type, and the MTP-only arms log no
-clamp).  `GREEDY-PURITY.md` §50 added; `README.md` recommended-configuration rewritten;
+pre-amend build; the arm without the env var differs run-to-run as documented.  The same three hashes are
+reproduced by the release build re-cut from `patches/`.  No prefill kernel or default-on approximate path is
+touched (the gate was still run for the release: PASS, KLD 0.000000); the MTP controller path is untouched by
+construction (the clamp only fires for an enabled n-gram type, and the MTP-only arms log no clamp).  `GREEDY-PURITY.md` §50 added; `README.md` recommended-configuration rewritten;
 `ENVIRONMENT.md` §3 catalogues the kill switch; `patches/README.md` (block 09) updated.
 
 **Campaign.**  `archive/work/ngram-mod-host-experts/` (README, evidence tables, the `run-arm.sh` harness and
 its logs).  TODO **#59 closed**.  Upstream (CPU-compute host experts) has no such cliff, so no `upstream/`
 candidate.
 
-**Pending:** the personal-fork `rdna-boosts` branch refresh, the tag and the container images (the
-release-time steps) are **not** done yet.
+**Shipped.**  `v14-097cf33d9-r123` tagged and pushed (tag message references issue #214); the fork branch
+`rdna-boosts` was refreshed from the set in a clean `~/llama.cpp` (strict 14/14 `git am`, tree
+`e91b266d4`, tip `ef13b805d`, built and coherence-checked there) and force-pushed
+`960c1ddc6...ef13b805d` to the personal fork.  CI on the tag: **Validate delivery set** green (21 s) and
+**Release patch set** green (13 s), GitHub Release assets `patches.tar.gz` / `rdna-boosts-all.patch` /
+`release.json` / `SHA256SUMS` published.  Container images are built/pushed off-host by the `radiance`
+watcher.  Protocol A MTP on the MoE 35B-A3B (UD Q4_K_M, 1 GPU, prose, `--reasoning off`, `-n 3000`):
+plain **81.9 t/s**, `draft-mtp` **170.8-171.3 t/s** (2.09x), acceptance **0.73881**, mean len 3.22 —
+identical acceptance to r122.  `scripts/gate-prefill-logits.sh` **PASS** (mean KLD 0.000000, same-top-p
+100.000 %).
 
 
 ## 261024.001 (r122) -- the loader honours `--lazy-mode off` under `--load-mode mmap`, and the `-sm tensor` load uses the chunked async ring (block 00); 4 MiB staging slots
