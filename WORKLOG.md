@@ -62,11 +62,14 @@ faster than upstream at every depth and is unchanged by this row (it is prefill-
 * No prefill kernel *family* change beyond the config row; `gate-prefill-logits.sh` is the instrument for it
   and both points are green.
 
-**Shipped.**  `v14-097cf33d9-r126` tagged and pushed; the delivery commit carries `release.json`
-(`760ac6aaf` / `6abcc1a92`) and the regenerated 14 blocks + `rdna-boosts-all.patch`.  The fork branch
-`rdna-boosts` is refreshed from the set in a clean checkout at `097cf33d9` (strict 14/14, tree
-`6abcc1a92`) and force-pushed to the personal fork; container images are built/pushed off-host by the
-`radiance` watcher.  See the `Shipped` lines of the tag/CI run for the exact SHAs.
+**Shipped.**  `v14-097cf33d9-r126` tagged and pushed (delivery `main` `d6d14532`, tag
+`v14-097cf33d9-r126`; CI green: **Validate delivery set** 24 s run `40110819859`, **Release patch set**
+15 s run `40110819906`).  The fork branch `rdna-boosts` was refreshed in a **clean clone of the personal
+fork at `097cf33d9`** with `scripts/apply-all.sh` (strict 14/14, 14 commits, `HEAD^{tree} ==
+6abcc1a92...`) and force-pushed `55d421582...890cdea8c` to `github.com:stew675/llama.cpp` (personal fork
+only); container images are built/pushed off-host by the `radiance` watcher.  The build that produced every
+gate above is the r125-branch tree that `validate-set.sh` proved identical to the applied set, so no second
+build was needed.
 
 **Docs:** `patches/README.md` (block 05), `GREEDY-PURITY.md` §51 (prototype -> shipped), `TODO.md` (#98
 closed, #97's RDNA4 half closed, #99 parked), `README.md`/`ENVIRONMENT.md` unchanged (no flag, no default).
