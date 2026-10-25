@@ -13557,10 +13557,10 @@ index 2d0b3cfea..ecb0a13f6 100644
  
  void ggml_cuda_op_dsv4_hc_post(ggml_backend_cuda_context & ctx, ggml_tensor * dst,
 diff --git a/ggml/src/ggml-cuda/fattn-common.cuh b/ggml/src/ggml-cuda/fattn-common.cuh
-index 41d948335..83408dcdb 100644
+index 41d948335..c07450741 100644
 --- a/ggml/src/ggml-cuda/fattn-common.cuh
 +++ b/ggml/src/ggml-cuda/fattn-common.cuh
-@@ -8,6 +8,33 @@
+@@ -8,6 +8,51 @@
  
  #define FATTN_KQ_STRIDE       256
  #define HALF_MAX_HALF         __float2half(65504.0f/2) // Use neg. of this instead of -INFINITY to initialize KQ max vals to avoid NaN upon subtraction.
@@ -13582,6 +13582,24 @@ index 41d948335..83408dcdb 100644
 +    return enabled;
 +}
 +
++// Fully-masked KV-group skip in the decode/verify band (GGML_CUDA_FA_BAND_SKIP=0: off).  With a
++// unified KV cache a sequence's attention covers every cell up to its last one, including the other
++// slots' cells, which are -INF for this sequence; the band (n_q <= 8) used to read all of them on
++// every step.  Since LLAMA_SERVER_LAZY_IDLE_SLOTS (r130) keeps an idle slot's context resident that is
++// the default case whenever a long conversation sits in front of an active one (measured 2026-10-25,
++// gfx1201: an 8.6K conversation behind a resident 100K one decodes at 51.0 -> 41.5 ms/step).  The band
++// keeps its tuned round-robin KV split: block i still owns the iterations i, i+P, ... and only skips
++// the ones whose logits are all -INF for every query row of the tile, so each block's accumulation
++// order over the remaining iterations is unchanged and the result is bit-identical.  The master
++// switch is still GGML_CUDA_FA_MASK_SKIP (a skip needs both).
++static inline bool ggml_cuda_fattn_band_skip_enabled() {
++    static const bool enabled = []() {
++        const char * e = getenv("GGML_CUDA_FA_BAND_SKIP");
++        return e == nullptr || atoi(e) != 0;
++    }();
++    return enabled;
++}
++
 +// Runtime test of the group bitmap (either producer): true when the KV block starting at cell offset
 +// kb0*nbatch_fa is entirely masked for every query row the bitmap was classified against.  On the
 +// derived path the bitmap is batch-wide (one word run); on the packed path it is already offset to
@@ -13594,7 +13612,7 @@ index 41d948335..83408dcdb 100644
  #define SOFTMAX_FTZ_THRESHOLD -20.0f                   // Softmax exp. of values smaller than this are flushed to zero to avoid NaNs.
  
  // log(2) = 0.6931, by adding this to the KQ maximum used for the softmax the numerical range representable
-@@ -18,13 +45,28 @@
+@@ -18,13 +63,28 @@
  // The macro on the following line shifts it by a factor of 2**3=8, as was needed to fix https://github.com/ggml-org/llama.cpp/issues/18606 .
  #define FATTN_KQ_MAX_OFFSET (3.0f*0.6931f)
  
@@ -13623,7 +13641,7 @@ index 41d948335..83408dcdb 100644
          float      * __restrict__ dst,
          float2     * __restrict__ dst_meta,
          const float scale,
-@@ -39,7 +81,15 @@ typedef void (* fattn_kernel_t)(
+@@ -39,7 +99,15 @@ typedef void (* fattn_kernel_t)(
                              const int32_t nb11, const int32_t nb12, const int64_t nb13,
                              const int32_t nb21, const int32_t nb22, const int64_t nb23,
                              const int32_t ne31, const int32_t ne32, const int32_t ne33,
@@ -13640,7 +13658,7 @@ index 41d948335..83408dcdb 100644
  
  typedef float (*vec_dot_KQ_t)(
      const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8 , const void * __restrict__ Q_ds);
-@@ -51,7 +101,7 @@ struct ggml_cuda_flash_attn_ext_f16_extra_data {
+@@ -51,7 +119,7 @@ struct ggml_cuda_flash_attn_ext_f16_extra_data {
  };
  
  static inline ggml_cuda_flash_attn_ext_f16_extra_data ggml_cuda_flash_attn_ext_get_f16_extra_data(
@@ -13649,7 +13667,7 @@ index 41d948335..83408dcdb 100644
      GGML_ASSERT(dst->op == GGML_OP_FLASH_ATTN_EXT);
  
      const ggml_tensor * K = dst->src[1];
-@@ -81,9 +131,273 @@ static inline ggml_cuda_flash_attn_ext_f16_extra_data ggml_cuda_flash_attn_ext_g
+@@ -81,9 +149,273 @@ static inline ggml_cuda_flash_attn_ext_f16_extra_data ggml_cuda_flash_attn_ext_g
          }
      }
  
@@ -13923,7 +13941,7 @@ index 41d948335..83408dcdb 100644
  template <int D, int nthreads>
  static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_f16(
      const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8 , const void * __restrict__ Q_ds_v) {
-@@ -300,6 +614,48 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_q5_1(
+@@ -300,6 +632,48 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_q5_1(
      return sum;
  }
  
@@ -13972,7 +13990,7 @@ index 41d948335..83408dcdb 100644
  template <int D, int nthreads>
  static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_q8_0(
      const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8, const void * __restrict__ Q_ds_v) {
-@@ -589,6 +945,49 @@ static __device__ __forceinline__ void dequantize_V_q5_1(const void * __restrict
+@@ -589,6 +963,49 @@ static __device__ __forceinline__ void dequantize_V_q5_1(const void * __restrict
      }
  }
  
@@ -14022,7 +14040,7 @@ index 41d948335..83408dcdb 100644
  template <typename T, int ne>
  static __device__ __forceinline__ void dequantize_V_q8_0(const void * __restrict__ vx, void * __restrict__ dst, const int64_t i0) {
      const block_q8_0 * x = (const block_q8_0 *) vx;
-@@ -636,6 +1035,8 @@ constexpr __device__ vec_dot_KQ_t get_vec_dot_KQ() {
+@@ -636,6 +1053,8 @@ constexpr __device__ vec_dot_KQ_t get_vec_dot_KQ() {
          return vec_dot_fattn_vec_KQ_q5_1<D, nthreads>;
      } else if constexpr (type_K == GGML_TYPE_Q8_0) {
          return vec_dot_fattn_vec_KQ_q8_0<D, nthreads>;
@@ -14031,7 +14049,7 @@ index 41d948335..83408dcdb 100644
      } else if constexpr (type_K == GGML_TYPE_BF16) {
          return vec_dot_fattn_vec_KQ_bf16<D, nthreads>;
      } else {
-@@ -658,6 +1059,8 @@ constexpr __device__ dequantize_V_t get_dequantize_V() {
+@@ -658,6 +1077,8 @@ constexpr __device__ dequantize_V_t get_dequantize_V() {
          return dequantize_V_q5_1<T, ne>;
      } else if constexpr (type_V == GGML_TYPE_Q8_0) {
          return dequantize_V_q8_0<T, ne>;
@@ -14040,7 +14058,7 @@ index 41d948335..83408dcdb 100644
      } else if constexpr (type_V == GGML_TYPE_BF16) {
          return dequantize_V_bf16<float, ne>;
      } else {
-@@ -723,6 +1126,132 @@ static __global__ void flash_attn_mask_to_KV_max(
+@@ -723,6 +1144,132 @@ static __global__ void flash_attn_mask_to_KV_max(
      KV_max[sequence*ne31 + jt] = KV_max_sj;
  }
  
@@ -14173,7 +14191,7 @@ index 41d948335..83408dcdb 100644
  void ggml_cuda_flash_attn_ext_compact_mask(
          const ggml_tensor * mask, int32_t * indices, int32_t * counts, int32_t n_queries, int32_t ncols1, int32_t n_kv_max, cudaStream_t stream);
  
-@@ -977,11 +1506,31 @@ static __global__ void flash_attn_combine_results(
+@@ -977,11 +1524,31 @@ static __global__ void flash_attn_combine_results(
      dst[tid] = VKQ_numerator / VKQ_denominator;
  }
  
@@ -14206,7 +14224,7 @@ index 41d948335..83408dcdb 100644
  ) {
      constexpr int ncols = ncols1 * ncols2;
  
-@@ -994,6 +1543,11 @@ void launch_fattn(
+@@ -994,6 +1561,11 @@ void launch_fattn(
      const ggml_tensor * mask  = dst->src[3];
      const ggml_tensor * sinks = dst->src[4];
  
@@ -14218,7 +14236,7 @@ index 41d948335..83408dcdb 100644
      ggml_tensor * KQV = dst;
  
      GGML_ASSERT(Q->type == GGML_TYPE_F32);
-@@ -1011,12 +1565,119 @@ void launch_fattn(
+@@ -1011,12 +1583,119 @@ void launch_fattn(
      const int cc  = ggml_cuda_info().devices[id].cc;
      const int nsm = ggml_cuda_info().devices[id].nsm;
  
@@ -14342,7 +14360,7 @@ index 41d948335..83408dcdb 100644
  
      const char * K_data = (const char *) K->data;
      size_t nb11 = K->nb[1];
-@@ -1028,12 +1689,17 @@ void launch_fattn(
+@@ -1028,12 +1707,17 @@ void launch_fattn(
      size_t nb22 = V->nb[2];
      size_t nb23 = V->nb[3];
  
@@ -14363,7 +14381,7 @@ index 41d948335..83408dcdb 100644
          if (ggml_is_contiguously_allocated(K)) {
              to_fp16_cuda_t to_fp16 = ggml_get_to_fp16_cuda(K->type);
              to_fp16(K_data, K_f16, ggml_nelements(K), main_stream);
-@@ -1056,7 +1722,7 @@ void launch_fattn(
+@@ -1056,7 +1740,7 @@ void launch_fattn(
          K_data = (char *) K_f16;
      }
  
@@ -14372,7 +14390,7 @@ index 41d948335..83408dcdb 100644
          if (V_is_K_view) {
              V_data = K_data;
              nb21   = nb11;
-@@ -1066,8 +1732,13 @@ void launch_fattn(
+@@ -1066,8 +1750,13 @@ void launch_fattn(
              const size_t bs = ggml_blck_size(V->type);
              const size_t ts = ggml_type_size(V->type);
  
@@ -14388,7 +14406,7 @@ index 41d948335..83408dcdb 100644
              if (ggml_is_contiguously_allocated(V)) {
                  to_fp16_cuda_t to_fp16 = ggml_get_to_fp16_cuda(V->type);
                  to_fp16(V_data, V_f16, ggml_nelements(V), main_stream);
-@@ -1132,9 +1803,116 @@ void launch_fattn(
+@@ -1132,9 +1821,124 @@ void launch_fattn(
          CUDA_CHECK(cudaGetLastError());
      }
  
@@ -14412,9 +14430,17 @@ index 41d948335..83408dcdb 100644
 +        ggml_cuda_fattn_kq_block_skip_enabled();
 +    const bool kq_block_skip_derived =
 +        kq_skip_ok && cell_pos != nullptr && tok_lo != nullptr && tok_hi != nullptr;
-+    // prefill only: the decode/verify band keeps its tuned round-robin KV split untouched
++    // The decode/verify band (ggml_cuda_fattn_band_wmma_applies) gets the packed bitmap as well
++    // (GGML_CUDA_FA_BAND_SKIP): it keeps its round-robin KV split and only leaves out the iterations
++    // whose logits are all -INF for every query row of its tile.  Band-only on purpose -- the
++    // predicate is the band's (RDNA4, head 256, the folded GQA group), so every other decode kernel
++    // keeps the pre-change behaviour.  Evaluated once: the 2-D launch below must not disagree.
++    const bool band_wmma = ncols2 == 8 && ggml_cuda_fattn_band_wmma_applies(cc, KQV);
++    const bool band_skip = band_wmma && ggml_cuda_fattn_band_skip_enabled();
++    // prefill, and the band when band_skip: the packed mask is the only form that can serve a batch
++    // holding several slots (each tile is classified against its own rows).
 +    const bool kq_block_skip_packed =
-+        kq_skip_ok && cell_pos == nullptr && mask != nullptr && Q->ne[1] > 8 &&
++        kq_skip_ok && cell_pos == nullptr && mask != nullptr && (Q->ne[1] > 8 || band_skip) &&
 +        K->ne[1] % FATTN_KQ_STRIDE == 0;
 +
 +    const uint32_t * kq_blocks_arg = nullptr;
@@ -14505,7 +14531,7 @@ index 41d948335..83408dcdb 100644
      GGML_ASSERT(max_blocks_per_sm > 0);
      int parallel_blocks = max_blocks_per_sm;
  
-@@ -1169,7 +1947,29 @@ void launch_fattn(
+@@ -1169,7 +1973,29 @@ void launch_fattn(
          blocks_num.y = 1;
          blocks_num.z = 1;
  
@@ -14521,7 +14547,7 @@ index 41d948335..83408dcdb 100644
 +        // The band is a 2-D launch whose fast path only exists for ncols2 == 8, so the template
 +        // parameter must be part of the gate: if the dispatcher ever picked a different ncols2 this
 +        // would fall back to the ordinary stream-k path instead of launching a mismatched grid.
-+        const bool band_wmma = ncols2 == 8 && ggml_cuda_fattn_band_wmma_applies(cc, dst);
++        // band_wmma is the evaluation the group-skip gate above reads, so the two cannot disagree.
 +
 +        if (band_wmma) {
 +            // P = nsm for the native-quantized types: measured on gfx1201 (head 256, GQA 6, 4 KV heads)
@@ -14536,7 +14562,7 @@ index 41d948335..83408dcdb 100644
              const int nblocks_stream_k_raw = std::min(max_blocks, ntiles_KV*ntiles_dst);
              // Round down to a multiple of ntiles_dst so that each output tile gets the same number of blocks (avoids fixup).
              // Only do this if the occupancy loss from rounding is acceptable.
-@@ -1185,20 +1985,29 @@ void launch_fattn(
+@@ -1185,20 +2011,29 @@ void launch_fattn(
              blocks_num.x = nblocks_stream_k;
          }
  
@@ -14569,7 +14595,7 @@ index 41d948335..83408dcdb 100644
              const int nwaves = (nblocks_total + blocks_per_wave - 1) / blocks_per_wave;
              const int efficiency_percent = 100 * nblocks_total / (nwaves*blocks_per_wave);
  
-@@ -1247,28 +2056,44 @@ void launch_fattn(
+@@ -1247,28 +2082,44 @@ void launch_fattn(
  
      GGML_ASSERT(block_dim.x % warp_size == 0);
  
@@ -14618,7 +14644,7 @@ index 41d948335..83408dcdb 100644
              const int bpt         = nblocks_sk / ntiles_dst;
  
              const uint3 fd0 = init_fastdiv_values(ntiles_x * ntiles_z_gqa * K->ne[2]);
-@@ -1283,7 +2108,7 @@ void launch_fattn(
+@@ -1283,7 +2134,7 @@ void launch_fattn(
                  (float *) KQV->data, dst_tmp_meta.ptr,
                   Q->ne[1], Q->ne[2], K->ne[2], nblocks_sk,
                   gqa_ratio, bpt, fd0, fd1, fd2);
@@ -14628,7 +14654,7 @@ index 41d948335..83408dcdb 100644
              const int total_work = ntiles_KV * ntiles_dst;
  
 diff --git a/ggml/src/ggml-cuda/fattn-mma-f16.cuh b/ggml/src/ggml-cuda/fattn-mma-f16.cuh
-index 296aa2b34..20017230b 100644
+index 296aa2b34..00d00e7b5 100644
 --- a/ggml/src/ggml-cuda/fattn-mma-f16.cuh
 +++ b/ggml/src/ggml-cuda/fattn-mma-f16.cuh
 @@ -127,7 +127,27 @@ static constexpr __host__ __device__ fattn_mma_config ggml_cuda_fattn_mma_get_co
@@ -15963,7 +15989,7 @@ index 296aa2b34..20017230b 100644
      constexpr int nwarps    = nthreads / warp_size;
  
      const int gqa_ratio = ne02 / ne12; // With grouped query attention there are > 1 Q matrices per K, V matrix.
-@@ -1895,6 +2552,62 @@ static __global__ void flash_attn_ext_f16(
+@@ -1895,6 +2552,67 @@ static __global__ void flash_attn_ext_f16(
          KV_max = KV_max_ptr + int64_t(iter_j)*ne33*ne11;
      }
  
@@ -15998,6 +16024,11 @@ index 296aa2b34..20017230b 100644
 +            };
 +            const float * sinks_f = sinks ? (const float *) sinks + zt_Q : nullptr;
 +            const float slope = ncols2 == 1 ? get_alibi_slope(max_bias, zt_Q, n_head_log2, m0, m1) : 1.0f;
++            // The packed fully-masked group bitmap of this (Q stream, query tile), when the launcher
++            // built one (GGML_CUDA_FA_BAND_SKIP): the round-robin split stays, the masked iterations
++            // in it are skipped.  Same layout the prefill path reads below.
++            const uint32_t * kq_blocks_tile = kq_blocks != nullptr && mask != nullptr ?
++                kq_blocks + int64_t(sequence*iter_j + jt)*(((ne11/FATTN_KQ_STRIDE) + 31)/32) : nullptr;
 +
 +            const int kb0_start = blockIdx.y;
 +            const int kb0_stop  = iter_k;
@@ -16007,14 +16038,14 @@ index 296aa2b34..20017230b 100644
 +                constexpr bool needs_fixup = true;
 +                constexpr bool is_fixup    = false;
 +                flash_attn_ext_f16_process_tile<DKQ, DV, ncols1, ncols2, nwarps, use_logit_softcap, V_is_K_view, use_sparse, needs_fixup, is_fixup, band_fetch_ahead>
-+                    (Q_f2, K_h2, V_h2, mask_h, nullptr, nullptr, sinks_f, dstk, dst_meta, scale, slope, logit_softcap,
++                    (Q_f2, K_h2, V_h2, mask_h, nullptr, kq_blocks_tile, sinks_f, dstk, dst_meta, scale, slope, logit_softcap,
 +                     ne01, ne02, gqa_ratio, ne11, stride_Q1, stride_Q2, stride_K, stride_V, stride_mask, jt, zt_gqa,
 +                     kb0_start, kb0_stop, derived, kv_native, kb0_step);
 +            } else {
 +                constexpr bool needs_fixup = false;
 +                constexpr bool is_fixup    = true;
 +                flash_attn_ext_f16_process_tile<DKQ, DV, ncols1, ncols2, nwarps, use_logit_softcap, V_is_K_view, use_sparse, needs_fixup, is_fixup, band_fetch_ahead>
-+                    (Q_f2, K_h2, V_h2, mask_h, nullptr, nullptr, sinks_f, dstk, dst_meta, scale, slope, logit_softcap,
++                    (Q_f2, K_h2, V_h2, mask_h, nullptr, kq_blocks_tile, sinks_f, dstk, dst_meta, scale, slope, logit_softcap,
 +                     ne01, ne02, gqa_ratio, ne11, stride_Q1, stride_Q2, stride_K, stride_V, stride_mask, jt, zt_gqa,
 +                     kb0_start, kb0_stop, derived, kv_native, kb0_step);
 +            }
@@ -16026,7 +16057,7 @@ index 296aa2b34..20017230b 100644
      // kbc == k block continuous, current index in continuous ijk space.
      int       kbc      = int64_t(blockIdx.x + 0)*(iter_k*iter_j*iter_z_gqa*ne12*ne03) / gridDim.x;
      const int kbc_stop = int64_t(blockIdx.x + 1)*(iter_k*iter_j*iter_z_gqa*ne12*ne03) / gridDim.x;
-@@ -1923,8 +2636,21 @@ static __global__ void flash_attn_ext_f16(
+@@ -1923,8 +2641,21 @@ static __global__ void flash_attn_ext_f16(
          float2       * dstk   = ((float2 *) dst) + (sequence*ne01.z*ne02 + zt_Q) * (DV/2);
  
          const half2 * V_h2 = V_is_K_view ? K_h2 : (const half2 *) (V + nb23*sequence + nb22*z_KV);
@@ -16048,7 +16079,7 @@ index 296aa2b34..20017230b 100644
  
          const float slope = ncols2 == 1 ? get_alibi_slope(max_bias, zt_Q, n_head_log2, m0, m1) : 1.0f;
  
-@@ -1936,16 +2662,21 @@ static __global__ void flash_attn_ext_f16(
+@@ -1936,16 +2667,21 @@ static __global__ void flash_attn_ext_f16(
          constexpr bool is_fixup = false; // All but (potentially) the last iterations write their data to dst rather than the fixup buffer.
          if (kb0_start == 0) {
              constexpr bool needs_fixup = false; // CUDA block is working on an entire tile.
@@ -16076,7 +16107,7 @@ index 296aa2b34..20017230b 100644
          kbc += iter_k;
          kbc -= kbc % iter_k;
  
-@@ -1972,8 +2703,19 @@ static __global__ void flash_attn_ext_f16(
+@@ -1972,8 +2708,19 @@ static __global__ void flash_attn_ext_f16(
      float2       * dstk   = ((float2 *) dst) + (sequence*ne01.z*ne02 + zt_Q) * (DV/2);
  
      const half2 * V_h2 = V_is_K_view ? K_h2 : (const half2 *) (V + nb23*sequence + nb22*z_KV);
@@ -16096,7 +16127,7 @@ index 296aa2b34..20017230b 100644
  
      const float slope = ncols2 == 1 ? get_alibi_slope(max_bias, zt_Q, n_head_log2, m0, m1) : 1.0f;
  
-@@ -1985,11 +2727,11 @@ static __global__ void flash_attn_ext_f16(
+@@ -1985,11 +2732,11 @@ static __global__ void flash_attn_ext_f16(
  
      constexpr bool is_fixup = true; // Last index writes its data to fixup buffer to avoid data races with other blocks.
      constexpr bool needs_fixup = false;
@@ -16112,7 +16143,7 @@ index 296aa2b34..20017230b 100644
          max_bias, m0, m1, n_head_log2, logit_softcap,
          ne00, ne01, ne02, ne03,
                nb01, nb02, nb03,
-@@ -2004,6 +2746,24 @@ static __global__ void flash_attn_ext_f16(
+@@ -2004,6 +2751,24 @@ static __global__ void flash_attn_ext_f16(
  
  bool ggml_cuda_flash_attn_ext_mma_f16_shall_use_sparse(const int cc, const ggml_tensor * dst, const int ncols1, const int ncols2);
  
@@ -16137,7 +16168,7 @@ index 296aa2b34..20017230b 100644
  template <int DKQ, int DV, int ncols1, int ncols2>
  void ggml_cuda_flash_attn_ext_mma_f16_case(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
      const ggml_tensor * KQV = dst;
-@@ -2012,14 +2772,24 @@ void ggml_cuda_flash_attn_ext_mma_f16_case(ggml_backend_cuda_context & ctx, ggml
+@@ -2012,14 +2777,24 @@ void ggml_cuda_flash_attn_ext_mma_f16_case(ggml_backend_cuda_context & ctx, ggml
  
      constexpr int ncols = ncols1 * ncols2;
  
@@ -16168,7 +16199,7 @@ index 296aa2b34..20017230b 100644
      const int cols_per_warp = std::min(ncols, get_cols_per_warp(cc));
      const int warp_size_host = ggml_cuda_info().devices[ctx.device].warp_size;
      const int nwarps         = nthreads / warp_size_host;
-@@ -2027,7 +2797,7 @@ void ggml_cuda_flash_attn_ext_mma_f16_case(ggml_backend_cuda_context & ctx, ggml
+@@ -2027,7 +2802,7 @@ void ggml_cuda_flash_attn_ext_mma_f16_case(ggml_backend_cuda_context & ctx, ggml
      constexpr bool V_is_K_view = DKQ == 576; // Guaranteed by the kernel selection logic in fattn.cu
  
      // KV tile strides must match flash_attn_ext_f16_iter / _process_tile.
@@ -16177,7 +16208,7 @@ index 296aa2b34..20017230b 100644
      const int stride_tile_K = swz ? nbatch_K2 : nbatch_K2 + 4;
      const int stride_tile_V = V_is_K_view ? stride_tile_K : (swz ? nbatch_V2 : nbatch_V2 + 4);
      const size_t nbytes_shared_KV_1stage = nbatch_fa            * std::max(stride_tile_K,  stride_tile_V) * sizeof(half2);
-@@ -2081,11 +2851,16 @@ void ggml_cuda_flash_attn_ext_mma_f16_case(ggml_backend_cuda_context & ctx, ggml
+@@ -2081,11 +2856,16 @@ void ggml_cuda_flash_attn_ext_mma_f16_case(ggml_backend_cuda_context & ctx, ggml
          {
              constexpr bool use_sparse_kernel = false;
              fattn_kernel = flash_attn_ext_f16<DKQ, DV, ncols1, ncols2, use_logit_softcap, V_is_K_view, use_sparse_kernel>;
@@ -16197,7 +16228,7 @@ index 296aa2b34..20017230b 100644
              }
          }
      } else {
-@@ -2102,7 +2877,7 @@ void ggml_cuda_flash_attn_ext_mma_f16_case(ggml_backend_cuda_context & ctx, ggml
+@@ -2102,7 +2882,7 @@ void ggml_cuda_flash_attn_ext_mma_f16_case(ggml_backend_cuda_context & ctx, ggml
  
      const bool async_kv_preload = nstages == 2 && !use_sparse;
      launch_fattn<DV, ncols1, ncols2>
@@ -79951,7 +79982,7 @@ index 543da2aed..2414b7509 100644
      assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_COMMON));
      assert(params.load_mode == LLAMA_LOAD_MODE_NONE);
 diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
-index 5b583aa4c..a3e497a7b 100644
+index 5b583aa4c..065ffb2dd 100644
 --- a/tests/test-backend-ops.cpp
 +++ b/tests/test-backend-ops.cpp
 @@ -63,7 +63,13 @@ static void init_tensor_uniform(ggml_tensor * tensor, float min = -1.0f, float m
@@ -80818,7 +80849,7 @@ index 5b583aa4c..a3e497a7b 100644
      // asymmetric head_dim (hsk != hsv) with one or both sides not 64-aligned
      test_cases.emplace_back(new test_flash_attn_ext(72, 64, 4, {1, 1}, 256, 2, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16));
      test_cases.emplace_back(new test_flash_attn_ext(64, 72, 4, {1, 1}, 256, 2, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16));
-@@ -12128,6 +12714,18 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+@@ -12128,6 +12714,32 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
      test_cases.emplace_back(new test_flash_attn_ext(64, 128, 4, {1, 1}, 128, 2, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q4_0, GGML_TYPE_Q2_0));
      test_cases.emplace_back(new test_flash_attn_ext(128, 64, 4, {1, 1}, 64, 2, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q2_0, GGML_TYPE_F16));
  
@@ -80834,10 +80865,24 @@ index 5b583aa4c..a3e497a7b 100644
 +        }
 +    }
 +
++    // The same band shape with a packed-mask interior hole (GGML_CUDA_FA_BAND_SKIP, block 05): the
++    // band's round-robin KV split must skip only a 256-cell group that is -INF for every row of its
++    // tile, and a skipped iteration must leave the online-softmax accumulators and the P partials
++    // exactly as an own-no-iteration block leaves them.  mask_hole makes cells [1024, 1280) -INF for
++    // every row, i.e. exactly one group.  The CPU reference is the oracle: a bitmap read from the
++    // wrong (stream, tile) row, or a skip that also drops the last unmasked iteration, mismatches
++    // here (verified by mutating the group test to skip one visible group: 14/14 FAIL).  kv 4096 x
++    // {1, 2, 3, 8} rows covers the fetch-ahead band rows (ncols1 4 and 8) and the fixup tail.
++    for (ggml_type type : {GGML_TYPE_F16, GGML_TYPE_BF16, GGML_TYPE_Q8_0}) {
++        for (int nb : { 1, 2, 3, 8 }) {
++            test_cases.emplace_back(new test_flash_attn_ext(256, 256, 4, {6, 1}, 4096, nb, true, false, 0, 0, GGML_PREC_F32, type, type, {0, 1, 2, 3}, true, false, 0, false, false, true));
++        }
++    }
++
      // q8_0 KV cases: decode and prompt batches, KV pad, permuted KV, feature flags, and long context
      test_cases.emplace_back(new test_flash_attn_ext(256, 256, 2, {16, 1},   113,   1, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0));
      test_cases.emplace_back(new test_flash_attn_ext(256, 256, 2, {16, 1},  1024,   1, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0));
-@@ -12157,6 +12755,11 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+@@ -12157,6 +12769,11 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
      // sparse mask with large batch size
      test_cases.emplace_back(new test_flash_attn_ext(512, 512, 1, { 8, 1}, 4096, 64, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16, {0, 1, 2, 3}, true, false,  512));
      test_cases.emplace_back(new test_flash_attn_ext(512, 512, 1, { 8, 1}, 4096, 64, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16, {0, 1, 2, 3}, true, false, 2048));
@@ -80849,7 +80894,7 @@ index 5b583aa4c..a3e497a7b 100644
      test_cases.emplace_back(new test_flash_attn_ext(576, 512, 1, {16, 1}, 4096, 64, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16, {0, 1, 2, 3}, true, true,   512));
      test_cases.emplace_back(new test_flash_attn_ext(576, 512, 1, {16, 1}, 4096, 64, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16, {0, 1, 2, 3}, true, true,  2048));
      test_cases.emplace_back(new test_flash_attn_ext(256, 256, 1, { 8, 1}, 4096, 64, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16, {0, 1, 2, 3}, true, false,  512));
-@@ -12231,6 +12834,43 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+@@ -12231,6 +12848,43 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
      test_cases.emplace_back(new test_flash_attn_ext(192, 128, 8, {8, 1}, 4096, 1, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16));
      test_cases.emplace_back(new test_flash_attn_ext(576, 512, 1, {20, 1}, 512, 1, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16, {0, 1, 2, 3}, true, true));
  
@@ -80893,7 +80938,7 @@ index 5b583aa4c..a3e497a7b 100644
      // FLASH_ATTN_EXT MMA, swizzled K/V tiles, power-of-two stride: nbatch_K2 = 32, 64, 128, 256.
      test_cases.emplace_back(new test_flash_attn_ext( 64,  64, 8, {8, 1}, 4096,  4, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16));
      test_cases.emplace_back(new test_flash_attn_ext(128, 128, 8, {4, 1}, 4096,  8, true,  true, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16));
-@@ -12357,6 +12997,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+@@ -12357,6 +13011,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
                      test_cases.emplace_back(new test_topk_moe({160, 4, 1, 1}, 160, with_norm, bias_probs, gate, scale_w));
                      test_cases.emplace_back(new test_topk_moe({256, 22, 1, 1}, 6, with_norm, bias_probs, gate, scale_w)); // Used by DeepSeek-V4
                      test_cases.emplace_back(new test_topk_moe({288, 22, 1, 1}, 8, with_norm, bias_probs, gate, scale_w)); // Used by StepFun 3.7
@@ -80901,7 +80946,7 @@ index 5b583aa4c..a3e497a7b 100644
                      // rows at and just past the limit where one block still covers all rows
                      test_cases.emplace_back(new test_topk_moe({32, 8, 1, 1}, 4, with_norm, bias_probs, gate, scale_w));
                      test_cases.emplace_back(new test_topk_moe({32, 8, 1, 1}, 8, with_norm, bias_probs, gate, scale_w));
-@@ -12388,6 +13029,21 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+@@ -12388,6 +13043,21 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
      test_cases.emplace_back(new test_gated_delta_net(GGML_TYPE_F32, 16, 64, 1, 2));
      test_cases.emplace_back(new test_gated_delta_net(GGML_TYPE_F32, 4, 64, 4, 1));
      test_cases.emplace_back(new test_gated_delta_net(GGML_TYPE_F32, 4, 64, 4, 2));
@@ -80923,7 +80968,7 @@ index 5b583aa4c..a3e497a7b 100644
      test_cases.emplace_back(new test_gated_delta_net(GGML_TYPE_F32, 8, 32, 4, 2, 2));
      test_cases.emplace_back(new test_gated_delta_net(GGML_TYPE_F32, 4, 64, 4, 2, 1, true));
      test_cases.emplace_back(new test_gated_delta_net(GGML_TYPE_F32, 4, 64, 4, 1, 1, true));
-@@ -12440,6 +13096,14 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+@@ -12440,6 +13110,14 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
      test_cases.emplace_back(new test_gated_delta_net_cache_fusion(GGML_TYPE_F32, 4, 32,   4, 1, 4));
      test_cases.emplace_back(new test_gated_delta_net_cache_fusion(GGML_TYPE_F32, 8, 32,   4, 2, 4));
      test_cases.emplace_back(new test_gated_delta_net_cache_fusion(GGML_TYPE_F32, 4, 32,   8, 1, 4));
@@ -80938,7 +80983,7 @@ index 5b583aa4c..a3e497a7b 100644
  
  #if 0
      // these tests are disabled to save execution time, sbut they can be handy for debugging
-@@ -12450,6 +13114,34 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+@@ -12450,6 +13128,34 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
      test_cases.emplace_back(new test_falcon(2));
  #endif
  
@@ -80973,7 +81018,7 @@ index 5b583aa4c..a3e497a7b 100644
      // lightning_indexer
      for (int kv : { 256 }) {
          for (int bs : { 1, 512 }) {
-@@ -12469,6 +13161,17 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+@@ -12469,6 +13175,17 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
          }
      }
  
@@ -80991,7 +81036,7 @@ index 5b583aa4c..a3e497a7b 100644
      return test_cases;
  }
  #ifdef _MSC_VER
-@@ -12479,6 +13182,31 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+@@ -12479,6 +13196,31 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
  static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
      std::vector<std::unique_ptr<test_case>> test_cases;
  
@@ -81023,7 +81068,7 @@ index 5b583aa4c..a3e497a7b 100644
      // SWIGLU at a 27B-class FFN width, fused [gate|up] vs split operands
      // note: same bytes either way, so a backend that indexes them differently shows it here
      for (ggml_type type : {GGML_TYPE_F16, GGML_TYPE_F32, GGML_TYPE_BF16}) {
-@@ -12524,6 +13252,38 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
+@@ -12524,6 +13266,38 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
          test_cases.emplace_back(new test_leaky_relu(GGML_TYPE_F32, { 17408, n_tokens, 1, 1 }, 0.1f));
      }
  
@@ -81062,7 +81107,7 @@ index 5b583aa4c..a3e497a7b 100644
      // Conv2d: K=CRS=NPQ=4096 matmul performance
      uint32_t                        iwh_idx  = 0;
      uint32_t                        kwh_idx  = 1;
-@@ -12696,9 +13456,33 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
+@@ -12696,9 +13470,33 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
          }
      }
  
@@ -81098,7 +81143,7 @@ index 5b583aa4c..a3e497a7b 100644
              for (ggml_type type_b : {GGML_TYPE_F32}) {
                  test_cases.emplace_back(new test_mul_mat_id(type_a, type_b, 128, 8, false, 768, bs, 2048));
                  test_cases.emplace_back(new test_mul_mat_id_fusion(type_a, type_b, 128, 8, false, 768, bs, 2048, 1));
-@@ -12706,8 +13490,8 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
+@@ -12706,8 +13504,8 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
          }
      }
  
@@ -81109,7 +81154,7 @@ index 5b583aa4c..a3e497a7b 100644
              for (ggml_type type_b : {GGML_TYPE_F32}) {
                  test_cases.emplace_back(new test_mul_mat_id(type_a, type_b, 32, 4, false, 1792, bs, 2048));
                  test_cases.emplace_back(new test_mul_mat_id_fusion(type_a, type_b, 32, 4, false, 1792, bs, 2048, 1));
-@@ -12966,6 +13750,13 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
+@@ -12966,6 +13764,13 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
      test_cases.emplace_back(new test_gated_delta_net(GGML_TYPE_F32, 4, 128, 1024, 1)); // 4h PP-1024
      test_cases.emplace_back(new test_gated_delta_net(GGML_TYPE_F32, 32, 128, 64, 1, 1, false, true)); // KDA PP-64
  

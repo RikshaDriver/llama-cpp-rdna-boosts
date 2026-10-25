@@ -40,7 +40,7 @@ only as a rough shape.
 | 02 | `0002-…-block-02-adaptive-MTP-draft-depth` | adaptive MTP draft depth | +1186 / −54 | 24 |
 | 03 | `0003-…-block-03-chunked-gated-delta-net-prefill` | chunked GDN prefill + rollback tracker | +3182 / −15 | 22 |
 | 04 | `0004-…-block-04-BF16-KV-cache-and-native-BF16-f` | BF16 KV cache + native-BF16 FA | +630 / −214 | 8 |
-| 05 | `0005-…-block-05-flash-attention-band-native-qua` | FA band / native quantized K-V / derived kq mask (+ the three kq-mask fills that lacked their sibling's buffer guard, r131) | +5047 / −612 | 289 |
+| 05 | `0005-…-block-05-flash-attention-band-native-qua` | FA band / native quantized K-V / derived kq mask (+ the three kq-mask fills that lacked their sibling's buffer guard, r131; + the band's fully-masked group skip, r133) | +5092 / −612 | 289 |
 | 06 | `0006-…-block-06-MMB-quantized-prefill-GEMM` | MMB quantized prefill GEMM (+ r132: the per-arch dispatch keys on the running device, not the primary) | +2903 / −3 | 7 |
 | 07 | `0007-…-block-07-k-quant-boosts-mmvq-VDR-Q6_K-MM` | k-quant boosts (VDR, Q6_K MMQ, Q1_0, grid pad) | +879 / −137 | 9 |
 | 08 | `0008-…-block-08-fused-kernels-old-08-fusions-ol` | fused kernels + fused MoE (+ r132: the Q8_1 cache's view-offset keying and source-range guard) | +5500 / −440 | 35 |
@@ -345,13 +345,27 @@ almost all of them `template-instances/*.cu`.
   **r103:** the fp32 `VKQ_C` array is now sized by the C tile's column span (`T_C_VKQ::J` vs
   `2*T_C_VKQ::J`), so an fp32 accumulator at `DV % 32 == 0` no longer indexes out of bounds.  Every
   instantiated row is fp16 C, for which the expression — and the generated code — is unchanged.
-* **Fully-masked KV group skip** (`GGML_CUDA_FA_MASK_SKIP`, prefill only) — exact zeros, bit-identical.
+* **Fully-masked KV group skip** (`GGML_CUDA_FA_MASK_SKIP`, master switch) — exact zeros, bit-identical.
+  It classifies 256-cell KV groups from the derived per-cell state (single-sequence) or from the packed
+  mask (per stream and query tile), then the kernel skips a group only when it is `-INF` for every query
+  row of the tile.  **r133 (PR #223, block 05): the decode/verify band gets it too**
+  (`GGML_CUDA_FA_BAND_SKIP`, on unless `0`; needs the master switch as well).  The band keeps its tuned
+  round-robin KV split — block i still owns the iterations i, i+P, ... and only leaves out the fully
+  masked ones, so its accumulation order over the rest is unchanged and each skipped iteration is the
+  exact no-op an own-no-iteration block already had to represent (the neutral `-FLT_MAX/2` partial).  The
+  gate is the band's own predicate, so it is RDNA4 + head 256 + the folded GQA group + `n_q <= 8`, i.e. the
+  tile-kernel decode every other model uses is untouched.  This is the cost `LLAMA_SERVER_LAZY_IDLE_SLOTS`
+  (r130) made common: with a ~100K conversation resident in a unified cache, an 8.6K conversation's decode
+  goes 50.8 → 41.7 ms/step (**-18 %**, token ids identical; with a DFlash2 draft at `n_max 5`: 18.6 →
+  14.8).  With nothing to skip it is a small win, not a tax (-0.6 % at 9.8K, neutral at 105K single-slot),
+  because the padded tail group is skipped as well.
 * **Hygiene**: the `(512, 512, 32)` RDNA MMA row retuned to a 4-warp shape (issue #188, Gemma-4 head-512
   prefill), the RDNA2 (gfx1030) gate fixes of PR #181, the masked-V HIP fixes, and the FA staging arena
   (prealloc + graceful degradation instead of abort).
 
 **Knobs.**  `LLAMA_KQ_MASK_DERIVED`, `GGML_CUDA_FA_KV_NATIVE` (auto / force on / force staging),
-`GGML_CUDA_FA_MASK_SKIP`, `GGML_HIP_FA_BAND_WMMA*` (`_SPLIT`, `_GQA_MAX`, `_WIDE`),
+`GGML_CUDA_FA_MASK_SKIP`, `GGML_CUDA_FA_BAND_SKIP` (r133; the master switch must be on too),
+`GGML_HIP_FA_BAND_WMMA*` (`_SPLIT`, `_GQA_MAX`, `_WIDE`),
 `GGML_HIP_FA_BAND_FETCH_AHEAD` (r98; `=0` runs the q8_0 band kernel without the fetch-ahead variant),
 `GGML_CUDA_FA_WMMA_256` / `_MAX_HEAD`, `GGML_CUDA_FA_RDNA3_WMMA_512` (r102; `=0` sends gfx1100 head 512
 back to the tile kernel), `GGML_CUDA_FA_ALL_QUANTS` (build), `GGML_CUDA_OP_TIMING` (diagnostic).

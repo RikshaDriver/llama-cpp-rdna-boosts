@@ -1,5 +1,101 @@
 # WORKLOG - dated delivery records
 
+## 261025.003 (r133) -- PR #223: the decode/verify band skips fully masked KV groups (block 05)
+
+**Release:** `v14-3f03b1772-r133`.  Base `3f03b1772` (base tree `14370bd49a`), canonical tip `368496e40`,
+tree `972701d20366ef817cc941ce8146241260bbb825`, 14 blocks.  `scripts/validate-set.sh` green (checksums,
+fresh-tarball **strict 14/14** `git am`, applied tree == recorded tree), per-block build gate 2/2 (block 05
+and the tip; every other block's delta is byte-identical to the r132 chain).  **No block renumbered, merged
+or split**; the change is a fold inside **block 05**, every patch re-cut.  The delta against the r132 tree is
+**3 files, +50 / -5** (`ggml-cuda/{fattn-common.cuh,fattn-mma-f16.cuh}`, `tests/test-backend-ops.cpp`).  One
+new default-on kill switch, `GGML_CUDA_FA_BAND_SKIP`.
+
+Contributor PR: **#223** by **@overdoingism** (the author of the issue-#45 report the band itself came from),
+filed as one `git am` file plus a WIP note against r131; it applies to r132 unchanged.  Promoted with a
+`Co-authored-by` trailer on the block-05 commit and an entry in `README.md` -> *Community Acknowledgements*.
+Campaign record: `archive/work/fa-band-skip/` (the submitted patch is kept verbatim there).
+
+### The change and the claim
+
+The fully-masked KV-group skip (issue #48, upstream #28495) was **prefill only**: the packed bitmap was
+built under `Q->ne[1] > 8`, so the decode/verify band (the RDNA4 WMMA band, `n_q <= 8`, round-robin KV
+split) read every cell in the shared range, including the other slots' `-INF` cells.  The PR builds the
+packed per-(stream, query tile, 256-cell group) bitmap for the band too and hands its tile row to the band
+entry.  The band's skip loops already existed in block 05 and had **never been reached**; block i keeps
+owning iterations `i, i+P, ...` and only omits the fully masked ones, so the claim is bit-identity, not
+equivalence.
+
+The claim reproduces, and it is larger here than reported (reporter: -16.9 %, gfx1201 / ROCm 10.0.0):
+
+| arm (gfx1201, 27B UD-Q4_K_XL, `q8_0` K/V, 2 slots `--kv-unified`, 384 greedy tokens) | skip off | skip on | delta |
+|---|---|---|---|
+| ~105K conversation resident, active 9.8K one, plain decode | 50.84 ms/step | **41.69** | **-18.0 %**, token ids identical |
+| the same with the reporter's DFlash2 draft (`--spec-draft-n-max 5`) | 18.62 ms/step | **14.83** | **-20.3 %**, ids identical |
+| single slot 9.8K, nothing to skip | 41.62 / 41.53 | 41.30 / 41.34 | -0.6 % |
+| single slot at 105K, nothing to skip | 25.1 t/s | 25.1 t/s | neutral |
+
+**Why this is not the 2026-09-26 "break-even, close it" verdict.**  `archive/work/unified-cache-decode/`
+implemented the same option (b) and measured it on a 2-slot `llama-batched-bench` cell whose foreign-cell
+fraction was small, where the per-layer prepass (~0.6-1 %) cancelled the saving (~1 %).  r130's
+`LLAMA_SERVER_LAZY_IDLE_SLOTS` changed the workload: a resident long conversation in front of an active one
+makes ~92 % of the FA range fully masked, and the saving is an order of magnitude larger than the prepass.
+The old record got a dated addendum pointing here rather than being rewritten.
+
+### Added on top of the PR
+
+* **Decode-width packed-hole op cases** (`tests/test-backend-ops.cpp`, 12 cases: `nb` 1/2/3/8 x
+  f16/bf16/q8_0 x the band's hole).  The suite had `mask_hole` cases only at `nb` 9..32, i.e. the paths that
+  were already covered, so the band skip had **no oracle at all**.  Verified as real coverage: mutating
+  `fattn_kq_group_masked` to skip one *visible* group fails **all 14** hole cases (12 new + the 2 existing
+  head-256 ones), while 6414/6414 pass unmutated.  Also run with `GGML_HIP_FA_BAND_WIDE=0` and
+  `GGML_HIP_FA_BAND_FETCH_AHEAD=0`, so all four band kernel variants (fetch-ahead on/off x wide on/off) are
+  covered, plus `GGML_HIP_FA_BAND_WMMA=0` / `GGML_CUDA_FA_WMMA_256=0` / `GGML_CUDA_FA_MASK_SKIP=0`.
+* **The band predicate is evaluated once** in `launch_fattn` (`band_wmma`), and both the group-skip gate and
+  the 2-D launch read it, so the two cannot disagree if the predicate changes again.
+* The stale `// prefill only: the decode/verify band keeps its tuned round-robin KV split untouched` comment
+  is replaced by what the code now does.
+
+### Gates (gfx1201, ROCm 10.1.0, `~/bin/build-llama-rocm` on the folded tree; `GGML_CUDA_FA_BAND_SKIP=0/1` A/B)
+
+| gate | result |
+|---|---|
+| `test-backend-ops -o FLASH_ATTN_EXT` (full matrix + the 12 new hole cases) | **6414/6414** |
+| coverage probe (group test mutated to skip one visible group) | **0/14** hole cases pass -> the cases exercise the skip |
+| `test-logits-width-probe` (27B UD-Q4_K_XL, prose, `P=256`), `KV=q8_0/f16/bf16` | **PASS, worst maxdiff 0**; row-0 hashes identical between the arms (`710641958f1aa46e` / `b12bd89b74c301f6` / `26bbb7aab7ee2010`) |
+| `plain == draft-mtp` prose `-n 3000`, 1 GPU and 2 GPU `-sm tensor` | text identical in all four arms (`778154646e23` / `e4d32ce80614`), MTP 69.3 vs 69.0 t/s (1 GPU), 101.4 vs 102.1 (2 GPU) |
+| four-axis MTP acceptance (`-n 3000`, draft-mtp n3, `-lv 4`, prose/code/reasoning/recall) | **identical to the last digit** on every axis (R 0.52697, P 0.80144, C 0.86491, K 0.99200; 1837/3486, 1332/1662, 2164/2502, 372/375) |
+| `scripts/gate-prefill-logits.sh` (27B Q8_0) | **PASS, mean KLD 0.000000 / same-top-p 99.980 %** |
+| `llama-batched-bench -npp 16 -ntg 32 -npl 1,4,8`, 27B `q8_0` KV | within noise (30.32/99.09/152.29 vs 30.41/98.28/152.17 t/s; the band is off for `B > 1`) |
+| 2-slot `--kv-unified` server cell, plain and DFlash2 | the table above; token ids identical (`a14854397efa688c`) in every pair |
+| per-block build (`--changed-from 6950f7ad1`) | **2/2 built, 0 failed** (block 05 362 s, tip 4 s) |
+| `check-gpu-faults.sh` (journal + every gate log of this release) | clean |
+| `validate-set.sh` | green -- strict 14/14 on a fresh tarball, tree == `release.json.tree` |
+
+**The off arm IS the r132 A/B.**  With `GGML_CUDA_FA_BAND_SKIP=0` the launcher computes
+`kq_block_skip_packed` from the r132 expression and the band receives a null bitmap, so every pair in the
+tables above is r132-behaviour vs r133-behaviour on one binary (no cross-build hipBLASLt confound), and the
+width probe's identical row-0 hashes are a logits-level statement rather than a text hash.
+
+### Scope, and what is deliberately not done
+
+The gate is the **band's** predicate, so this applies on RDNA4 + head 256 + GQA 5..12 + `n_q <= 8` only.
+The tile-kernel decode every other model uses (head != 256, GQA <= 4, RDNA3/RDNA3_5, or
+`GGML_HIP_FA_BAND_WMMA=0`) keeps the pre-r133 behaviour: extending option (b) to that family needs its own
+decode-width hole cases and a measurement at the r130 shape, and the 2026-09-26 campaign measured it
+break-even at a small foreign fraction.  Not done here, and not filed as a TODO.  The per-layer prepass
+(option (a)'s target: caching per-slot group visibility in `llama_kv_cache`) stays unimplemented: the
+measurements above say it is not needed, because the padded tail group it also skips already pays for it.
+
+Docs: `patches/README.md` (block index + the skip entry + the knob list), `ENVIRONMENT.md`
+(`GGML_CUDA_FA_BAND_SKIP`), `GREEDY-PURITY.md` **§37** (the band is covered now; the exact-no-op argument,
+the oracle and the numbers), `MANIFESTS.md` (the block-05 verification row), `AGENTS.md` (critical fact),
+`README.md` (credit), `archive/work/fa-band-skip/` (record), `archive/work/unified-cache-decode/README.md`
+(dated addendum), `wip/CAMPAIGNS.md` (promoted line).  No `TODO.md` item.
+
+**Not validated:** gfx1100 / gfx1151 (a no-op there by construction -- the predicate is false, so
+`kq_block_skip_packed` is computed exactly as before), and any concurrent-server text comparison (that is
+not a purity gate, `GREEDY-PURITY.md` §38; every measurement above is a sequential, fixed schedule).
+
 ## 261025.002 (no release) -- build cost: a release arm must not get its own source path (ccache keys on it), plus `scripts/scratch-tree.sh` and per-block build timing
 
 **No delivery change**: `patches/`, `release.json` and the release tag are untouched (`release.json` still

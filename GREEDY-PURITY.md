@@ -685,15 +685,32 @@ to revisit is an **argmax change** (a quality event); a hash change with a 2.2+ 
 ## 37. A fully-masked KV group is an exact no-op
 
 A KV group whose kq-mask entries are all `-INF` contributes exact zeros and leaves `KQ_max`/`KQ_rowsum`/
-`VKQ` unchanged, so skipping it is **bit-identical**.  `GGML_CUDA_FA_MASK_SKIP` (default on) is gated on
-`Q->ne[1] > 8` for the packed mask (and the derived `cell_pos` path is already prefill-only), so the
-decode/verify band's round-robin KV split and the width-purity invariants are untouched.
+`VKQ` unchanged, so skipping it is **bit-identical**.  `GGML_CUDA_FA_MASK_SKIP` (default on) classifies the
+groups per (Q stream, query tile, 256-cell group) on the packed path and batch-wide on the derived path.
 
-**Why it is needed:** a `--kv-unified` cache puts the other slots' fully-masked interior cells inside the
-attention range, and `flash_attn_mask_to_KV_max` only trims the tail (and is not even launched at `-ub
-512`).  **The gate:** the classification must be per (Q stream, query tile, 256-cell group) on the packed
-path (continuous batching mixes sequences in a ubatch) and batch-wide on the derived path.  `FLASH_ATTN_EXT`
-**6354/6354**, `-kvu` B=4 prefill +22 % (MMA) / +72 % (tile), acceptance and text byte-identical.
+**The decode/verify band is covered since r133** (`GGML_CUDA_FA_BAND_SKIP`, default on, PR #223; the
+master switch must be on too).  It keeps its round-robin KV split: block i still owns the iterations
+i, i+P, i+2P, ... and only leaves out the fully masked ones, so the accumulation order over the remaining
+iterations is unchanged, and a block that owns no unmasked iteration writes the same neutral partial
+(`max -FLT_MAX/2`, rowsum 0, VKQ 0) the fixup already had to treat as an exact no-op.  The gate is the
+band's own predicate, so this is RDNA4 + head 256 + GQA 5..12 + `n_q <= 8`; the tile-kernel decode other
+models use keeps the `Q->ne[1] > 8` gate.  **Evidence:** `FLASH_ATTN_EXT` **6414/6414** including 12 new
+decode-width packed-hole cases (`nb` 1/2/3/8, f16/bf16/q8_0, all four band kernel variants: fetch-ahead
+on/off x wide on/off) — and a mutation that makes the kernel skip one *visible* group fails all 14 of the
+hole cases, so the coverage is real; the `W = 1..8` logits probe is **PASS, worst maxdiff 0**, with
+bit-identical row-0 hashes for `q8_0`/`f16`/`bf16` KV with the skip on and off; `plain == draft-mtp` text
+identical at `-n 3000` on 1 GPU and 2 GPU `-sm tensor`; the four-axis MTP gate's acceptance identical to
+the last digit.  **Why it is needed:** a `--kv-unified` cache puts the other slots' cells inside the
+attention range, and `flash_attn_mask_to_KV_max` only trims the tail, so the band read them all on every
+step; `LLAMA_SERVER_LAZY_IDLE_SLOTS` (r130) then made "a long conversation sitting idle in front of an
+active one" the common case (a resident ~105K context: **50.8 -> 41.7 ms/step, -18 %**, token ids
+identical).  With nothing to skip the per-layer prepass is **not** a tax (the padded tail group is skipped
+too: -0.6 % at 9.8K, neutral at 105K single-slot), which supersedes the 2026-09-26 break-even reading in
+`archive/work/unified-cache-decode/` (that campaign measured a 2-slot *batched-bench* cell with a small
+foreign fraction, where the prepass and the saving did cancel).
+
+The `--kv-unified` non-determinism of §38 still applies: a concurrent server's batch composition changes
+the kernel/reduction order, so use a sequential schedule or `test-backend-ops` as the purity oracle.
 
 ## 38. The guarantee is scoped to a fixed batch; `--kv-unified` serving is not deterministic
 

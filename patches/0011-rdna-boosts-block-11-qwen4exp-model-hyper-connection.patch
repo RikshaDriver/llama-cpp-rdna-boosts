@@ -1,4 +1,4 @@
-From 9d0e2d6465b3c69b282c2bb1b0c615353963b72f Mon Sep 17 00:00:00 2001
+From 7ad7f5f4d0ce649ff50f8415ba5476d93be3ca0b Mon Sep 17 00:00:00 2001
 From: Stew Forster <ci@rdna-boosts.invalid>
 Date: Thu, 22 Oct 2026 07:24:50 -0500
 Subject: [PATCH 11/13] rdna-boosts: block 11: qwen4exp (model,
@@ -13085,7 +13085,7 @@ index ba3ea3850..5095e1e90 100644
      set(MODEL_DIR "${CMAKE_CURRENT_BINARY_DIR}/test-models/")
      file(MAKE_DIRECTORY "${MODEL_DIR}")
 diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
-index 8f6993c6f..a3e497a7b 100644
+index d652de751..065ffb2dd 100644
 --- a/tests/test-backend-ops.cpp
 +++ b/tests/test-backend-ops.cpp
 @@ -4051,6 +4051,128 @@ struct test_rms_norm_back : public test_case {
@@ -13521,7 +13521,7 @@ index 8f6993c6f..a3e497a7b 100644
      // exhaustive top_k tests
      //for (int i = 1; i < 9999; ++i) {
      //    test_cases.emplace_back(new test_top_k(GGML_TYPE_F32, {i, 2, 1, 3}, rand() % i + 1));
-@@ -12723,6 +13114,34 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+@@ -12737,6 +13128,34 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
      test_cases.emplace_back(new test_falcon(2));
  #endif
  
@@ -13556,7 +13556,7 @@ index 8f6993c6f..a3e497a7b 100644
      // lightning_indexer
      for (int kv : { 256 }) {
          for (int bs : { 1, 512 }) {
-@@ -12742,6 +13161,17 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+@@ -12756,6 +13175,17 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
          }
      }
  
@@ -13574,7 +13574,7 @@ index 8f6993c6f..a3e497a7b 100644
      return test_cases;
  }
  #ifdef _MSC_VER
-@@ -12752,6 +13182,31 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+@@ -12766,6 +13196,31 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
  static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
      std::vector<std::unique_ptr<test_case>> test_cases;
  

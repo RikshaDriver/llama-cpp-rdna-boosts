@@ -515,6 +515,22 @@ stub alive to serve them, and treat a `wip/` path in an old record as a historic
   be freed while a kernel that carries its address in its launch parameters is in flight
   (`moe_cache_sync_devices_locked`). `GREEDY-PURITY.md`/`archive/work/moe-cache-autosize/ARENA-UB-TENSION.md`
   §13-§14.
+- **The decode/verify band skips fully masked KV groups (r133, PR #223, block 05).**  `GGML_CUDA_FA_BAND_SKIP`
+  (default on) lets the band consume the packed fully-masked-group bitmap the prefill path already builds, so
+  the band keeps its tuned round-robin KV split (`block i` owns iterations `i, i+P, ...`) and only leaves out
+  the iterations whose logits are all `-INF` for every query row of its tile: each block's accumulation order
+  over the rest is unchanged, a block that owns no unmasked iteration writes the same neutral `-FLT_MAX/2`
+  partial it already had to represent, and the result is bit-identical.  The gate is the band's own predicate,
+  so it is RDNA4 + head 256 + GQA 5..12 + `n_q <= 8`; the tile-kernel decode that every other model uses keeps
+  the `Q->ne[1] > 8` gate, and `GGML_CUDA_FA_MASK_SKIP=0` disables the whole mechanism (this is its band arm).
+  This is the cost `LLAMA_SERVER_LAZY_IDLE_SLOTS` (r130) made common: with a ~105K conversation resident in a
+  unified cache, an active 9.8K conversation decodes at **50.8 -> 41.7 ms/step (-18 %)**, token ids identical
+  (with a DFlash2 draft at `n_max 5`: 18.6 -> 14.8).  With nothing to skip it is not a tax (the padded tail
+  group is skipped too: -0.6 % at 9.8K, neutral at 105K single-slot) — which supersedes the 2026-09-26
+  "prefill only, break-even" reading, measured on a 2-slot batched cell with a small foreign fraction.  The
+  op-test oracle is the **decode-width packed-hole** case set (`mask_hole=1`, `nb` 1/2/3/8, f16/bf16/q8_0);
+  mutating the kernel's group test to skip one visible group fails all 14 of those cases.  Do not widen the
+  gate to the tile kernel without that family's own hole cases and a measurement.  `GREEDY-PURITY.md` §37.
 - **The movable-boundary slab is MoE-only and must stay that way (r37).** `ggml_cuda_slab_enabled()`
   returns `env_on && g_slab_armed`; `g_slab_armed` is set **only** by the MoE preflight
   (`ggml_backend_cuda_device_moe_cache_preflight`), which `llama_model_moe_cache_preflight` calls only for

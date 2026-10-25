@@ -4,6 +4,16 @@ Status: **CLOSED (2026-09-26) — measured, not worth pursuing; archived under `
 Option (b) was implemented, validated and measured; it is break-even because the per-layer prepass costs
 about what the skip saves.  The decode penalty is ~1 %, not the large one §1 assumed.  See §0.
 
+> **Addendum 2026-10-25 (r133): reopened by a changed workload and promoted.**  This verdict measured a
+> 2-slot batched cell with a small foreign-cell fraction.  `LLAMA_SERVER_LAZY_IDLE_SLOTS` (r130) then made
+> "a long conversation resident in front of an active one" the common shape, where the foreign cells are
+> ~92 % of the range: PR #223 (the band arm of option (b)) measures **-18 % decode ms/step** there (-20 %
+> with a DFlash2 draft), bit-identical, and -0.6 % (not a tax) with nothing to skip, because the padded
+> tail group is skipped as well.  Folded into block 05; the record is
+> [`archive/work/fa-band-skip/`](../fa-band-skip/README.md), `GREEDY-PURITY.md` §37, `WORKLOG.md`
+> 261025.003.  **Option (b) on the tile-kernel decode remains unmeasured at this shape** and is not in the
+> delivery.
+
 Parent work (already shipped): release `v16-84e76d8a2-r10`, block-15 amendment
 [issue #48](https://github.com/stew675/llama-cpp-rdna-boosts/issues/48) —
 `WORKLOG.md` 2026-09-26 (r10), `patches/README.md`, `GREEDY-PURITY.md` §37.

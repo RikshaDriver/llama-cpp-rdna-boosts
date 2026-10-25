@@ -1,4 +1,4 @@
-From cdd6811e1abc4501e0c68890bf236c1d15c05781 Mon Sep 17 00:00:00 2001
+From d9adb82e1f3ac4b7066e34dc41d1f6cb2b994ac6 Mon Sep 17 00:00:00 2001
 From: Stew Forster <ci@rdna-boosts.invalid>
 Date: Wed, 21 Oct 2026 10:40:31 -0500
 Subject: [PATCH 07/13] rdna-boosts: block 07: k-quant boosts (mmvq VDR, Q6_K
@@ -1589,7 +1589,7 @@ index d5ff93b91..10f31e3e3 100644
      const float d = __half2float(bq4->d) * __low2float(bq8_1[iqs/4].ds);
      return d * sumi;
 diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
-index 704fd36fc..6adf9835d 100644
+index 37b208881..657eaaedc 100644
 --- a/tests/test-backend-ops.cpp
 +++ b/tests/test-backend-ops.cpp
 @@ -11225,6 +11225,12 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
@@ -1605,7 +1605,7 @@ index 704fd36fc..6adf9835d 100644
  #endif
  
      for (ggml_type type_a : all_types) {
-@@ -12953,9 +12959,33 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
+@@ -12967,9 +12973,33 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
          }
      }
  
@@ -1641,7 +1641,7 @@ index 704fd36fc..6adf9835d 100644
              for (ggml_type type_b : {GGML_TYPE_F32}) {
                  test_cases.emplace_back(new test_mul_mat_id(type_a, type_b, 128, 8, false, 768, bs, 2048));
                  test_cases.emplace_back(new test_mul_mat_id_fusion(type_a, type_b, 128, 8, false, 768, bs, 2048, 1));
-@@ -12963,8 +12993,8 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
+@@ -12977,8 +13007,8 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
          }
      }
  

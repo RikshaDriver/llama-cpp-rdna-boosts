@@ -38,6 +38,15 @@ chunked CUDA graphs moved our AR-stage hook to the last chunk's capture, and the
 record (`README.md`, `STATE.md`, `DECISIONS.md`, `GOTCHAS.md`, the surveys) is preserved under
 `archive/work/rebase-2026-10/`; see `WORKLOG.md` 261024.008.
 
+**Promoted (r133, 2026-10-25, block 05).**  PR #223 (`@overdoingism`, `wip/fa-band-skip/`) left `wip/` for
+[`archive/work/fa-band-skip/`](../archive/work/fa-band-skip/README.md): the fully-masked KV-group skip now
+reaches the **decode/verify band** as well as prefill, so a resident idle conversation no longer taxes the
+active one's decode (`GGML_CUDA_FA_BAND_SKIP`, default on, band predicate only).  Measured on the r130
+`--kv-unified` shape: 50.8 -> 41.7 ms/step (-18 %, token ids identical; -20 % with a DFlash2 draft), and
+-0.6 % (not a tax) with nothing to skip.  The band's skip loops existed but had never been reached, so the
+delivery added the decode-width packed-hole op cases that are its oracle.  See `GREEDY-PURITY.md` §37,
+`WORKLOG.md` 261025.003.
+
 **Promoted (r123, 2026-10-24, block 09).**  `ngram-mod-host-experts/` left `wip/` for
 [`archive/work/ngram-mod-host-experts/`](../archive/work/ngram-mod-host-experts/EVIDENCE-2026-10-24.md):
 the "`ngram-mod` halves decode with host-resident experts" report (TODO #59) is the **expert-cache verify
