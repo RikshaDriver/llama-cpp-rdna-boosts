@@ -1221,13 +1221,19 @@ run whose experts are not served through the arena:
   (r123, block 09; `LLAMA_SPEC_NGRAM_MOD_BAND_CLAMP=0` is the A/B).  A deep draft also cost ~5 GiB of
   arena, because the slab's narrow verify floor is measured at `n_rs_batch` (32938 -> 27814 MiB).
 * A model with **no active arena** — fully device-resident, or the CPU expert path
-  (`MOE_EXPERT_CACHE_MIB=0`) — reports no band and is never clamped.  The same is intended for a
-  host-expert config whose movable-boundary slab is armed and then **declines** (a card too small for the
-  work buffer + `GGML_CUDA_SLAB_MIN_ARENA_MIB` + the ring hole): it runs the same streaming path, where the
-  wide draft is the win (2x R9700: 67.6 wide vs 52.2 capped t/s).  **It is not, today** (TODO #96): the clamp
-  is decided in `common_init_from_params`, before the slab is created at the first compute-buffer
-  allocation, so such a config is clamped while it has no arena; `LLAMA_SPEC_NGRAM_MOD_BAND_CLAMP=0` keeps
-  the wide draft there until the gating is fixed.
+  (`MOE_EXPERT_CACHE_MIB=0`) — reports no band and is never clamped.  The same holds for a host-expert
+  config whose movable-boundary slab is armed and then **declines** (a card too small for the work buffer +
+  `GGML_CUDA_SLAB_MIN_ARENA_MIB` + the ring hole): it runs the same streaming path, where the wide draft is
+  the win (2x R9700: 67.6 wide vs 52.2 capped t/s).  **Since r129 that case is handled**: the clamp is
+  applied *after* the context exists, so it sees the arena's real state rather than the model-load `armed`
+  flag (issue #214's reporter class — slab armed, then declined, then streamed — kept its wide draft; the
+  TODO #96 defect).  The deferral is why `cparams.n_rs_batch` is no longer refreshed by the clamp: it stays
+  the **unclamped** safety bound (the widest batch a partial rollback can land in, floored into the
+  chunked-GDN threshold), while the slab's narrow (decode/verify) reserve takes the band-limited width
+  (`llama_context::verify_batch_width()`) so a live arena is still sized for the clamped draft (measured
+  unchanged: narrow floor 1024/1280 MiB and `identity fast path ON` 142/142 with and without the
+  speculator).  A decline that happens *after* the context exists (an OOM-yield arena release) still
+  leaves the draft clamped: `LLAMA_SPEC_NGRAM_MOD_BAND_CLAMP=0` is the escape.
 
 **Evidence (gfx1201, 2x R9700, Flash-Next IQ4_NL + MTP head, `-sm tensor -ncmoe 36`, `-c 16384`,
 `prompts/recall.txt`, `-n 2000 --temp 0 --seed 42`, `draft-mtp,ngram-mod` with the ngram cap swept).**

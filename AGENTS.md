@@ -165,7 +165,7 @@ stub alive to serve them, and treat a `wip/` path in an old record as a historic
 - **Apply method:** all 14 blocks with **`git am`**; `scripts/apply-all.sh` is the tested path. Plain
   `git apply` of the concatenated series **silently drops hunks**. Every block is a normal commit.
 - **Naming (V2.1):** the current set is **14 blocks, 00-13** (release `release.json .release` —
-  `v14-3f03b1772-r127` at the 2026-10-24 re-base).  Every `block NN`
+  `v14-3f03b1772-r129` at the 2026-10-24 re-base).  Every `block NN`
   reference elsewhere in this file that is not one of the V2.1 numbers below is the **pre-V2.1 16-block
   numbering** and is kept as a historical handle.  The V2.1 map: **01** all-reduce, **02** adaptive MTP,
   **03** chunked GDN, **04** BF16 KV, **05** FA band/native/derived, **06** MMB, **07** k-quant,
@@ -435,7 +435,14 @@ stub alive to serve them, and treat a `wip/` path in an old record as a historic
   `band - 1` whenever the arena is active — `LLAMA_SPEC_NGRAM_MOD_BAND_CLAMP=0` opts out, and a
   `draft.n_max` above the band warns (not clamped: its 15 is a correctness bound).  A device-resident model
   or the CPU expert path reports band 0 and is **never** clamped (wide drafts are the win there: 144.7 ->
-  378.7 t/s; a naked `--spec-ngram-mod-n-max` below `n_min` silently disables ngram-mod instead).  Rule:
+  378.7 t/s; a naked `--spec-ngram-mod-n-max` below `n_min` silently disables ngram-mod instead).  **The
+  clamp runs AFTER `llama_init_from_model`, on the arena's real state (r129, TODO #96):** the model-load band
+  only says the slab was *armed*, so clamping there clamped slab-declined (streaming, no-arena) configs.  It
+  therefore no longer lowers `cparams.n_rs_batch` — that stays the **unclamped** safety bound (a partial
+  rollback can land in any batch up to an unclamped draft; the value also floors the chunked-GDN threshold,
+  so an ngram speculator's prefill *tail* ubatches take the sequential bit-identical GDN path) — and the
+  slab's narrow verify reserve takes the band-limited width instead (`llama_context::verify_batch_width()`),
+  so a live arena reserves exactly what it did before.  Rule:
   `GREEDY-PURITY.md` §50; record: `archive/work/ngram-mod-host-experts/EVIDENCE-2026-10-24.md`.
 - **The mmvq band-uniform knobs are a purity requirement *and* a perf trap.** `nwarps` and the vec_dot
   VDR participate in the mmvq K-split order, so one value must hold across the whole band (`W=1..8`)

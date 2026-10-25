@@ -520,21 +520,29 @@ whatever VRAM is left.
   `ggml_backend_device_i`; CUDA answers `moe_cache_enabled() ? moe_cache_max_tok_dev(device) : 0`),
   `llama_model_moe_cache_band()` (the smallest band over the host-expert devices), and
   `common_speculative_clamp_ngram_n_max()`: `common_init_from_params` clamps an **enabled** n-gram
-  speculator to `band - 1` after the model load (the preflight's decision is known there), lowers `n_min`
-  with it, and refreshes `cparams.n_rs_batch` so the slab's narrow verify floor and the GDN rollback bound
-  see the capped depth (the uncapped default also cost ~5 GiB of arena: 32938 -> 27814 MiB).  Clamped vs
+  speculator to `band - 1`, lowering `n_min` with it.  Clamped vs
   unclamped, 2x R9700 Flash-Next IQ4_NL `-sm tensor -ncmoe 36`, `prompts/recall.txt`, `-n 2000`: 168.3 vs
   73.9 t/s (`draft-mtp-adaptive,ngram-mod`), 160.2 vs 74.1 (`draft-mtp,ngram-mod`); the cliff is one row
   wide (159.2 t/s at a 16-row verify, 55.0 at 17).  **Not** applied to a device-resident model or the CPU
   expert path (band 0): there the wide draft is the win (378.7 vs 144.7 t/s).  `LLAMA_SPEC_NGRAM_MOD_BAND_CLAMP=0`
   restores the uncapped draft; a `draft.n_max` above the band warns instead of clamping (the 15 bound is a
-  correctness one).  **Known gating gap (TODO #96):** the clamp is applied in `common_init_from_params`
-  before `llama_init_from_model`, i.e. before the slab is created or declines at the first compute-buffer
-  allocation, so a config whose slab is armed and then declines (a small-VRAM card) is clamped even though
-  it streams with no arena; `LLAMA_SPEC_NGRAM_MOD_BAND_CLAMP=0` restores the wide draft there.  The slab
-  decline message names `GGML_CUDA_SLAB_RESERVE_MIB`, but on such a card the binding terms are usually
-  `GGML_CUDA_SLAB_MIN_ARENA_MIB` (the 2048 MiB floor) and `GGML_CUDA_SLAB_RING_MIB` (the H2D-ring hole).
-  `GREEDY-PURITY.md` §50, `ENVIRONMENT.md` §3, `WORKLOG.md` 261024.002 / 261024.006.
+  correctness one).  **Since r129 the clamp runs after `llama_init_from_model`, on the arena's real state
+  (TODO #96, block 09 + block 10).**  `llama_model_moe_cache_band()` answers from `moe_cache_enabled()`, and
+  the slab is only *armed* at model load — it is created or declines at the first compute-buffer allocation,
+  which is inside the context's widest reserve.  Clamping on the model-load answer clamped a slab-declined
+  config that runs the stock streaming path with no arena at all (issue #214's reporter class) and cost it
+  the wide draft (2x R9700 control: 67.6 vs 52.2 capped t/s).  The deferral is free (the speculator is built
+  from `params.speculative` much later) but it means the clamp can no longer refresh `cparams.n_rs_batch`:
+  that field stays the **unclamped** safety bound, because it is the widest batch a partial rollback can
+  land in (and floors the chunked-GDN threshold), while the slab's narrow verify reserve takes the
+  band-limited width instead (`llama_context::verify_batch_width()`), so a live arena reserves exactly what
+  it did before (measured: narrow floor 1024/1280 MiB and `identity fast path ON` 142/142, with and without
+  the speculator; the arena arm still clamps `64 -> 15`).  A decline that happens *after* the context exists
+  (an OOM-yield arena release) still leaves the draft clamped — `LLAMA_SPEC_NGRAM_MOD_BAND_CLAMP=0` is the
+  escape.  The slab's decline messages now name every knob that can make it fit (`MOE_EXPERT_CACHE_MIB` /
+  `GGML_CUDA_SLAB_MIN_ARENA_MIB` for the floor, `GGML_CUDA_SLAB_RING_MIB` for the H2D-ring hole,
+  `GGML_CUDA_SLAB_RESERVE_MIB` for the reserve) and print the ring term it previously only mentioned.
+  `GREEDY-PURITY.md` §50, `ENVIRONMENT.md` §3, `WORKLOG.md` 261024.002 / 261024.006 / 261024.010.
 * **int64_t min/max in this file use local helpers, not `std::min`/`std::max` (r124, issue #217).**  With
   HIP on Windows (clang + the MSVC STL) clang's force-included `cuda_wrappers/algorithm` and the MSVC STL
   `<utility>` each define an inline `std::min<long long>`; `int64_t` is `__int64` there, the `enable_if`

@@ -1,4 +1,4 @@
-From 358fd34396fd97d607c5f75734d0b736a3e0bcbd Mon Sep 17 00:00:00 2001
+From 95bf7c064100a21aa9e4f9173607fb14794860ea Mon Sep 17 00:00:00 2001
 From: Stew Forster <ci@rdna-boosts.invalid>
 Date: Wed, 21 Oct 2026 10:40:32 -0500
 Subject: [PATCH 09/13] rdna-boosts: block 09: host-resident MoE (iface,
@@ -218,7 +218,7 @@ MOE_EXPERT_CACHE_AUX_RESERVE_MIB override are identical wherever they are actual
 ---
  common/CMakeLists.txt                         |    2 +
  common/arg.cpp                                |   21 +-
- common/common.cpp                             |  215 +-
+ common/common.cpp                             |  228 +-
  common/common.h                               |   58 +-
  common/draft-reserve.cpp                      |  223 +
  common/draft-reserve.h                        |   44 +
@@ -281,7 +281,7 @@ MOE_EXPERT_CACHE_AUX_RESERVE_MIB override are identical wherever they are actual
  src/llama.cpp                                 |   16 +-
  tools/cli/cli.cpp                             |    6 +
  tools/llama-bench/llama-bench.cpp             |   65 +-
- 65 files changed, 14889 insertions(+), 518 deletions(-)
+ 65 files changed, 14902 insertions(+), 518 deletions(-)
  create mode 100644 common/draft-reserve.cpp
  create mode 100644 common/draft-reserve.h
  create mode 100644 ggml/src/ggml-cuda/cpy-batch.cu
@@ -359,7 +359,7 @@ index c9f3db0fb..c4d28e5f9 100644
          }
      ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_DRAFT_N_CPU_MOE"));
 diff --git a/common/common.cpp b/common/common.cpp
-index 7c2c9b11a..182ca82cd 100644
+index 7c2c9b11a..a4a45e891 100644
 --- a/common/common.cpp
 +++ b/common/common.cpp
 @@ -7,6 +7,7 @@
@@ -521,7 +521,7 @@ index 7c2c9b11a..182ca82cd 100644
              return t == COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH || t == COMMON_SPECULATIVE_TYPE_DRAFT_DSPARK; })) {
          gguf_init_params gp = { /*.no_alloc =*/ true, /*.ctx =*/ nullptr };
          if (gguf_context * g = gguf_init_from_file(params.speculative.draft.mparams.path.c_str(), gp)) {
-@@ -1399,6 +1496,64 @@ common_init_result::common_init_result(common_params & params, bool model_only)
+@@ -1399,6 +1496,55 @@ common_init_result::common_init_result(common_params & params, bool model_only)
          }
      }
  
@@ -543,7 +543,7 @@ index 7c2c9b11a..182ca82cd 100644
 +    }
 +
 +
-+    // TODO #59: bound the DRAFTLESS (n-gram) draft length by the MoE expert cache's verify band.
++    // TODO #59/#96: bound the DRAFTLESS (n-gram) draft length by the MoE expert cache's verify band.
 +    //
 +    // `ngram-mod` (and the ngram-map family) draft as far as their n-gram match reaches -- 48..64 tokens by
 +    // default, `--spec-ngram-mod-n-max` verbatim -- and every one of those tokens is a row of the verify
@@ -555,21 +555,41 @@ index 7c2c9b11a..182ca82cd 100644
 +    // 73.9 -> 168.3 t/s with the clamp.  The MTP/draft family is already bounded to 15 (i.e. a 16-row
 +    // verify) by `LLAMA_SPEC_DRAFT_N_MAX_CLAMP` above.
 +    //
-+    // The band is only known once the model is loaded (the expert-cache preflight decides there whether the
-+    // cache is active at all), so the clamp lands here and refreshes `cparams.n_rs_batch` -- the width the
-+    // slab's narrow verify floor and the chunked-GDN rollback bound are computed from.  A device-resident
-+    // model, or one whose host experts are computed on the CPU, reports no band and is never clamped: there
-+    // the wide draft is the win (144.7 -> 378.7 t/s measured on the same model fully resident).
-+    // LLAMA_SPEC_NGRAM_MOD_BAND_CLAMP=0 keeps the uncapped draft (A/B and bisect only).
++    // **The clamp is applied AFTER the context, on the arena's real state (TODO #96).**
++    // `llama_model_moe_cache_band()` answers from `moe_cache_enabled()`, and the arena is only ARMED at
++    // model load: the movable-boundary slab is created (or it declines) at the first compute-buffer
++    // allocation, which is inside `llama_init_from_model` (its widest reserve), and a decline there calls
++    // `moe_cache_disable_streaming()`.  Clamping on the model-load answer therefore clamped configs that
++    // run the stock streaming path with NO arena -- exactly the class in the issue #214 report
++    // (`the movable-boundary slab does NOT fit` + `moe_cache_disable_streaming`) -- and that cost the
++    // copy-heavy win the wide draft gives off the arena (2x R9700 control: 67.6 wide vs 52.2 capped t/s).
++    // A device-resident model, or one whose host experts are computed on the CPU, reports no band and is
++    // never clamped either: there the wide draft is the win (144.7 -> 378.7 t/s measured on the same model
++    // fully resident).  `LLAMA_SPEC_NGRAM_MOD_BAND_CLAMP=0` keeps the uncapped draft (A/B and bisect only).
++    //
++    // The deferral is free: nothing between here and the speculator's construction reads the draft length.
++    // What must NOT be deferred is `cparams.n_rs_batch`, which stays the UNCLAMPED safety bound from
++    // `common_context_params_to_llama` -- it is the correctness bound (the widest per-seq batch a partial
++    // rollback can land in) and it floors the chunked-GDN threshold.  The slab's narrow (decode/verify)
++    // reserve takes the band-limited width instead (`llama_context::verify_batch_width()`), so a live arena
++    // still reserves for the clamped draft rather than for the wide one.
++
+     llama_context * lctx = llama_init_from_model(model, cparams);
+     llama_model_set_embeddings_layer_inp_preset(model, nullptr, 0); // only this context: not an MTP draft context made later
+     if (lctx == NULL) {
+@@ -1408,6 +1554,28 @@ common_init_result::common_init_result(common_params & params, bool model_only)
+ 
+     pimpl->context.reset(lctx);
+ 
++    // TODO #59/#96: the band the CONTEXT reports is the one this run will have -- 0 when the slab declined
++    // or the arena was released to satisfy an allocation, so a no-arena config keeps its wide draft.
 +    if (const int moe_band = llama_model_moe_cache_band(model); moe_band > 1) {
 +        static const bool band_clamp_enabled = []() {
 +            const char * env = getenv("LLAMA_SPEC_NGRAM_MOD_BAND_CLAMP");
 +            return env == nullptr || atoi(env) != 0;
 +        }();
 +        if (band_clamp_enabled) {
-+            if (common_speculative_clamp_ngram_n_max(&params.speculative, moe_band - 1)) {
-+                cparams.n_rs_batch = std::max(1, common_speculative_n_max(&params.speculative) + 1);
-+            }
++            common_speculative_clamp_ngram_n_max(&params.speculative, moe_band - 1);
 +        }
 +        // The draft-based speculators (MTP / MTP-adaptive / draft-simple / eagle3) are bounded to 15 rather
 +        // than to the band: that bound is a correctness one (the recurrent rollback snapshot set), and on
@@ -583,10 +603,10 @@ index 7c2c9b11a..182ca82cd 100644
 +        }
 +    }
 +
-     llama_context * lctx = llama_init_from_model(model, cparams);
-     llama_model_set_embeddings_layer_inp_preset(model, nullptr, 0); // only this context: not an MTP draft context made later
-     if (lctx == NULL) {
-@@ -1417,6 +1572,14 @@ llama_model * common_init_result::model() {
+     set_process_priority(params.cpuparams.priority);
+ 
+     pimpl->threadpools.init(lctx, params);
+@@ -1417,6 +1585,14 @@ llama_model * common_init_result::model() {
      return pimpl->model.get();
  }
  
@@ -601,7 +621,7 @@ index 7c2c9b11a..182ca82cd 100644
  llama_context * common_init_result::context() {
      return pimpl->context.get();
  }
-@@ -1446,7 +1609,7 @@ static void common_batch_set_zero_state(common_batch & batch, const llama_model
+@@ -1446,7 +1622,7 @@ static void common_batch_set_zero_state(common_batch & batch, const llama_model
      }
  }
  
@@ -610,7 +630,7 @@ index 7c2c9b11a..182ca82cd 100644
      // --spec-draft-n-max is capped at 15 (a clamp, not an error).  There are two independent
      // bounds, and they have different severities:
      //
-@@ -1517,7 +1680,38 @@ common_init_result_ptr common_init_from_params(common_params & params, bool mode
+@@ -1517,7 +1693,38 @@ common_init_result_ptr common_init_from_params(common_params & params, bool mode
          }
      }
  
@@ -650,7 +670,7 @@ index 7c2c9b11a..182ca82cd 100644
  
      llama_model * model = res->model();
      if (model == NULL) {
-@@ -1782,6 +1976,14 @@ struct llama_model_params common_model_params_to_llama(common_params & params) {
+@@ -1782,6 +1989,14 @@ struct llama_model_params common_model_params_to_llama(common_params & params) {
      mparams.split_mode      = params.split_mode;
      mparams.load_mode       = params.load_mode;
      mparams.lazy_mode = params.lazy_mode;
@@ -665,7 +685,7 @@ index 7c2c9b11a..182ca82cd 100644
      mparams.tensor_split    = params.tensor_split;
      mparams.check_tensors   = params.check_tensors;
      mparams.use_extra_bufts = !params.no_extra_bufts;
-@@ -1845,6 +2047,7 @@ struct llama_context_params common_context_params_to_llama(const common_params &
+@@ -1845,6 +2060,7 @@ struct llama_context_params common_context_params_to_llama(const common_params &
      cparams.op_offload        = !params.no_op_offload;
      cparams.swa_full          = params.swa_full;
      cparams.kv_unified        = params.kv_unified;

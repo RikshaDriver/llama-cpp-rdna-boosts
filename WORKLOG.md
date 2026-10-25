@@ -1,5 +1,102 @@
 # WORKLOG - dated delivery records
 
+## 261024.010 (r129) -- TODO #96 fixed (the band clamp runs on the live arena), #97 and #99 retired
+
+**Release:** `v14-3f03b1772-r129`.  Base `3f03b1772` (base tree `14370bd49a`), canonical tip `99a2736fb`,
+tree `de1edae72cae8505ddbc6882acf8d2e11f891f41`, 14 blocks.  `scripts/validate-set.sh` green (checksums,
+fresh-tarball **strict 14/14** `git am`, applied tree == recorded tree).  **No block renumbered, merged or
+split**; the change is amendments inside blocks 09/10/12 plus a re-cut of every patch (the `From <sha>`
+lines change on any rebuild).  The delta against the r128 tree is **5 files, +76 / -30**: `common/common.cpp`
+(block 09), `ggml/src/ggml-cuda/ggml-cuda{,-slab}.*` (block 10), `src/llama-context.{cpp,h}` (block 12).
+No kernel, no dispatch, no default changed.
+
+### #96 -- the n-gram band clamp ran on the model-load *armed* flag, not on the arena
+
+`common` clamped an enabled n-gram speculator to `band - 1` **before** `llama_init_from_model`, but the
+movable-boundary slab is only *armed* at model load: it is created or it declines at the first compute-buffer
+allocation, which is **inside** the context's widest reserve, and a decline there calls
+`moe_cache_disable_streaming()`.  So a host-expert config whose slab is armed and then declines was clamped
+to 15 while it streamed with no arena — issue #214's reporter class — and lost the wide draft that is the win
+on that path.  Reproduced on gfx1201 at r128 (35B-A3B UD Q4_K_M `-ngl 99 -ncmoe 40 --spec-type ngram-mod
+GGML_CUDA_SLAB_MIN_ARENA_MIB=999999 --fit off`, `-lv 3`): `ngram-mod: draft length 64 -> 15` in the same
+second as the slab decline — i.e. *before* it.
+
+**The fix is the TODO's option 1 (split the two widths), implemented without a new public knob.**  The clamp
+moves to **after** `llama_init_from_model`, where `llama_model_moe_cache_band()` answers from the arena's real
+state (a declined slab or a released arena reports 0, and the wide draft is kept).  The deferral is free --
+the speculator is built from `params.speculative` long after this -- but it means the clamp can no longer
+lower `cparams.n_rs_batch`, because that context already exists.  That field now stays the **unclamped
+safety bound** (`common_speculative_n_max() + 1`, i.e. 65 for `ngram-mod`'s default 64), which is the
+*correctness* quantity (the widest per-seq batch a partial rollback can land in) and the value floored into
+the chunked-GDN threshold, so a 64-row verify can never take the chunked path.  What it no longer does is
+size the slab's narrow (decode/verify) reserve: that takes the band-limited width instead, through a new
+`llama_context::verify_batch_width()` (the live band, falling back to `n_rs_batch` when there is none) at the
+three reserve probes.  A live arena therefore reserves byte-for-byte what it did before.
+
+**The decline messages now name every knob.**  `ggml_cuda_slab_init_locked` prints the H2D-ring term
+explicitly (it only said "plus the H2D-ring hole" before) and lists `MOE_EXPERT_CACHE_MIB` /
+`GGML_CUDA_SLAB_MIN_ARENA_MIB` (floor), `GGML_CUDA_SLAB_RING_MIB` (ring hole) and
+`GGML_CUDA_SLAB_RESERVE_MIB` (reserve); the `moe_cache_disable_streaming` companion and the #136
+could-not-be-created message name the same set.  In the #214 report 768 + 2048 = 2816 fit in 3072 MiB
+available and the auto-sized ~1.6 GiB ring hole was the binding term, which the old message named nothing for.
+
+**Gates (gfx1201, ROCm 10.1.0, `~/bin/build-llama-rocm`; every fresh-process text comparison with
+`ROCBLAS_USE_HIPBLASLT=0`).**
+
+| gate | result |
+|---|---|
+| 35B-A3B UD Q4_K_M, 1 GPU `-ncmoe 40`, ngram-mod, **slab declined** (`GGML_CUDA_SLAB_MIN_ARENA_MIB=999999`) | **no clamp line**, `llama_context: n_rs_batch = 65`; greedy text identical to `--spec-type none` (plain) and to the pre-fix workaround arm |
+| 35B-A3B UD Q4_K_M, 3 GPU `-sm tensor -ncmoe 40`, ngram-mod, **live arena** | clamp still fires (`draft length 64 -> 15`), `n_rs_batch = 65`; slab narrow floor **1024/1280 MiB** and `identity fast path ON` **142/142**, identical to the same run with `--spec-type none` (arena unchanged) |
+| arena arm, n_rs_batch 16 (`--spec-ngram-mod-n-max 15`) vs 65 (`--spec-ngram-mod-n-match 6 ...-n-min 3`, real drafts), 4 arms incl. `GGML_CUDA_GDN_TAIL=0` | greedy text **byte-identical** across all four (`d211ddbaea840906`); prefill 274.1 / 272.2 / 270.7 / 275.8 t/s -- the extra sequential GDN tail is **<= 1 %**, not the 12 % a first (verbose-logging) pair suggested |
+| no-arena arm, plain vs wide ngram-mod vs capped ngram-mod (2 GPU `-sm tensor`, real drafts) | greedy text byte-identical across all three; the wide draft is honoured again as the user configured it |
+| dense 27B UD-Q4_K_XL, 3 GPU `-sm tensor`, prose prompt, `-n 200`, seed 42 | `plain == draft-mtp`, 2257 chars sha **`9ef118407493cbb0`** |
+| per-block build (`--changed-from 68d69cd99`, fresh dir per commit) | **4/4 built, 0 failed** (blocks 09, 10, 12 and the tip; the other 10 deltas are byte-identical to r128) |
+| prefill logits | not run: no prefill kernel, dispatch or default changed (the arena reserve width is unchanged, verified above) |
+| `validate-set.sh` | green -- strict 14/14 on a fresh tarball, tree == `release.json.tree` |
+
+The one accepted trade, documented in `ENVIRONMENT.md` §3 and `GREEDY-PURITY.md` §50: a GDN model with an
+enabled ngram speculator now floors the chunked-GDN threshold at the **unclamped** draft width for the whole
+run, so a prefill **tail** ubatch below it takes the sequential (bit-identical) kernel -- measured <= 1 % on
+the 16k-prompt arm above.  And a decline that happens *after* the context exists (an OOM-yield arena release
+inside `ggml_cuda_device_malloc`) still leaves the draft clamped; `LLAMA_SPEC_NGRAM_MOD_BAND_CLAMP=0` is the
+escape in both cases.
+
+### #97 -- retired: the RDNA2 half closed on the reporter's own sweep
+
+r126 fixed the RDNA4 half (the `ncols == 64` MMA band row was also the prefill instantiation).  The RDNA2
+half was never measurable here -- the box has **no gfx1030/gfx1031**, and its only RDNA2 silicon is a
+**gfx1036 iGPU with a 2 GiB BAR and ~1.8 GiB already taken by the desktop**, i.e. no room for a model, a KV
+cache or an FA staging arena (checked with `rocm-smi --showmeminfo vram` before discarding the arm).  The
+reporter ran the depth sweep on their 12 GiB gfx1031 card against the current build and **reported it works
+well** (maintainer relay), so neither block 05's RDNA2 tile table nor the `prefill_stages = !RDNA3_5` staging
+gate shows issue #214's shape on RDNA2.  No code changed for it; record
+`archive/work/deep-prefill-depth-scaling/README.md` ("Resolution").
+
+### #99 -- retired: the premise was measured and does not hold
+
+`TODO.md` #99 kept "restore the W=5..8 band geometry via a compile-time band instantiation, only if a
+decode-bound workload shows it pays".  There is no decode-bound head-256/GQA-8 workload in the fleet (the
+only models that reach the band are MoE and are measured with host experts, where FA is a minority of the
+step), and r129 measured the two geometries that already exist end to end: on the arm that reaches W=8 every
+step (3 GPU `-sm tensor`, Flash-Next IQ4_NL + shared MTP head, `-ncmoe 48`, `--spec-draft-n-max 7`, 2 reps)
+**default 110.1 / 110.2 t/s vs `GGML_HIP_FA_BAND_WIDE=0` 108.9 / 107.6 t/s** -- the shipping 256-thread row
+is the faster of the two, and greedy text is byte-identical across all four runs (`883f4c55ece2`).  So the
+16-warp geometry's kernel-level ~17 % still does not reach the wall clock, and the instantiation would ship
+an unvalidated FA variant (a new template parameter + a fresh `template-instances/*.cu` set on the build-time
+hot spot + the prefill purity gate) for no measured gain.  Declined; record
+`archive/work/rdna4-fa-band-wide/README.md` ("Status after r126/r129"), which also keeps the two-tile arm as
+the starting point if a decode-bound head-256/GQA-8 model ever appears.
+
+### Docs
+
+`patches/README.md` block 09 (the clamp bullet now describes the post-context clamp, the `n_rs_batch` split
+and the new decline-message knobs), `ENVIRONMENT.md` §3 (`LLAMA_SPEC_NGRAM_MOD_BAND_CLAMP`, incl. the GDN
+tail trade and the post-context OOM-yield caveat), `GREEDY-PURITY.md` §50 (same), `README.md` (the "no active
+arena" note: a slab-declined config is no longer clamped, and the decline message names all three knobs),
+`AGENTS.md` (the draft-length bullet), `MANIFESTS.md` (block 09's verify-band gate: a slab-declined arm must
+log **no** clamp and `n_rs_batch = 65`), `README.md`/`BASELINE.md`/`AGENTS.md`/`TODO.md` release strings.
+`TODO.md`: **#96, #97 and #99 removed** (a closed item is a WORKLOG entry, never a TODO row).
+
 ## 261024.009 (r128) -- TODO #100 and #101 retired: the `HC_COMBINE` oracle, and the `ml_l` rename removed
 
 **Release:** `v14-3f03b1772-r128`.  Base `3f03b1772` (base tree `14370bd49a`), canonical tip `828be32a7`,

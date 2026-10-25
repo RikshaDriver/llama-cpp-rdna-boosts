@@ -69,3 +69,32 @@ already at 256 VGPRs, so the prefetch registers raised the 32-column block's scr
 
 The `GGML_HIP_FA_BAND_WMMA_SPLIT` values 48, 64 and 96 were all slower than the default of 32, with
 the wide block too.
+
+## Status after r126/r129 (2026-10-24) -- measured again, declined (TODO #99 retired)
+
+r126 **deleted** the `ncols == 64` band row from the delivery, because it was also the prefill
+instantiation (deep-context prefill -26 % on the FA kernel at `pp512 @ d98304`; `WORKLOG.md` 261024.007).
+The W=5..8 verify band therefore runs the 256-thread table row `(256, 2, 64, 128, 128, 64, 1, true)` at
+KV >= 4096, and the two-tile 16-warp path (`ncols1 = 4`, `GGML_HIP_FA_BAND_WIDE=0`) below it.
+
+`TODO.md` #99 kept "restore the W=5..8 band geometry via a compile-time band instantiation, **only if a
+decode-bound workload shows it pays**".  r129 measured the premise and it does not hold on this fleet:
+
+* **There is no decode-bound head-256/GQA-8 workload here.**  The only models that reach the band are MoE
+  (Flash-Next, Gemma4-A4B) and are measured with host experts (`-ncmoe`), i.e. FA is a minority of the
+  step -- r126's own arm already showed the row swap was noise end to end (248.8/239.6 vs 241.2/249.7 t/s).
+* **The two available geometries, end to end** (gfx1201, 3 GPU `-sm tensor`, Flash-Next IQ4_NL +
+  shared MTP head, `-ncmoe 48`, q8_0 K/V, `-c 32768`, `prompts/recall.txt`, `-n 200`, `--spec-draft-n-max 7`
+  so the verify is W=8, `ROCBLAS_USE_HIPBLASLT=0`, 2 reps each): **default 110.1 / 110.2 t/s vs
+  `GGML_HIP_FA_BAND_WIDE=0` 108.9 / 107.6 t/s** -- the shipping arm is the faster of the two by ~1.6 %, and
+  greedy text is byte-identical across all four runs (`883f4c55ece2`), consistent with the "bit-identical
+  per column" claim for the two-tile path.  So the 16-warp geometry's kernel-level ~17 % does not reach the
+  wall clock even on the arm that reaches W=8 most often.
+
+Cutting the instantiation would therefore ship an unvalidated FA variant for no measured gain: it needs a
+new `bool band` template parameter threaded through the kernel/launcher **and** a fresh
+`template-instances/*.cu` set for the KV-type axis (a shape that is already the build-time hot spot), and
+the prefill-side purity gate.  Declined.  If a decode-bound head-256/GQA-8 model ever appears, start from
+`GGML_HIP_FA_BAND_WIDE=0` (the two-tile 16-warp path already exists and is bit-identical) and only then
+consider the one-pass 16-warp variant; the r126 measurement and the two-arm A/B above are the baseline it
+would have to beat.
