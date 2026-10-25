@@ -1,8 +1,8 @@
-From 46394d24ea9fb3efffe3a57a465d352aaa8205e7 Mon Sep 17 00:00:00 2001
+From 730660c55d0d3fd1d3bb54fda8da572ac6c08f89 Mon Sep 17 00:00:00 2001
 From: Stew Forster <ci@rdna-boosts.invalid>
 Date: Wed, 21 Oct 2026 10:40:32 -0500
 Subject: [PATCH 12/13] rdna-boosts: block 12: campaign remainder (CPU wins,
- backend iface fills, DFlash, FA build grouping)
+ backend iface fills, DFlash, FA build grouping, server prompt cache)
 
 The delivery content not owned by blocks 00-11: the CPU top-k block prefilter
 (common/sampling.cpp), the x86 quants / repack / arch-fallback campaign wins,
@@ -61,10 +61,45 @@ ranking in `moe_cache_apply_identity_pref_locked` over to `heat_rank_vec()`.  Bl
 there so that block 09 builds on its own (`heat_rank_vec` is introduced here with the band-split prior); the
 two rankings are byte-identical in block 09's tree, which has no decode counter.  The merged tree is
 unchanged.
+
+Fold (r130, PR #210, overdoingism): server prompt-cache residency.  With a unified KV cache and
+`--cache-idle-slots` (default on), every new task saved each idle slot to the host prompt cache and cleared
+it, so two conversations taking turns on two slots copied their whole state out and back on every switch
+(Qwen3.8-27B: 330 MiB of recurrent state plus 3.8 GB of KV at 110K tokens, 1.6-2.7 s per switch).  An idle
+slot now keeps its context when a new task starts; the KV-full path (`try_clear_idle_slots`) saves the
+least recently used idle slot to the prompt cache before clearing it (it used to purge it); a restore that
+fails for want of cells held by another idle slot moves idle slots out of the way one at a time, with the
+entry being restored held out of that eviction, and retries; and the slot-selection save holds the entry
+the task is about to restore out of its own eviction.  `server_prompt_cache::find()` is split out of
+`load()` for that.  The buffers of restored/evicted states are kept for the next save (smallest sufficient
+spare, counted against `--cache-ram` together with the cached states).  `LLAMA_SERVER_LAZY_IDLE_SLOTS=0`
+and `LLAMA_SERVER_CACHE_REUSE=0` restore the eager behaviour.  There are no arithmetic changes; a
+different cache history places a sequence's KV in other cells, which is the already-accepted `--kv-unified`
+non-determinism (`GREEDY-PURITY.md` section 38), and the patch's teacher-forced KLD is at the
+long-context noise floor.  `find()` also skips an entry whose main state buffer was already consumed: a
+restore that failed on the draft buffer leaves such an entry behind, and re-matching it compared against
+zero bytes and reported success.  The upstream server test `unit/test_kv_keep_only_active.py` is updated
+for the new default and covers the kill switch.
+
+Fold (r130, PR #212, overdoingism): DFlash prompt-ingest tail.  Every layer of the Qwen3.8-27B DFlash2
+draft attends over a 2048-position sliding window and its KV cache is sized for the window, but
+`process()` fed it every prompt row: a 110K prompt encoded 110K rows, all but the last ~2048 dropped
+without ever being read, and each prompt batch waited on the target before the draft could start, which
+also broke the queue of the target's ubatches.  When every draft layer has a window, the DFlash impl now
+takes the prompt end from `set_prompt_end()` (the block-02 hook) and skips the prompt rows before the last
+`n_swa` positions; a batch left with no rows returns before the target wait, and the first generation row
+resets the threshold as in the MTP impl.  Exact because DFlash sets `LLAMA_SWA_TYPE_STANDARD`
+unconditionally (`src/models/dflash.cpp`), so the mask is `p1 - p0 >= n_swa`.  New staging query
+`llama_model_n_layer_swa()` in `src/llama-ext.h` (the per-layer pattern is not reachable through
+`llama_model_meta_val_str()`, which skips array values).  `LLAMA_DFLASH_INGEST_TAIL=0` feeds every row.
+Measured (3x gfx1201, `-sm tensor -mg 0`, 27B UD-Q4_K_XL plus DFlash2-Q4_K_M, `-fa on -ctk/ctv q8_0`):
+prefill +8-12 % at 6K/26K/88K tokens (88.6K: 1271 -> 1395 t/s, no-draft 1415 t/s, so the draft's share of
+the prefill goes 10.2 % -> 1.4 %), and 35B-A3B Q4_K_M plus its DFlash2 draft +14.6 % at 6.1K; greedy text
+and draft counts byte-identical in every arm (one and two slots, `-ub 512` and `-ub 2048`).
 ---
  common/arg.cpp                                |    5 +-
  common/sampling.cpp                           |  224 ++-
- common/speculative.cpp                        |  102 +-
+ common/speculative.cpp                        |  152 +-
  ggml/include/ggml-alloc.h                     |    7 +-
  ggml/include/ggml-backend.h                   |   14 +
  ggml/include/ggml-rpc.h                       |    4 +-
@@ -89,13 +124,18 @@ unchanged.
  include/llama.h                               |    7 +-
  src/llama-context.cpp                         |  436 +++-
  src/llama-context.h                           |   22 +
+ src/llama-ext.h                               |    3 +
  src/llama-model-loader.cpp                    |   41 +-
  src/llama-model-loader.h                      |   12 +-
- src/llama-model.cpp                           |   78 +-
+ src/llama-model.cpp                           |   89 +-
  src/llama-model.h                             |   13 +-
  src/llama.cpp                                 |    4 +
  src/models/dflash.cpp                         |   89 +-
- 33 files changed, 2966 insertions(+), 724 deletions(-)
+ tools/server/server-context.cpp               |   71 +-
+ tools/server/server-task.cpp                  |   74 +-
+ tools/server/server-task.h                    |   11 +
+ .../tests/unit/test_kv_keep_only_active.py    |   60 +-
+ 38 files changed, 3223 insertions(+), 747 deletions(-)
 
 diff --git a/common/arg.cpp b/common/arg.cpp
 index 5be48e428..4c2e0fa63 100644
@@ -402,7 +442,7 @@ index 564fa9c4d..da77044b7 100644
      // Check if a backend sampler has already sampled a token in which case we
      // return that token id directly.
 diff --git a/common/speculative.cpp b/common/speculative.cpp
-index 42f989869..edc125b4e 100644
+index 42f989869..1e9ab3263 100644
 --- a/common/speculative.cpp
 +++ b/common/speculative.cpp
 @@ -998,6 +998,14 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
@@ -420,7 +460,49 @@ index 42f989869..edc125b4e 100644
      std::vector<common_sampler_ptr> smpls;
  
      // backend sampler chain per seq, attached to ctx_dft
-@@ -1150,6 +1158,29 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
+@@ -1033,6 +1041,14 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
+     // block-internal attention
+     bool causal_attn = false;
+ 
++    // every layer of the draft attends over a sliding window of n_swa positions: a prompt row older than the last n_swa
++    // positions of the prompt never reaches a draft, so it is not ingested (LLAMA_DFLASH_INGEST_TAIL=0: every row).
++    // Exact because DFlash sets LLAMA_SWA_TYPE_STANDARD unconditionally (src/models/dflash.cpp): the mask is
++    // p1 - p0 >= n_swa, so a prompt's last n_swa positions are exactly the rows a first generation row can attend to.
++    // (A LLAMA_SWA_TYPE_CHUNKED window reaches back to the chunk start -- up to 2*n_swa-1 -- and would need a wider tail.)
++    int32_t                ingest_window = 0;
++    std::vector<llama_pos> ingest_from;
++
+     const int32_t * target_layer_ids   = nullptr; // model_dft's extract layer indices
+     uint32_t        target_layer_ids_n = 0;
+ 
+@@ -1088,6 +1104,15 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
+         }
+         mask_token_id = llama_vocab_mask(llama_model_get_vocab(model_dft));
+ 
++        {
++            const char *  e     = getenv("LLAMA_DFLASH_INGEST_TAIL");
++            const int32_t n_swa = llama_model_n_swa(model_dft);
++            if ((e == nullptr || atoi(e) != 0) && n_swa > 0 && llama_model_n_layer_swa(model_dft) == llama_model_n_layer(model_dft)) {
++                ingest_window = n_swa;
++            }
++            ingest_from.assign(n_seq, 0);
++        }
++
+         if (is_dspark && this->params.p_min > 0.0f) {
+             char buf[16] = {};
+             const bool has_conf =
+@@ -1102,6 +1127,10 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
+         LOG_INF("%s: - n_max=%d, n_min=%d, p_min=%.2f\n", __func__, this->params.n_max, this->params.n_min, this->params.p_min);
+         LOG_INF("%s: - block_size=%d, mask_token_id=%d, n_extract=%u, sample_from_anchor=%s\n", __func__,
+                 block_size, mask_token_id, target_layer_ids_n, sample_from_anchor ? "true" : "false");
++        if (ingest_window > 0) {
++            LOG_INF("%s: - every layer has a %d-position window: a prompt is ingested from its last %d positions\n", __func__,
++                    ingest_window, ingest_window);
++        }
+ 
+         // DFlash input is [id_last, <mask> * (block_size-1)]: in-place denoising yields at most
+         // block_size-1 draft tokens, anchor-first DSpark yields a full block_size draft tokens
+@@ -1150,6 +1179,29 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
              llama_set_embeddings_layer_inp(ctx_tgt, (uint32_t) target_layer_ids[k], true);
          }
  
@@ -450,7 +532,7 @@ index 42f989869..edc125b4e 100644
          // DFlash2 reads its selector lattice from h_nextn and never consumes raw logits.
          llama_set_embeddings_nextn(ctx_dft, true, /*masked*/ !is_dflash2 && !is_lilicorr);
          llama_set_causal_attn(ctx_dft, causal_attn); // DFlash needs non-causal attention unless the model says otherwise
-@@ -1167,6 +1198,10 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
+@@ -1167,6 +1219,10 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
              llama_sampler_free(backend_chains[seq_id]);
          }
          backend_chains.clear();
@@ -461,7 +543,48 @@ index 42f989869..edc125b4e 100644
      }
  
      void begin(llama_seq_id seq_id, const llama_tokens & prompt) override {
-@@ -1226,12 +1261,56 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
+@@ -1190,6 +1246,12 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
+         }
+     }
+ 
++    void set_prompt_end(llama_seq_id seq_id, llama_pos n_prompt) override {
++        if (ingest_window > 0 && seq_id >= 0 && seq_id < (llama_seq_id) n_seq) {
++            ingest_from[seq_id] = std::max<llama_pos>(0, n_prompt - ingest_window);
++        }
++    }
++
+     bool process(const common_batch & batch_in) override {
+         if (batch_in.size() <= 0) {
+             return true;
+@@ -1221,17 +1283,84 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
+             }
+         }
+ 
++        // prompt rows before the draft's window of the prompt's end are never attended to; a batch left with none (a
++        // long prompt's leading ubatches) returns before the wait on the target, so the target's ubatches stay queued
++        if (ingest_window > 0) {
++            bool any = false;
++            for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) n_seq; ++seq_id) {
++                while (i_batch_beg[seq_id] >= 0 && i_batch_beg[seq_id] <= i_batch_end[seq_id] &&
++                       batch_in.tokens[i_batch_beg[seq_id]].pos[0] < ingest_from[seq_id]) {
++                    i_batch_beg[seq_id]++;
++                }
++                if (i_batch_beg[seq_id] > i_batch_end[seq_id]) {
++                    i_batch_beg[seq_id] = -1;
++                }
++                // generation reached (a row at the prompt end or later): later position shifts never skip rows
++                if (i_batch_end[seq_id] >= 0 && batch_in.tokens[i_batch_end[seq_id]].pos[0] >= ingest_from[seq_id] + ingest_window) {
++                    ingest_from[seq_id] = 0;
++                }
++                any = any || i_batch_beg[seq_id] >= 0;
++            }
++            if (!any) {
++                return true;
++            }
++        }
++
+         auto * ctx_tgt = this->params.ctx_tgt;
+         auto * ctx_dft = this->params.ctx_dft;
  
          const int32_t n_ubatch = (int32_t) llama_n_ubatch(ctx_dft);
  
@@ -518,7 +641,7 @@ index 42f989869..edc125b4e 100644
              // an M-RoPE image pins all its rows to one position, so a windowed draft
              // cache cannot free cells for it - skip it, the draft can jump over the gap
              const bool pos_pinned = batch_in.tokens[i_batch_beg[seq_id]].pos[0] == batch_in.tokens[i_batch_end[seq_id]].pos[0];
-@@ -1290,6 +1369,10 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
+@@ -1290,6 +1419,10 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
              }
          }
  
@@ -529,7 +652,7 @@ index 42f989869..edc125b4e 100644
          return true;
      }
  
-@@ -2930,7 +3013,10 @@ common_speculative_init_result::common_speculative_init_result(
+@@ -2930,7 +3063,10 @@ common_speculative_init_result::common_speculative_init_result(
      llama_context * ctx_tgt,
      llama_model * model_dft_pre) :
      pimpl(new impl{}) {
@@ -541,7 +664,7 @@ index 42f989869..edc125b4e 100644
      const bool spec_mtp = params.speculative.has_mtp();
  
      auto mparams = common_model_params_to_llama(params);
-@@ -2956,6 +3042,20 @@ common_speculative_init_result::common_speculative_init_result(
+@@ -2956,6 +3092,20 @@ common_speculative_init_result::common_speculative_init_result(
      // the draft context holds as many tokens per sequence as the target context
      cparams.n_ctx = llama_n_ctx(ctx_tgt);
  
@@ -4951,6 +5074,20 @@ index 7559664db..843afe46f 100644
  
      // env: LLAMA_GRAPH_REUSE_DISABLE
      bool graph_reuse_disable = false;
+diff --git a/src/llama-ext.h b/src/llama-ext.h
+index 77471bc25..a7d528f6f 100644
+--- a/src/llama-ext.h
++++ b/src/llama-ext.h
+@@ -176,6 +176,9 @@ LLAMA_API llama_context * llama_get_ctx_other(struct llama_context * ctx);
+ 
+ LLAMA_API int32_t llama_model_dflash_selector_top_k(const struct llama_model * model);
+ 
++// number of layers that attend over a sliding window of llama_model_n_swa() positions
++LLAMA_API int32_t llama_model_n_layer_swa(const struct llama_model * model);
++
+ // returns pointer to the target-model layer indices
+ LLAMA_API const int32_t * llama_model_target_layer_ids  (const struct llama_model * model);
+ // returns the number of extracted layers from target model
 diff --git a/src/llama-model-loader.cpp b/src/llama-model-loader.cpp
 index ce96be4ff..16c1bf97e 100644
 --- a/src/llama-model-loader.cpp
@@ -5054,7 +5191,7 @@ index d13253e84..0870f80e0 100644
      bool no_alloc;
      bool load_mtp;
 diff --git a/src/llama-model.cpp b/src/llama-model.cpp
-index 1d77143d9..daf42cf47 100644
+index 1d77143d9..4df3788e5 100644
 --- a/src/llama-model.cpp
 +++ b/src/llama-model.cpp
 @@ -1997,7 +1997,47 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
@@ -5149,6 +5286,24 @@ index 1d77143d9..daf42cf47 100644
  uint64_t llama_model::n_elements() const {
      return pimpl->n_elements;
  }
+@@ -3582,6 +3658,17 @@ int32_t llama_model_n_swa(const llama_model * model) {
+     return model->hparams.n_swa;
+ }
+ 
++int32_t llama_model_n_layer_swa(const llama_model * model) {
++    if (model->hparams.n_swa == 0) {
++        return 0;
++    }
++    int32_t n = 0;
++    for (uint32_t il = 0; il < model->hparams.n_layer(); ++il) {
++        n += model->hparams.is_swa(il) ? 1 : 0;
++    }
++    return n;
++}
++
+ 
+ uint32_t llama_model_n_cls_out(const struct llama_model * model) {
+     return model->hparams.n_cls_out;
 diff --git a/src/llama-model.h b/src/llama-model.h
 index b1ef80858..5f409bf15 100644
 --- a/src/llama-model.h
@@ -5320,6 +5475,409 @@ index e15af6afd..bedac4d60 100644
          // fuse the target features through the encoder
          ggml_tensor * inp_g = build_lora_mm(model.fc, inp_target, model.fc_s);
          inp_g = build_norm(inp_g, model.output_norm_enc, nullptr, LLM_NORM_RMS, -1);
+diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
+index 6790efe2f..3b2fc2dfe 100644
+--- a/tools/server/server-context.cpp
++++ b/tools/server/server-context.cpp
+@@ -1120,6 +1120,14 @@ private:
+ 
+     std::unique_ptr<server_prompt_cache> prompt_cache;
+ 
++    // LLAMA_SERVER_LAZY_IDLE_SLOTS (on unless 0): with a unified KV cache, an idle slot keeps its context when a new task
++    // starts and is saved to the prompt cache and cleared only once the KV cache runs out of room, so conversations that
++    // take turns on their own slots do not copy their whole state to host memory and back on every switch
++    const bool lazy_idle_slots = [] {
++        const char * e = getenv("LLAMA_SERVER_LAZY_IDLE_SLOTS");
++        return e == nullptr || atoi(e) != 0;
++    }();
++
+     server_metrics metrics;
+ 
+     // queued prompt stats - llama_decode() is async, so the timing is only valid after a sync
+@@ -1886,9 +1894,21 @@ private:
+ 
+                 const int64_t t_start = ggml_time_us();
+ 
++                // the entry this task will restore is held out of the cache while the slot is saved, so the eviction
++                // that the save may cause cannot drop it
++                std::list<server_prompt_cache_state> held;
++                if (lazy_idle_slots) {
++                    auto it = prompt_cache->find(ret->prompt, task.tokens);
++                    if (it != prompt_cache->states.end()) {
++                        held.splice(held.begin(), prompt_cache->states, it);
++                    }
++                }
++
+                 ret->prompt_save(*prompt_cache);
+ 
+-                if (!ret->prompt_load(*prompt_cache, task.tokens)) {
++                prompt_cache->states.splice(prompt_cache->states.end(), held);
++
++                if (!ret->prompt_load(*prompt_cache, task.tokens) && !prompt_load_with_room(*ret, task.tokens)) {
+                     ret->prompt_clear();
+                 }
+ 
+@@ -1901,18 +1921,63 @@ private:
+         return ret;
+     }
+ 
++    // a restore can fail for want of KV cells that another idle slot holds (unified KV cache): move idle slots to the prompt
++    // cache one at a time, with the entry being restored kept out of the eviction that their saving may cause, and retry
++    bool prompt_load_with_room(server_slot & slot, const server_tokens & tokens) {
++        if (!lazy_idle_slots || !params_base.kv_unified) {
++            return false;
++        }
++        while (true) {
++            auto it = prompt_cache->find(slot.prompt, tokens);
++            if (it == prompt_cache->states.end()) {
++                return false;
++            }
++            std::list<server_prompt_cache_state> held;
++            held.splice(held.begin(), prompt_cache->states, it);
++            const bool cleared = try_clear_idle_slots(&slot);
++            prompt_cache->states.splice(prompt_cache->states.end(), held);
++            if (!cleared) {
++                return false;
++            }
++            SLT_INF(slot, "%s", "retrying the prompt cache restore\n");
++            if (slot.prompt_load(*prompt_cache, tokens)) {
++                return true;
++            }
++        }
++    }
++
+     // return true if at least one slot has been cleared
+     // TODO: improve logic
+     //       - smarter decision which slot to clear (LRU or longest prompt?)
+     //       - move slot to level 2 cache instead of removing?
+     //       - instead of purging, try to store and resume later?
+-    bool try_clear_idle_slots() {
++    bool try_clear_idle_slots(const server_slot * keep = nullptr) {
+         bool res = false;
+ 
+         if (!params_base.kv_unified) {
+             return res;
+         }
+ 
++        if (lazy_idle_slots) {
++            // the least recently used idle slot goes first, and it goes to the prompt cache, so it can be resumed
++            server_slot * lru = nullptr;
++            for (auto & slot : slots) {
++                if (&slot != keep && !slot.is_processing() && slot.prompt.n_tokens() > 0 &&
++                        (lru == nullptr || slot.t_last_used < lru->t_last_used)) {
++                    lru = &slot;
++                }
++            }
++            if (lru == nullptr) {
++                return res;
++            }
++            SRV_WRN("making room in the KV cache: saving and clearing idle slot %d with %zu tokens\n", lru->id, lru->prompt.tokens.size());
++            if (prompt_cache && params_base.cache_idle_slots && lru->prompt_save(*prompt_cache)) {
++                prompt_cache->update();
++            }
++            lru->prompt_clear();
++            return true;
++        }
++
+         for (auto & slot : slots) {
+             if (slot.is_processing()) {
+                 continue;
+@@ -3031,7 +3096,7 @@ private:
+                         break; // drop the task
+                     }
+ 
+-                    if (params_base.cache_idle_slots) {
++                    if (params_base.cache_idle_slots && !lazy_idle_slots) {
+                         for (auto & slot : slots) {
+                             if (!slot.is_processing()) {
+                                 SLT_TRC(slot, "%s", "saving idle slot to prompt cache\n");
+diff --git a/tools/server/server-task.cpp b/tools/server/server-task.cpp
+index d7ac2a1dc..0104e6ac0 100644
+--- a/tools/server/server-task.cpp
++++ b/tools/server/server-task.cpp
+@@ -1743,6 +1743,48 @@ size_t server_prompt_cache::n_tokens() const {
+     return res;
+ }
+ 
++static bool prompt_cache_reuse() {
++    static const bool v = [] {
++        const char * e = getenv("LLAMA_SERVER_CACHE_REUSE");
++        return e == nullptr || atoi(e) != 0;
++    }();
++    return v;
++}
++
++std::vector<uint8_t> server_prompt_cache::take(size_t n) {
++    // the smallest spare that holds n bytes; resizing it down keeps the memory, resizing it up zero-fills only the tail
++    size_t best = spare.size();
++    for (size_t i = 0; i < spare.size(); ++i) {
++        if (spare[i].capacity() >= n && (best == spare.size() || spare[i].capacity() < spare[best].capacity())) {
++            best = i;
++        }
++    }
++    std::vector<uint8_t> buf;
++    if (best < spare.size()) {
++        buf = std::move(spare[best]);
++        spare.erase(spare.begin() + best);
++    }
++    buf.resize(n);
++    return buf;
++}
++
++void server_prompt_cache::recycle(std::vector<uint8_t> && buf) {
++    if (!prompt_cache_reuse() || buf.capacity() == 0) {
++        return;
++    }
++    spare.push_back(std::move(buf));
++    // the cached states and the spare buffers stay within the cache size limit together; the smallest spares go first
++    size_t total = size();
++    for (const auto & b : spare) {
++        total += b.capacity();
++    }
++    while (!spare.empty() && limit_size > 0 && total > limit_size) {
++        auto it = std::min_element(spare.begin(), spare.end(), [](const auto & a, const auto & b) { return a.capacity() < b.capacity(); });
++        total -= it->capacity();
++        spare.erase(it);
++    }
++}
++
+ server_prompt_cache_state * server_prompt_cache::alloc(const server_prompt & prompt, size_t state_size_tgt, size_t state_size_dft) {
+     // first check if the current state is contained fully in the cache
+     for (auto it = states.begin(); it != states.end(); ++it) {
+@@ -1776,6 +1818,8 @@ server_prompt_cache_state * server_prompt_cache::alloc(const server_prompt & pro
+         if (len == (int) it->prompt.tokens.size()) {
+             SRV_TRC(" - removing obsolete cached prompt with length %d\n", len);
+ 
++            recycle(std::move(it->data.main));
++            recycle(std::move(it->data.drft));
+             it = states.erase(it);
+         } else {
+             ++it;
+@@ -1788,6 +1832,8 @@ server_prompt_cache_state * server_prompt_cache::alloc(const server_prompt & pro
+             SRV_WRN(" - making room for prompt cache entry, removing oldest entry (size = %.3f MiB)\n",
+                     states.front().size() / (1024.0 * 1024.0));
+ 
++            recycle(std::move(states.front().data.main));
++            recycle(std::move(states.front().data.drft));
+             states.pop_front();
+         }
+     }
+@@ -1797,8 +1843,8 @@ server_prompt_cache_state * server_prompt_cache::alloc(const server_prompt & pro
+ 
+     // check if we can allocate enough memory for the new state
+     try {
+-        state_data_tgt.resize(state_size_tgt);
+-        state_data_dft.resize(state_size_dft);
++        state_data_tgt = take(state_size_tgt);
++        state_data_dft = take(state_size_dft);
+     } catch (const std::bad_alloc & e) {
+         SRV_ERR("failed to allocate memory for prompt cache state: %s\n", e.what());
+ 
+@@ -1825,7 +1871,7 @@ server_prompt_cache_state * server_prompt_cache::alloc(const server_prompt & pro
+     return &states.back();
+ }
+ 
+-bool server_prompt_cache::load(server_prompt & prompt, const server_tokens & tokens_new, llama_context * ctx_tgt, llama_context * ctx_dft, int32_t id_slot) {
++std::list<server_prompt_cache_state>::iterator server_prompt_cache::find(const server_prompt & prompt, const server_tokens & tokens_new) {
+     const int lcp_best = prompt.tokens.get_common_prefix(tokens_new);
+ 
+     float f_keep_best = prompt.tokens.size() > 0 ? float(lcp_best) / prompt.tokens.size() : -1.0f; // empty slot: any cache entry wins
+@@ -1837,6 +1883,12 @@ bool server_prompt_cache::load(server_prompt & prompt, const server_tokens & tok
+ 
+     // find the most similar cached prompt, that would also preserve the most context
+     for (auto it = states.begin(); it != states.end(); ++it) {
++        if (it->data.main.empty()) {
++            // already consumed: a restore that failed after the main buffer was transferred leaves the entry behind
++            // with no state to restore.  Matching it again would compare against zero bytes and report success.
++            continue;
++        }
++
+         const int lcp_cur = it->prompt.tokens.get_common_prefix(tokens_new);
+ 
+         const float f_keep_cur = float(lcp_cur) / it->prompt.tokens.size();
+@@ -1857,8 +1909,14 @@ bool server_prompt_cache::load(server_prompt & prompt, const server_tokens & tok
+         }
+     }
+ 
++    return it_best;
++}
++
++bool server_prompt_cache::load(server_prompt & prompt, const server_tokens & tokens_new, llama_context * ctx_tgt, llama_context * ctx_dft, int32_t id_slot) {
++    auto it_best = find(prompt, tokens_new);
++
+     if (it_best != states.end()) {
+-        SRV_TRC(" - found better prompt with f_keep = %.3f, f_sim = %.3f\n", f_keep_best, f_sim_best);
++        SRV_TRC(" - found better prompt with length %zu\n", it_best->prompt.tokens.size());
+ 
+         {
+             auto & data = it_best->data.main;
+@@ -1871,8 +1929,8 @@ bool server_prompt_cache::load(server_prompt & prompt, const server_tokens & tok
+                 return false;
+             }
+ 
+-            data.clear();
+-            data.shrink_to_fit();
++            recycle(std::move(data));
++            data = {};
+         }
+ 
+         {
+@@ -1889,8 +1947,8 @@ bool server_prompt_cache::load(server_prompt & prompt, const server_tokens & tok
+                     return false;
+                 }
+ 
+-                data.clear();
+-                data.shrink_to_fit();
++                recycle(std::move(data));
++                data = {};
+             }
+         }
+ 
+diff --git a/tools/server/server-task.h b/tools/server/server-task.h
+index d6b6f4b27..bf153b2c1 100644
+--- a/tools/server/server-task.h
++++ b/tools/server/server-task.h
+@@ -708,12 +708,23 @@ struct server_prompt_cache {
+     // in tokens, 0 = no limit
+     size_t limit_tokens = 0;
+ 
++    // buffers of states that were restored or evicted, kept for the next save: a large state buffer costs about as much to
++    // zero-fill and fault in as to copy from the device, and as much again to free (LLAMA_SERVER_CACHE_REUSE=0: off)
++    std::vector<std::vector<uint8_t>> spare;
++
+     size_t size() const;
+ 
+     size_t n_tokens() const;
+ 
++    // a buffer of n bytes (a spare one if one is large enough), and the way back for a buffer that is no longer needed
++    std::vector<uint8_t> take(size_t n);
++    void recycle(std::vector<uint8_t> && buf);
++
+     server_prompt_cache_state * alloc(const server_prompt & prompt, size_t state_size_main, size_t state_size_drft);
+ 
++    // the cached prompt that load() would restore for tokens_new into a slot holding prompt (states.end(): none)
++    std::list<server_prompt_cache_state>::iterator find(const server_prompt & prompt, const server_tokens & tokens_new);
++
+     bool load(server_prompt & prompt, const server_tokens & tokens_new, llama_context * ctx_tgt, llama_context * ctx_dft, int32_t id_slot);
+ 
+     void update();
+diff --git a/tools/server/tests/unit/test_kv_keep_only_active.py b/tools/server/tests/unit/test_kv_keep_only_active.py
+index 44c05fab0..618a55de0 100644
+--- a/tools/server/tests/unit/test_kv_keep_only_active.py
++++ b/tools/server/tests/unit/test_kv_keep_only_active.py
+@@ -30,6 +30,7 @@ def create_server():
+     fd, server.log_path = tempfile.mkstemp(suffix='.log')
+     os.close(fd)
+     yield
++    os.environ.pop("LLAMA_SERVER_LAZY_IDLE_SLOTS", None)
+ 
+ 
+ LONG_PROMPT = (
+@@ -40,9 +41,14 @@ LONG_PROMPT = (
+     "and wizards who helped him on his noble quest to save the kingdom."
+ )
+ 
++# the tiny test model has a 512-token unified cache for both slots, so these two prompts
++# together do not fit: the second one has to make room in the KV cache
++PROMPT_A = LONG_PROMPT * 2
++PROMPT_B = "Meanwhile, " + LONG_PROMPT * 2
+ 
+-# idle slot cleared on launch should restore from cache-ram
+-def test_clear_and_restore():
++
++# by default an idle slot keeps its KV; the KV-full path saves it to cache-ram before clearing it
++def test_idle_slots_stay_resident():
+     global server
+     server.start()
+     log = LogReader(server.log_path)
+@@ -51,43 +57,72 @@ def test_clear_and_restore():
+     assert "__TEST_TAG_CACHE_IDLE_SLOTS_ENABLED__" in log.drain()
+ 
+     res = server.make_request("POST", "/completion", data={
+-        "prompt": LONG_PROMPT,
++        "prompt": PROMPT_A,
+         "id_slot": 0,
+         "cache_prompt": True,
+     })
+     assert res.status_code == 200
+     original_prompt_n = res.body["timings"]["prompt_n"]
+ 
+-    # Slot 0 is the only slot with KV — should NOT be cleared
++    # the idle slot is not saved and cleared when another task starts
+     assert "__TEST_TAG_CACHE_IDLE_SLOT__" not in log.drain()
+ 
+-    # Launching slot 1 clears idle slot 0
++    # overflow the unified KV cache: the idle slot is saved to cache-ram and only then cleared
+     res = server.make_request("POST", "/completion", data={
+-        "prompt": "The quick brown fox",
++        "prompt": PROMPT_B,
+         "id_slot": 1,
+         "cache_prompt": True,
+     })
+     assert res.status_code == 200
+-    assert "__TEST_TAG_CACHE_IDLE_SLOT__" in log.drain()
++    assert "making room in the KV cache: saving and clearing idle slot" in log.drain()
+ 
+-    # Re-send same prompt — should restore from cache-ram
++    # the cleared conversation comes back from cache-ram instead of being recomputed
+     res = server.make_request("POST", "/completion", data={
+-        "prompt": LONG_PROMPT,
++        "prompt": PROMPT_A,
+         "cache_prompt": True,
+     })
+     assert res.status_code == 200
+-    assert "updating prompt cache" in log.drain()
+     assert res.body["timings"]["cache_n"] > 0
+     assert res.body["timings"]["prompt_n"] < original_prompt_n
++    assert "__TEST_TAG_CACHE_IDLE_SLOT__" not in log.drain()
++
++
++# LLAMA_SERVER_LAZY_IDLE_SLOTS=0: the eager behaviour (save and clear every idle slot on a new task)
++def test_idle_slots_eager_kill_switch():
++    global server
++    os.environ["LLAMA_SERVER_LAZY_IDLE_SLOTS"] = "0"
++    server.start()
++    log = LogReader(server.log_path)
+ 
+-    # Follow-up — slot 0 kept its KV, no clearing needed
+     res = server.make_request("POST", "/completion", data={
+-        "prompt": LONG_PROMPT + " The knight finally reached the castle gates.",
++        "prompt": LONG_PROMPT,
++        "id_slot": 0,
+         "cache_prompt": True,
+     })
+     assert res.status_code == 200
++    original_prompt_n = res.body["timings"]["prompt_n"]
++
++    # slot 0 is the only slot with KV — should NOT be cleared
+     assert "__TEST_TAG_CACHE_IDLE_SLOT__" not in log.drain()
+ 
++    # launching slot 1 saves and clears idle slot 0
++    res = server.make_request("POST", "/completion", data={
++        "prompt": "The quick brown fox",
++        "id_slot": 1,
++        "cache_prompt": True,
++    })
++    assert res.status_code == 200
++    assert "__TEST_TAG_CACHE_IDLE_SLOT__" in log.drain()
++
++    # re-send the same prompt — should restore from cache-ram
++    res = server.make_request("POST", "/completion", data={
++        "prompt": LONG_PROMPT,
++        "cache_prompt": True,
++    })
++    assert res.status_code == 200
++    assert res.body["timings"]["cache_n"] > 0
++    assert res.body["timings"]["prompt_n"] < original_prompt_n
++
+ 
+ def test_disabled_with_flag():
+     global server
+@@ -113,3 +148,4 @@ def test_disabled_with_flag():
+     })
+     assert res.status_code == 200
+     assert "__TEST_TAG_CACHE_IDLE_SLOT__" not in log.drain()
++    assert "making room in the KV cache" not in log.drain()
 -- 
 2.56.0
 

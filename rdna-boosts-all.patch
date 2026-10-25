@@ -2071,7 +2071,7 @@ index 000000000..1f8e8a6b5
 +    }
 +};
 diff --git a/common/speculative.cpp b/common/speculative.cpp
-index 4305ac6ac..69028e25a 100644
+index 4305ac6ac..c042af715 100644
 --- a/common/speculative.cpp
 +++ b/common/speculative.cpp
 @@ -9,6 +9,7 @@
@@ -2123,7 +2123,49 @@ index 4305ac6ac..69028e25a 100644
      std::vector<common_sampler_ptr> smpls;
  
      // backend sampler chain per seq, attached to ctx_dft
-@@ -1141,6 +1158,29 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
+@@ -1024,6 +1041,14 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
+     // block-internal attention
+     bool causal_attn = false;
+ 
++    // every layer of the draft attends over a sliding window of n_swa positions: a prompt row older than the last n_swa
++    // positions of the prompt never reaches a draft, so it is not ingested (LLAMA_DFLASH_INGEST_TAIL=0: every row).
++    // Exact because DFlash sets LLAMA_SWA_TYPE_STANDARD unconditionally (src/models/dflash.cpp): the mask is
++    // p1 - p0 >= n_swa, so a prompt's last n_swa positions are exactly the rows a first generation row can attend to.
++    // (A LLAMA_SWA_TYPE_CHUNKED window reaches back to the chunk start -- up to 2*n_swa-1 -- and would need a wider tail.)
++    int32_t                ingest_window = 0;
++    std::vector<llama_pos> ingest_from;
++
+     const int32_t * target_layer_ids   = nullptr; // model_dft's extract layer indices
+     uint32_t        target_layer_ids_n = 0;
+ 
+@@ -1079,6 +1104,15 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
+         }
+         mask_token_id = llama_vocab_mask(llama_model_get_vocab(model_dft));
+ 
++        {
++            const char *  e     = getenv("LLAMA_DFLASH_INGEST_TAIL");
++            const int32_t n_swa = llama_model_n_swa(model_dft);
++            if ((e == nullptr || atoi(e) != 0) && n_swa > 0 && llama_model_n_layer_swa(model_dft) == llama_model_n_layer(model_dft)) {
++                ingest_window = n_swa;
++            }
++            ingest_from.assign(n_seq, 0);
++        }
++
+         if (is_dspark && this->params.p_min > 0.0f) {
+             char buf[16] = {};
+             const bool has_conf =
+@@ -1093,6 +1127,10 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
+         LOG_INF("%s: - n_max=%d, n_min=%d, p_min=%.2f\n", __func__, this->params.n_max, this->params.n_min, this->params.p_min);
+         LOG_INF("%s: - block_size=%d, mask_token_id=%d, n_extract=%u, sample_from_anchor=%s\n", __func__,
+                 block_size, mask_token_id, target_layer_ids_n, sample_from_anchor ? "true" : "false");
++        if (ingest_window > 0) {
++            LOG_INF("%s: - every layer has a %d-position window: a prompt is ingested from its last %d positions\n", __func__,
++                    ingest_window, ingest_window);
++        }
+ 
+         // DFlash input is [id_last, <mask> * (block_size-1)]: in-place denoising yields at most
+         // block_size-1 draft tokens, anchor-first DSpark yields a full block_size draft tokens
+@@ -1141,6 +1179,29 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
              llama_set_embeddings_layer_inp(ctx_tgt, (uint32_t) target_layer_ids[k], true);
          }
  
@@ -2153,7 +2195,7 @@ index 4305ac6ac..69028e25a 100644
          // DFlash2 reads its selector lattice from h_nextn and never consumes raw logits.
          llama_set_embeddings_nextn(ctx_dft, true, /*masked*/ !is_dflash2 && !is_lilicorr);
          llama_set_causal_attn(ctx_dft, causal_attn); // DFlash needs non-causal attention unless the model says otherwise
-@@ -1158,6 +1198,10 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
+@@ -1158,6 +1219,10 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
              llama_sampler_free(backend_chains[seq_id]);
          }
          backend_chains.clear();
@@ -2164,7 +2206,48 @@ index 4305ac6ac..69028e25a 100644
      }
  
      void begin(llama_seq_id seq_id, const llama_tokens & prompt) override {
-@@ -1217,12 +1261,56 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
+@@ -1181,6 +1246,12 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
+         }
+     }
+ 
++    void set_prompt_end(llama_seq_id seq_id, llama_pos n_prompt) override {
++        if (ingest_window > 0 && seq_id >= 0 && seq_id < (llama_seq_id) n_seq) {
++            ingest_from[seq_id] = std::max<llama_pos>(0, n_prompt - ingest_window);
++        }
++    }
++
+     bool process(const common_batch & batch_in) override {
+         if (batch_in.size() <= 0) {
+             return true;
+@@ -1212,17 +1283,84 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
+             }
+         }
+ 
++        // prompt rows before the draft's window of the prompt's end are never attended to; a batch left with none (a
++        // long prompt's leading ubatches) returns before the wait on the target, so the target's ubatches stay queued
++        if (ingest_window > 0) {
++            bool any = false;
++            for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) n_seq; ++seq_id) {
++                while (i_batch_beg[seq_id] >= 0 && i_batch_beg[seq_id] <= i_batch_end[seq_id] &&
++                       batch_in.tokens[i_batch_beg[seq_id]].pos[0] < ingest_from[seq_id]) {
++                    i_batch_beg[seq_id]++;
++                }
++                if (i_batch_beg[seq_id] > i_batch_end[seq_id]) {
++                    i_batch_beg[seq_id] = -1;
++                }
++                // generation reached (a row at the prompt end or later): later position shifts never skip rows
++                if (i_batch_end[seq_id] >= 0 && batch_in.tokens[i_batch_end[seq_id]].pos[0] >= ingest_from[seq_id] + ingest_window) {
++                    ingest_from[seq_id] = 0;
++                }
++                any = any || i_batch_beg[seq_id] >= 0;
++            }
++            if (!any) {
++                return true;
++            }
++        }
++
+         auto * ctx_tgt = this->params.ctx_tgt;
+         auto * ctx_dft = this->params.ctx_dft;
  
          const int32_t n_ubatch = (int32_t) llama_n_ubatch(ctx_dft);
  
@@ -2221,7 +2304,7 @@ index 4305ac6ac..69028e25a 100644
              // an M-RoPE image pins all its rows to one position, so a windowed draft
              // cache cannot free cells for it - skip it, the draft can jump over the gap
              const bool pos_pinned = batch_in.tokens[i_batch_beg[seq_id]].pos[0] == batch_in.tokens[i_batch_end[seq_id]].pos[0];
-@@ -1281,6 +1369,10 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
+@@ -1281,6 +1419,10 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
              }
          }
  
@@ -2232,7 +2315,7 @@ index 4305ac6ac..69028e25a 100644
          return true;
      }
  
-@@ -1524,8 +1616,14 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
+@@ -1524,8 +1666,14 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
      std::vector<int>                i_last;
      std::vector<std::vector<float>> chain_h;
  
@@ -2249,7 +2332,7 @@ index 4305ac6ac..69028e25a 100644
          , params(params.draft)
      {
          auto * ctx_tgt = this->params.ctx_tgt;
-@@ -1537,6 +1635,11 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
+@@ -1537,6 +1685,11 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
                  "MTP input row width must match the target h_nextn width");
          n_mtp_layers = std::max(1, (int) llama_model_n_layer_nextn(llama_get_model(ctx_dft)));
  
@@ -2261,7 +2344,7 @@ index 4305ac6ac..69028e25a 100644
          SPC_TRC("%s", "adding speculative implementation 'draft-mtp'\n");
          SPC_TRC("- n_max=%d, n_min=%d, p_min=%.2f, n_embd=%d, backend_sampling=%d\n", this->params.n_max, this->params.n_min, this->params.p_min, n_embd, (int) this->params.backend_sampling);
          SPC_TRC("- gpu_layers=%d, cache_k=%s, cache_v=%s, ctx_tgt=%s, ctx_dft=%s, devices=[%s]\n",
-@@ -1577,9 +1680,20 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
+@@ -1577,9 +1730,20 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
          llama_set_embeddings_nextn(ctx_tgt, true, /*masked*/ false);
          llama_set_embeddings_nextn(ctx_dft, true, /*masked*/ true);
  
@@ -2283,7 +2366,7 @@ index 4305ac6ac..69028e25a 100644
          if (chain_heads) {
              this->params.n_max = std::min(this->params.n_max, n_mtp_layers);
  
-@@ -1590,6 +1704,34 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
+@@ -1590,6 +1754,34 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
          }
          this->n_max = this->params.n_max;
  
@@ -2318,7 +2401,7 @@ index 4305ac6ac..69028e25a 100644
          pending_h.assign(n_seq, std::vector<float>(n_embd, 0.0f));
  
          i_last.assign(n_seq, -1);
-@@ -1618,6 +1760,13 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
+@@ -1618,6 +1810,13 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
          // reset here rather than per round, or two identical requests differ
          common_sampler_reset(smpls[seq_id].get());
  
@@ -2332,7 +2415,7 @@ index 4305ac6ac..69028e25a 100644
          const int32_t N = (int32_t) prompt.size();
          if (N <= 0) {
              return;
-@@ -1635,6 +1784,48 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
+@@ -1635,6 +1834,48 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
          }
      }
  
@@ -2381,7 +2464,7 @@ index 4305ac6ac..69028e25a 100644
      bool process(const common_batch & batch_in) override {
          if (batch_in.size() <= 0) {
              return true;
-@@ -1644,6 +1835,17 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
+@@ -1644,6 +1885,17 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
              return true;
          }
  
@@ -2399,7 +2482,7 @@ index 4305ac6ac..69028e25a 100644
          const int32_t n_tokens = batch_in.size();
  
          // remember the first and last batch index for each sequence
-@@ -1683,6 +1885,17 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
+@@ -1683,6 +1935,17 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
  
                  const llama_seq_id seq_id = t.seq_id;
  
@@ -2417,7 +2500,7 @@ index 4305ac6ac..69028e25a 100644
                  // vision tokens carry an embedding instead of an id
                  const int32_t idx = t.id != LLAMA_TOKEN_NULL
                      ? batch.add(t.id, t.pos[0], seq_id, false)
-@@ -1698,7 +1911,7 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
+@@ -1698,7 +1961,7 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
              auto * mem_dft = llama_get_memory(ctx_dft);
  
              bool ok = true;
@@ -2426,7 +2509,7 @@ index 4305ac6ac..69028e25a 100644
                  if (chain_heads) {
                      // ref: https://github.com/ggml-org/llama.cpp/pull/24340/changes#r3413498544
                      for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) n_seq; ++seq_id) {
-@@ -1732,12 +1945,27 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
+@@ -1732,12 +1995,27 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
                  continue;
              }
  
@@ -2456,7 +2539,7 @@ index 4305ac6ac..69028e25a 100644
                  std::memcpy(verify_h[seq_id].data() + (size_t) i * n_embd, h, row_bytes);
              }
  
-@@ -1766,6 +1994,14 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
+@@ -1766,6 +2044,14 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
  
              n_drafting++;
              drafting[seq_id] = true;
@@ -2471,7 +2554,7 @@ index 4305ac6ac..69028e25a 100644
              // greedy drafting leaves no candidates behind, so the verifier falls back to sample-and-match
              if (!params.probabilistic) {
                  dp.result_q = nullptr;
-@@ -1861,7 +2097,7 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
+@@ -1861,7 +2147,7 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
                      dp.result_q->emplace_back(cur_p->data, cur_p->data + cur_p->size);
                  }
  
@@ -2480,7 +2563,7 @@ index 4305ac6ac..69028e25a 100644
                      drafting[seq_id] = false;
                      n_drafting--;
                      continue;
-@@ -1908,17 +2144,52 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
+@@ -1908,17 +2194,52 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
                  continue;
              }
  
@@ -2535,7 +2618,7 @@ index 4305ac6ac..69028e25a 100644
          const int32_t n_rows = verify_h_rows[seq_id];
          if (n_rows <= 0) {
              return;
-@@ -1928,6 +2199,17 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
+@@ -1928,6 +2249,17 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
          const size_t row_bytes = (size_t) n_embd * sizeof(float);
          std::memcpy(pending_h[seq_id].data(), verify_h[seq_id].data() + (size_t) i_h * n_embd, row_bytes);
      }
@@ -2553,7 +2636,7 @@ index 4305ac6ac..69028e25a 100644
  };
  
  // state of self-speculation (simple implementation, not ngram-map)
-@@ -2414,6 +2696,7 @@ std::string common_speculative_type_to_str(common_speculative_type type) {
+@@ -2414,6 +2746,7 @@ std::string common_speculative_type_to_str(common_speculative_type type) {
          case COMMON_SPECULATIVE_TYPE_DRAFT_SIMPLE:  return "draft-simple";
          case COMMON_SPECULATIVE_TYPE_DRAFT_EAGLE3:  return "draft-eagle3";
          case COMMON_SPECULATIVE_TYPE_DRAFT_MTP:     return "draft-mtp";
@@ -2561,7 +2644,7 @@ index 4305ac6ac..69028e25a 100644
          case COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH:  return "draft-dflash";
          case COMMON_SPECULATIVE_TYPE_DRAFT_DSPARK:  return "draft-dspark";
          case COMMON_SPECULATIVE_TYPE_NGRAM_SIMPLE:  return "ngram-simple";
-@@ -2505,6 +2788,7 @@ int32_t common_speculative_n_max(const common_params_speculative * spec) {
+@@ -2505,6 +2838,7 @@ int32_t common_speculative_n_max(const common_params_speculative * spec) {
              case COMMON_SPECULATIVE_TYPE_DRAFT_SIMPLE:
              case COMMON_SPECULATIVE_TYPE_DRAFT_EAGLE3:
              case COMMON_SPECULATIVE_TYPE_DRAFT_MTP:
@@ -2569,7 +2652,7 @@ index 4305ac6ac..69028e25a 100644
              case COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH:
              case COMMON_SPECULATIVE_TYPE_DRAFT_DSPARK:
                  n_max = std::max(n_max, std::max(0, spec->draft.n_max));
-@@ -2660,8 +2944,16 @@ common_params common_base_params_to_speculative(const common_params & params) {
+@@ -2660,8 +2994,16 @@ common_params common_base_params_to_speculative(const common_params & params) {
          }
      }
  
@@ -2588,7 +2671,7 @@ index 4305ac6ac..69028e25a 100644
      result.n_outputs_max = params.n_parallel;
      result.n_outputs_max_per_seq = 1;
  
-@@ -2701,37 +2993,95 @@ struct common_speculative_init_result::impl {
+@@ -2701,37 +3043,95 @@ struct common_speculative_init_result::impl {
      llama_context_ptr context;
  };
  
@@ -2692,7 +2775,7 @@ index 4305ac6ac..69028e25a 100644
          if (model_dft == NULL) {
              LOG_ERR("%s: failed to load draft model, '%s'\n", __func__, model_path.c_str());
              return;
-@@ -2759,6 +3109,15 @@ common_speculative_init_result::common_speculative_init_result(
+@@ -2759,6 +3159,15 @@ common_speculative_init_result::common_speculative_init_result(
  
          pimpl->context.reset(ctx_dft);
      }
@@ -2708,7 +2791,7 @@ index 4305ac6ac..69028e25a 100644
  }
  
  common_speculative_init_result::~common_speculative_init_result() = default;
-@@ -2771,8 +3130,9 @@ llama_context * common_speculative_init_result::context() {
+@@ -2771,8 +3180,9 @@ llama_context * common_speculative_init_result::context() {
      return pimpl->context.get();
  }
  
@@ -2720,7 +2803,7 @@ index 4305ac6ac..69028e25a 100644
  }
  
  common_speculative_output_limits common_speculative_get_output_limits(
-@@ -2801,7 +3161,14 @@ common_speculative * common_speculative_init(common_params_speculative & params,
+@@ -2801,7 +3211,14 @@ common_speculative * common_speculative_init(common_params_speculative & params,
          };
  
          // when adding a new type - update here the logic above
@@ -2736,7 +2819,7 @@ index 4305ac6ac..69028e25a 100644
  
          // this list here defines the priority of the speculators
          // the one with highest priority are listed first
-@@ -2814,6 +3181,7 @@ common_speculative * common_speculative_init(common_params_speculative & params,
+@@ -2814,6 +3231,7 @@ common_speculative * common_speculative_init(common_params_speculative & params,
          add_config_if_enabled(COMMON_SPECULATIVE_TYPE_DRAFT_SIMPLE);
          add_config_if_enabled(COMMON_SPECULATIVE_TYPE_DRAFT_EAGLE3, params.draft.ctx_dft != nullptr);
          add_config_if_enabled(COMMON_SPECULATIVE_TYPE_DRAFT_MTP,    params.draft.ctx_dft != nullptr);
@@ -2744,7 +2827,7 @@ index 4305ac6ac..69028e25a 100644
          add_config_if_enabled(COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH, params.draft.ctx_dft != nullptr);
          add_config_if_enabled(COMMON_SPECULATIVE_TYPE_DRAFT_DSPARK, params.draft.ctx_dft != nullptr);
      }
-@@ -2833,7 +3201,11 @@ common_speculative * common_speculative_init(common_params_speculative & params,
+@@ -2833,7 +3251,11 @@ common_speculative * common_speculative_init(common_params_speculative & params,
                  break;
              }
              case COMMON_SPECULATIVE_TYPE_DRAFT_MTP: {
@@ -2757,7 +2840,7 @@ index 4305ac6ac..69028e25a 100644
                  break;
              }
              case COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH: {
-@@ -2958,6 +3330,15 @@ void common_speculative_begin(common_speculative * spec, llama_seq_id seq_id, co
+@@ -2958,6 +3380,15 @@ void common_speculative_begin(common_speculative * spec, llama_seq_id seq_id, co
      }
  }
  
@@ -2773,7 +2856,7 @@ index 4305ac6ac..69028e25a 100644
  bool common_speculative_process(common_speculative * spec, const common_batch & batch) {
      bool result = true;
  
-@@ -3098,6 +3479,17 @@ void common_speculative_accept(common_speculative * spec, llama_seq_id seq_id, u
+@@ -3098,6 +3529,17 @@ void common_speculative_accept(common_speculative * spec, llama_seq_id seq_id, u
      }
  }
  
@@ -2791,7 +2874,7 @@ index 4305ac6ac..69028e25a 100644
  // TODO: support the case of more than one speculative implementations having a state
  bool common_speculative_get_state(common_speculative * spec, llama_seq_id seq_id, std::vector<uint8_t> & data) {
      if (spec == nullptr) {
-@@ -3168,3 +3560,49 @@ void common_speculative_print_stats(const common_speculative * spec) {
+@@ -3168,3 +3610,49 @@ void common_speculative_print_stats(const common_speculative * spec) {
                  str_perf.c_str());
      }
  }
@@ -68973,7 +69056,7 @@ index 0c260f7b6..192fa9f97 100644
      enum llama_rope_scaling_type rope_scaling_type;
      enum llama_pooling_type pooling_type;
 diff --git a/src/llama-ext.h b/src/llama-ext.h
-index 933cb8013..77471bc25 100644
+index 933cb8013..a7d528f6f 100644
 --- a/src/llama-ext.h
 +++ b/src/llama-ext.h
 @@ -89,6 +89,17 @@ LLAMA_API int32_t llama_model_n_devices(const struct llama_model * model);
@@ -69026,7 +69109,15 @@ index 933cb8013..77471bc25 100644
  LLAMA_API llama_context * llama_get_ctx_other(struct llama_context * ctx);
  
  //
-@@ -152,6 +181,12 @@ LLAMA_API const int32_t * llama_model_target_layer_ids  (const struct llama_mode
+@@ -147,11 +176,20 @@ LLAMA_API llama_context * llama_get_ctx_other(struct llama_context * ctx);
+ 
+ LLAMA_API int32_t llama_model_dflash_selector_top_k(const struct llama_model * model);
+ 
++// number of layers that attend over a sliding window of llama_model_n_swa() positions
++LLAMA_API int32_t llama_model_n_layer_swa(const struct llama_model * model);
++
+ // returns pointer to the target-model layer indices
+ LLAMA_API const int32_t * llama_model_target_layer_ids  (const struct llama_model * model);
  // returns the number of extracted layers from target model
  LLAMA_API uint32_t        llama_model_target_layer_ids_n(const struct llama_model * model);
  
@@ -73696,7 +73787,7 @@ index ed59079a4..0870f80e0 100644
      void unmap_weight(const llama_tensor_weight & w) const;
  
 diff --git a/src/llama-model.cpp b/src/llama-model.cpp
-index 65c42f85f..dcb6ac2a8 100644
+index 65c42f85f..e2a3861b2 100644
 --- a/src/llama-model.cpp
 +++ b/src/llama-model.cpp
 @@ -23,6 +23,7 @@
@@ -74053,8 +74144,7 @@ index 65c42f85f..dcb6ac2a8 100644
 +
 +        if (host_master_mapped) {
 +            const size_t max_size = ggml_get_max_tensor_size(ctx);
- 
--        if ((ml.use_mmap || is_lazy_mapped) && use_mmap_buffer && buffer_from_host_ptr_supported && is_default_buft) {
++
 +            for (uint32_t idx = 0; idx < ml.files.size(); idx++) {
 +                // the mmap regions that contain this context's tensors of this file (a pool-backed master
 +                // can be split into several disjoint ranges, so one buffer per range)
@@ -74071,7 +74161,8 @@ index 65c42f85f..dcb6ac2a8 100644
 +                    bufs.emplace_back(buf);
 +                }
 +            }
-+
+ 
+-        if ((ml.use_mmap || is_lazy_mapped) && use_mmap_buffer && buffer_from_host_ptr_supported && is_default_buft) {
 +            // the tensors point directly into the mapping: the pages must survive the load
 +            for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != nullptr; t = ggml_get_next_tensor(ctx, t)) {
 +                const auto * w = ml.get_weight(ggml_get_name(t));
@@ -74763,7 +74854,25 @@ index 65c42f85f..dcb6ac2a8 100644
      };
  
      return result;
-@@ -3822,6 +4182,98 @@ const std::vector<std::pair<std::string, ggml_tensor *>> & llama_internal_get_te
+@@ -3447,6 +3807,17 @@ int32_t llama_model_n_swa(const llama_model * model) {
+     return model->hparams.n_swa;
+ }
+ 
++int32_t llama_model_n_layer_swa(const llama_model * model) {
++    if (model->hparams.n_swa == 0) {
++        return 0;
++    }
++    int32_t n = 0;
++    for (uint32_t il = 0; il < model->hparams.n_layer(); ++il) {
++        n += model->hparams.is_swa(il) ? 1 : 0;
++    }
++    return n;
++}
++
+ 
+ uint32_t llama_model_n_cls_out(const struct llama_model * model) {
+     return model->hparams.n_cls_out;
+@@ -3822,6 +4193,98 @@ const std::vector<std::pair<std::string, ggml_tensor *>> & llama_internal_get_te
      return model->tensors_by_name;
  }
  
@@ -74862,7 +74971,7 @@ index 65c42f85f..dcb6ac2a8 100644
  int32_t llama_model_n_expert(const struct llama_model * model) {
      return model->hparams.n_expert;
  }
-@@ -3851,11 +4303,12 @@ llama_model_base::llama_model_base(const struct llama_model_params & params) : l
+@@ -3851,11 +4314,12 @@ llama_model_base::llama_model_base(const struct llama_model_params & params) : l
      TENSOR_SKIP           (llama_model_loader::TENSOR_SKIP),
      TENSOR_SKIP_IF_VIRTUAL(llama_model_loader::TENSOR_SKIP_IF_VIRTUAL),
      TENSOR_ALLOW_RESHAPE  (llama_model_loader::TENSOR_ALLOW_RESHAPE),
@@ -74878,7 +74987,7 @@ index 65c42f85f..dcb6ac2a8 100644
  }
  
  void llama_model_base::create_tensor_gate_up_exps(llama_layer & layer, int bid, int64_t n_embd_, int64_t n_ff_, int64_t n_expert_, int flags) {
-@@ -3978,6 +4431,14 @@ static void llama_tensor_rows_to_f32(const ggml_tensor * tensor, int64_t row0, i
+@@ -3978,6 +4442,14 @@ static void llama_tensor_rows_to_f32(const ggml_tensor * tensor, int64_t row0, i
      }
  }
  
@@ -74893,7 +75002,7 @@ index 65c42f85f..dcb6ac2a8 100644
  uint32_t llama_model_get_tok_embd(const struct llama_model * model, float * out) {
      if (model->vocab.n_tokens() == 0 || model->tok_embd == nullptr) {
          return 0;
-@@ -4015,3 +4476,4 @@ uint32_t llama_model_get_tok_embd_rows(const struct llama_model * model, const l
+@@ -4015,3 +4487,4 @@ uint32_t llama_model_get_tok_embd_rows(const struct llama_model * model, const l
  
      return n_tokens * (uint32_t) tensor->ne[0];
  }
@@ -82672,7 +82781,7 @@ index 56d1ea5fe..f725f769f 100644
  | `--spec-ngram-mod-n-max N` | maximum number of ngram tokens to use for ngram-based speculative decoding (default: 64) |
  | `--spec-ngram-mod-n-match N` | ngram-mod lookup length (default: 24) |
 diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
-index a5cba1d71..6790efe2f 100644
+index a5cba1d71..3b2fc2dfe 100644
 --- a/tools/server/server-context.cpp
 +++ b/tools/server/server-context.cpp
 @@ -408,6 +408,11 @@ struct server_slot {
@@ -82713,7 +82822,22 @@ index a5cba1d71..6790efe2f 100644
      }
  
      json to_json(bool only_metrics = false) const {
-@@ -1198,10 +1222,8 @@ private:
+@@ -1096,6 +1120,14 @@ private:
+ 
+     std::unique_ptr<server_prompt_cache> prompt_cache;
+ 
++    // LLAMA_SERVER_LAZY_IDLE_SLOTS (on unless 0): with a unified KV cache, an idle slot keeps its context when a new task
++    // starts and is saved to the prompt cache and cleared only once the KV cache runs out of room, so conversations that
++    // take turns on their own slots do not copy their whole state to host memory and back on every switch
++    const bool lazy_idle_slots = [] {
++        const char * e = getenv("LLAMA_SERVER_LAZY_IDLE_SLOTS");
++        return e == nullptr || atoi(e) != 0;
++    }();
++
+     server_metrics metrics;
+ 
+     // queued prompt stats - llama_decode() is async, so the timing is only valid after a sync
+@@ -1198,10 +1230,8 @@ private:
          params_base.n_outputs_max_per_seq = output_limits.per_seq;
  
          const bool has_mmproj = !params.mmproj.path.empty();
@@ -82726,7 +82850,7 @@ index a5cba1d71..6790efe2f 100644
          const bool has_spec = has_draft || spec_mtp;
  
          if (callback_state) {
-@@ -1287,7 +1309,7 @@ private:
+@@ -1287,7 +1317,7 @@ private:
              params_base.load_progress_callback_user_data = &load_progress_text;
          }
  
@@ -82735,7 +82859,7 @@ index a5cba1d71..6790efe2f 100644
  
          model_tgt = llama_init->model();
          ctx_tgt   = llama_init->context();
-@@ -1327,7 +1349,7 @@ private:
+@@ -1327,7 +1357,7 @@ private:
                  params_dft.load_progress_callback           = load_progress_callback;
                  params_dft.load_progress_callback_user_data = &load_progress_spec;
  
@@ -82744,7 +82868,104 @@ index a5cba1d71..6790efe2f 100644
                  model_dft = spec_init->model();
                  ctx_dft   = spec_init->context();
  
-@@ -3908,6 +3930,10 @@ private:
+@@ -1864,9 +1894,21 @@ private:
+ 
+                 const int64_t t_start = ggml_time_us();
+ 
++                // the entry this task will restore is held out of the cache while the slot is saved, so the eviction
++                // that the save may cause cannot drop it
++                std::list<server_prompt_cache_state> held;
++                if (lazy_idle_slots) {
++                    auto it = prompt_cache->find(ret->prompt, task.tokens);
++                    if (it != prompt_cache->states.end()) {
++                        held.splice(held.begin(), prompt_cache->states, it);
++                    }
++                }
++
+                 ret->prompt_save(*prompt_cache);
+ 
+-                if (!ret->prompt_load(*prompt_cache, task.tokens)) {
++                prompt_cache->states.splice(prompt_cache->states.end(), held);
++
++                if (!ret->prompt_load(*prompt_cache, task.tokens) && !prompt_load_with_room(*ret, task.tokens)) {
+                     ret->prompt_clear();
+                 }
+ 
+@@ -1879,18 +1921,63 @@ private:
+         return ret;
+     }
+ 
++    // a restore can fail for want of KV cells that another idle slot holds (unified KV cache): move idle slots to the prompt
++    // cache one at a time, with the entry being restored kept out of the eviction that their saving may cause, and retry
++    bool prompt_load_with_room(server_slot & slot, const server_tokens & tokens) {
++        if (!lazy_idle_slots || !params_base.kv_unified) {
++            return false;
++        }
++        while (true) {
++            auto it = prompt_cache->find(slot.prompt, tokens);
++            if (it == prompt_cache->states.end()) {
++                return false;
++            }
++            std::list<server_prompt_cache_state> held;
++            held.splice(held.begin(), prompt_cache->states, it);
++            const bool cleared = try_clear_idle_slots(&slot);
++            prompt_cache->states.splice(prompt_cache->states.end(), held);
++            if (!cleared) {
++                return false;
++            }
++            SLT_INF(slot, "%s", "retrying the prompt cache restore\n");
++            if (slot.prompt_load(*prompt_cache, tokens)) {
++                return true;
++            }
++        }
++    }
++
+     // return true if at least one slot has been cleared
+     // TODO: improve logic
+     //       - smarter decision which slot to clear (LRU or longest prompt?)
+     //       - move slot to level 2 cache instead of removing?
+     //       - instead of purging, try to store and resume later?
+-    bool try_clear_idle_slots() {
++    bool try_clear_idle_slots(const server_slot * keep = nullptr) {
+         bool res = false;
+ 
+         if (!params_base.kv_unified) {
+             return res;
+         }
+ 
++        if (lazy_idle_slots) {
++            // the least recently used idle slot goes first, and it goes to the prompt cache, so it can be resumed
++            server_slot * lru = nullptr;
++            for (auto & slot : slots) {
++                if (&slot != keep && !slot.is_processing() && slot.prompt.n_tokens() > 0 &&
++                        (lru == nullptr || slot.t_last_used < lru->t_last_used)) {
++                    lru = &slot;
++                }
++            }
++            if (lru == nullptr) {
++                return res;
++            }
++            SRV_WRN("making room in the KV cache: saving and clearing idle slot %d with %zu tokens\n", lru->id, lru->prompt.tokens.size());
++            if (prompt_cache && params_base.cache_idle_slots && lru->prompt_save(*prompt_cache)) {
++                prompt_cache->update();
++            }
++            lru->prompt_clear();
++            return true;
++        }
++
+         for (auto & slot : slots) {
+             if (slot.is_processing()) {
+                 continue;
+@@ -3009,7 +3096,7 @@ private:
+                         break; // drop the task
+                     }
+ 
+-                    if (params_base.cache_idle_slots) {
++                    if (params_base.cache_idle_slots && !lazy_idle_slots) {
+                         for (auto & slot : slots) {
+                             if (!slot.is_processing()) {
+                                 SLT_TRC(slot, "%s", "saving idle slot to prompt cache\n");
+@@ -3908,6 +3995,10 @@ private:
  
                          slot.state = SLOT_STATE_PROCESSING_PROMPT;
  
@@ -82755,7 +82976,7 @@ index a5cba1d71..6790efe2f 100644
                          SLT_TRC(slot, "new prompt, n_ctx_slot = %d, n_keep = %d, task.n_tokens = %d\n",
                                  slot.n_ctx, slot.task->params.n_keep, slot.task->n_tokens());
  
-@@ -4859,7 +4885,12 @@ private:
+@@ -4859,7 +4950,12 @@ private:
                              SLT_INF(slot, "accepted %2zu/%2zu draft tokens (restore checkpoint)\n", accepted.size() - 1, slot.spec_draft.size());
                          }
  
@@ -82769,3 +82990,290 @@ index a5cba1d71..6790efe2f 100644
                          slot.spec_is_replay = true;
                          slot.spec_draft = std::move(accepted);
  
+diff --git a/tools/server/server-task.cpp b/tools/server/server-task.cpp
+index d7ac2a1dc..0104e6ac0 100644
+--- a/tools/server/server-task.cpp
++++ b/tools/server/server-task.cpp
+@@ -1743,6 +1743,48 @@ size_t server_prompt_cache::n_tokens() const {
+     return res;
+ }
+ 
++static bool prompt_cache_reuse() {
++    static const bool v = [] {
++        const char * e = getenv("LLAMA_SERVER_CACHE_REUSE");
++        return e == nullptr || atoi(e) != 0;
++    }();
++    return v;
++}
++
++std::vector<uint8_t> server_prompt_cache::take(size_t n) {
++    // the smallest spare that holds n bytes; resizing it down keeps the memory, resizing it up zero-fills only the tail
++    size_t best = spare.size();
++    for (size_t i = 0; i < spare.size(); ++i) {
++        if (spare[i].capacity() >= n && (best == spare.size() || spare[i].capacity() < spare[best].capacity())) {
++            best = i;
++        }
++    }
++    std::vector<uint8_t> buf;
++    if (best < spare.size()) {
++        buf = std::move(spare[best]);
++        spare.erase(spare.begin() + best);
++    }
++    buf.resize(n);
++    return buf;
++}
++
++void server_prompt_cache::recycle(std::vector<uint8_t> && buf) {
++    if (!prompt_cache_reuse() || buf.capacity() == 0) {
++        return;
++    }
++    spare.push_back(std::move(buf));
++    // the cached states and the spare buffers stay within the cache size limit together; the smallest spares go first
++    size_t total = size();
++    for (const auto & b : spare) {
++        total += b.capacity();
++    }
++    while (!spare.empty() && limit_size > 0 && total > limit_size) {
++        auto it = std::min_element(spare.begin(), spare.end(), [](const auto & a, const auto & b) { return a.capacity() < b.capacity(); });
++        total -= it->capacity();
++        spare.erase(it);
++    }
++}
++
+ server_prompt_cache_state * server_prompt_cache::alloc(const server_prompt & prompt, size_t state_size_tgt, size_t state_size_dft) {
+     // first check if the current state is contained fully in the cache
+     for (auto it = states.begin(); it != states.end(); ++it) {
+@@ -1776,6 +1818,8 @@ server_prompt_cache_state * server_prompt_cache::alloc(const server_prompt & pro
+         if (len == (int) it->prompt.tokens.size()) {
+             SRV_TRC(" - removing obsolete cached prompt with length %d\n", len);
+ 
++            recycle(std::move(it->data.main));
++            recycle(std::move(it->data.drft));
+             it = states.erase(it);
+         } else {
+             ++it;
+@@ -1788,6 +1832,8 @@ server_prompt_cache_state * server_prompt_cache::alloc(const server_prompt & pro
+             SRV_WRN(" - making room for prompt cache entry, removing oldest entry (size = %.3f MiB)\n",
+                     states.front().size() / (1024.0 * 1024.0));
+ 
++            recycle(std::move(states.front().data.main));
++            recycle(std::move(states.front().data.drft));
+             states.pop_front();
+         }
+     }
+@@ -1797,8 +1843,8 @@ server_prompt_cache_state * server_prompt_cache::alloc(const server_prompt & pro
+ 
+     // check if we can allocate enough memory for the new state
+     try {
+-        state_data_tgt.resize(state_size_tgt);
+-        state_data_dft.resize(state_size_dft);
++        state_data_tgt = take(state_size_tgt);
++        state_data_dft = take(state_size_dft);
+     } catch (const std::bad_alloc & e) {
+         SRV_ERR("failed to allocate memory for prompt cache state: %s\n", e.what());
+ 
+@@ -1825,7 +1871,7 @@ server_prompt_cache_state * server_prompt_cache::alloc(const server_prompt & pro
+     return &states.back();
+ }
+ 
+-bool server_prompt_cache::load(server_prompt & prompt, const server_tokens & tokens_new, llama_context * ctx_tgt, llama_context * ctx_dft, int32_t id_slot) {
++std::list<server_prompt_cache_state>::iterator server_prompt_cache::find(const server_prompt & prompt, const server_tokens & tokens_new) {
+     const int lcp_best = prompt.tokens.get_common_prefix(tokens_new);
+ 
+     float f_keep_best = prompt.tokens.size() > 0 ? float(lcp_best) / prompt.tokens.size() : -1.0f; // empty slot: any cache entry wins
+@@ -1837,6 +1883,12 @@ bool server_prompt_cache::load(server_prompt & prompt, const server_tokens & tok
+ 
+     // find the most similar cached prompt, that would also preserve the most context
+     for (auto it = states.begin(); it != states.end(); ++it) {
++        if (it->data.main.empty()) {
++            // already consumed: a restore that failed after the main buffer was transferred leaves the entry behind
++            // with no state to restore.  Matching it again would compare against zero bytes and report success.
++            continue;
++        }
++
+         const int lcp_cur = it->prompt.tokens.get_common_prefix(tokens_new);
+ 
+         const float f_keep_cur = float(lcp_cur) / it->prompt.tokens.size();
+@@ -1857,8 +1909,14 @@ bool server_prompt_cache::load(server_prompt & prompt, const server_tokens & tok
+         }
+     }
+ 
++    return it_best;
++}
++
++bool server_prompt_cache::load(server_prompt & prompt, const server_tokens & tokens_new, llama_context * ctx_tgt, llama_context * ctx_dft, int32_t id_slot) {
++    auto it_best = find(prompt, tokens_new);
++
+     if (it_best != states.end()) {
+-        SRV_TRC(" - found better prompt with f_keep = %.3f, f_sim = %.3f\n", f_keep_best, f_sim_best);
++        SRV_TRC(" - found better prompt with length %zu\n", it_best->prompt.tokens.size());
+ 
+         {
+             auto & data = it_best->data.main;
+@@ -1871,8 +1929,8 @@ bool server_prompt_cache::load(server_prompt & prompt, const server_tokens & tok
+                 return false;
+             }
+ 
+-            data.clear();
+-            data.shrink_to_fit();
++            recycle(std::move(data));
++            data = {};
+         }
+ 
+         {
+@@ -1889,8 +1947,8 @@ bool server_prompt_cache::load(server_prompt & prompt, const server_tokens & tok
+                     return false;
+                 }
+ 
+-                data.clear();
+-                data.shrink_to_fit();
++                recycle(std::move(data));
++                data = {};
+             }
+         }
+ 
+diff --git a/tools/server/server-task.h b/tools/server/server-task.h
+index d6b6f4b27..bf153b2c1 100644
+--- a/tools/server/server-task.h
++++ b/tools/server/server-task.h
+@@ -708,12 +708,23 @@ struct server_prompt_cache {
+     // in tokens, 0 = no limit
+     size_t limit_tokens = 0;
+ 
++    // buffers of states that were restored or evicted, kept for the next save: a large state buffer costs about as much to
++    // zero-fill and fault in as to copy from the device, and as much again to free (LLAMA_SERVER_CACHE_REUSE=0: off)
++    std::vector<std::vector<uint8_t>> spare;
++
+     size_t size() const;
+ 
+     size_t n_tokens() const;
+ 
++    // a buffer of n bytes (a spare one if one is large enough), and the way back for a buffer that is no longer needed
++    std::vector<uint8_t> take(size_t n);
++    void recycle(std::vector<uint8_t> && buf);
++
+     server_prompt_cache_state * alloc(const server_prompt & prompt, size_t state_size_main, size_t state_size_drft);
+ 
++    // the cached prompt that load() would restore for tokens_new into a slot holding prompt (states.end(): none)
++    std::list<server_prompt_cache_state>::iterator find(const server_prompt & prompt, const server_tokens & tokens_new);
++
+     bool load(server_prompt & prompt, const server_tokens & tokens_new, llama_context * ctx_tgt, llama_context * ctx_dft, int32_t id_slot);
+ 
+     void update();
+diff --git a/tools/server/tests/unit/test_kv_keep_only_active.py b/tools/server/tests/unit/test_kv_keep_only_active.py
+index 44c05fab0..618a55de0 100644
+--- a/tools/server/tests/unit/test_kv_keep_only_active.py
++++ b/tools/server/tests/unit/test_kv_keep_only_active.py
+@@ -30,6 +30,7 @@ def create_server():
+     fd, server.log_path = tempfile.mkstemp(suffix='.log')
+     os.close(fd)
+     yield
++    os.environ.pop("LLAMA_SERVER_LAZY_IDLE_SLOTS", None)
+ 
+ 
+ LONG_PROMPT = (
+@@ -40,9 +41,14 @@ LONG_PROMPT = (
+     "and wizards who helped him on his noble quest to save the kingdom."
+ )
+ 
++# the tiny test model has a 512-token unified cache for both slots, so these two prompts
++# together do not fit: the second one has to make room in the KV cache
++PROMPT_A = LONG_PROMPT * 2
++PROMPT_B = "Meanwhile, " + LONG_PROMPT * 2
+ 
+-# idle slot cleared on launch should restore from cache-ram
+-def test_clear_and_restore():
++
++# by default an idle slot keeps its KV; the KV-full path saves it to cache-ram before clearing it
++def test_idle_slots_stay_resident():
+     global server
+     server.start()
+     log = LogReader(server.log_path)
+@@ -51,43 +57,72 @@ def test_clear_and_restore():
+     assert "__TEST_TAG_CACHE_IDLE_SLOTS_ENABLED__" in log.drain()
+ 
+     res = server.make_request("POST", "/completion", data={
+-        "prompt": LONG_PROMPT,
++        "prompt": PROMPT_A,
+         "id_slot": 0,
+         "cache_prompt": True,
+     })
+     assert res.status_code == 200
+     original_prompt_n = res.body["timings"]["prompt_n"]
+ 
+-    # Slot 0 is the only slot with KV — should NOT be cleared
++    # the idle slot is not saved and cleared when another task starts
+     assert "__TEST_TAG_CACHE_IDLE_SLOT__" not in log.drain()
+ 
+-    # Launching slot 1 clears idle slot 0
++    # overflow the unified KV cache: the idle slot is saved to cache-ram and only then cleared
+     res = server.make_request("POST", "/completion", data={
+-        "prompt": "The quick brown fox",
++        "prompt": PROMPT_B,
+         "id_slot": 1,
+         "cache_prompt": True,
+     })
+     assert res.status_code == 200
+-    assert "__TEST_TAG_CACHE_IDLE_SLOT__" in log.drain()
++    assert "making room in the KV cache: saving and clearing idle slot" in log.drain()
+ 
+-    # Re-send same prompt — should restore from cache-ram
++    # the cleared conversation comes back from cache-ram instead of being recomputed
+     res = server.make_request("POST", "/completion", data={
+-        "prompt": LONG_PROMPT,
++        "prompt": PROMPT_A,
+         "cache_prompt": True,
+     })
+     assert res.status_code == 200
+-    assert "updating prompt cache" in log.drain()
+     assert res.body["timings"]["cache_n"] > 0
+     assert res.body["timings"]["prompt_n"] < original_prompt_n
++    assert "__TEST_TAG_CACHE_IDLE_SLOT__" not in log.drain()
++
++
++# LLAMA_SERVER_LAZY_IDLE_SLOTS=0: the eager behaviour (save and clear every idle slot on a new task)
++def test_idle_slots_eager_kill_switch():
++    global server
++    os.environ["LLAMA_SERVER_LAZY_IDLE_SLOTS"] = "0"
++    server.start()
++    log = LogReader(server.log_path)
+ 
+-    # Follow-up — slot 0 kept its KV, no clearing needed
+     res = server.make_request("POST", "/completion", data={
+-        "prompt": LONG_PROMPT + " The knight finally reached the castle gates.",
++        "prompt": LONG_PROMPT,
++        "id_slot": 0,
+         "cache_prompt": True,
+     })
+     assert res.status_code == 200
++    original_prompt_n = res.body["timings"]["prompt_n"]
++
++    # slot 0 is the only slot with KV — should NOT be cleared
+     assert "__TEST_TAG_CACHE_IDLE_SLOT__" not in log.drain()
+ 
++    # launching slot 1 saves and clears idle slot 0
++    res = server.make_request("POST", "/completion", data={
++        "prompt": "The quick brown fox",
++        "id_slot": 1,
++        "cache_prompt": True,
++    })
++    assert res.status_code == 200
++    assert "__TEST_TAG_CACHE_IDLE_SLOT__" in log.drain()
++
++    # re-send the same prompt — should restore from cache-ram
++    res = server.make_request("POST", "/completion", data={
++        "prompt": LONG_PROMPT,
++        "cache_prompt": True,
++    })
++    assert res.status_code == 200
++    assert res.body["timings"]["cache_n"] > 0
++    assert res.body["timings"]["prompt_n"] < original_prompt_n
++
+ 
+ def test_disabled_with_flag():
+     global server
+@@ -113,3 +148,4 @@ def test_disabled_with_flag():
+     })
+     assert res.status_code == 200
+     assert "__TEST_TAG_CACHE_IDLE_SLOT__" not in log.drain()
++    assert "making room in the KV cache" not in log.drain()

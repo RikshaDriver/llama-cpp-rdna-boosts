@@ -47,7 +47,7 @@ only as a rough shape.
 | 09 | `0009-…-block-09-host-resident-MoE-iface-schedul` | host-resident MoE: iface, scheduler, cache, slab hooks (+ r120: the second draft scheduler's slot is per arch, DFlash2 fix) | +14889 / −518 | 65 |
 | 10 | `0010-…-block-10-slab-fusion-dispatcher-async-in` | slab + fusion dispatcher + async input ring (infrastructure) | +12058 / −4870 | 75 |
 | 11 | `0011-…-block-11-qwen4exp-model-hyper-connection` | qwen4exp model/QSA/HC/lazy reader/indexer cache | +11776 / −433 | 46 |
-| 12 | `0012-…-block-12-campaign-remainder-CPU-wins-bac` | campaign remainder (+ r106: Meta `ALL_GATHER`, DFlash2 `-sm tensor`, slab narrow-2; + r111/r112: `--host-experts pool` drops the pinned master; FRAC 80 + O_DIRECT defaults; + r119: batched state restore) | +2939 / −722 | 33 |
+| 12 | `0012-…-block-12-campaign-remainder-CPU-wins-bac` | campaign remainder (+ r106: Meta `ALL_GATHER`, DFlash2 `-sm tensor`, slab narrow-2; + r111/r112: `--host-experts pool` drops the pinned master; FRAC 80 + O_DIRECT defaults; + r119: batched state restore; + r130: DFlash ingest tail, server prompt-cache residency) | +3223 / −747 | 38 |
 | 13 | `0013-…-block-13-MTP-draft-vocabulary-subset-spe` | MTP draft vocabulary subset (`--spec-draft-mtp-vocab N`, opt-in) | +569 / −6 | 19 |
 
 Block 05's file count is `template-instances/*.cu` (the FA kernel instantiations); block 10 is the
@@ -1059,6 +1059,42 @@ had no other home.
   next reserve sizes from the current graph), the per-device `max_host_expert_slice_bytes` split rule, the
   application of the embeddings-layer-input preset, and the `-sm tensor` H2D-ring auto-size + narrow-band
   pin.
+* **DFlash prompt-ingest tail** (r130, PR #212): a DFlash/DFlash2 draft whose **every** layer attends over a
+  sliding window has a window-sized KV cache, but `process()` used to feed it every prompt row — a 110K
+  prompt encoded 110K rows, all but the last ~2048 dropped again without ever being read, and each prompt
+  batch waited on the target before the draft could start, which also broke the queue of the target's
+  prompt ubatches.  `common_speculative_impl_draft_dflash` now takes the prompt end from the block-02 hook
+  (`set_prompt_end()`) and skips the prompt rows before the last `n_swa` positions; a batch left with no rows
+  returns before the target wait, and the first generation row resets the threshold as the MTP impl does.
+  Exact because DFlash sets `LLAMA_SWA_TYPE_STANDARD` unconditionally (`src/models/dflash.cpp`), so the mask
+  is `p1 - p0 >= n_swa`: a draft query can attend exactly a prompt's last `n_swa` positions
+  (`GREEDY-PURITY.md` §53).  A draft with any full-attention layer keeps feeding every row.  The
+  window test needs the per-layer pattern, which `llama_model_meta_val_str()` cannot return (it skips array
+  values), so a new staging query `llama_model_n_layer_swa()` sits in `src/llama-ext.h` next to
+  `llama_model_dflash_selector_top_k()` and upstream's `llama_model_n_swa()`.  `LLAMA_DFLASH_INGEST_TAIL=0`
+  feeds every row.
+  Measured (3x gfx1201, `-sm tensor -mg 0`, 27B UD-Q4_K_XL + DFlash2-Q4_K_M, `-fa on -ctk/ctv q8_0`):
+  prefill **+8-12 %** at 6K/26K/88K tokens (88.6K: 1271 -> 1395 t/s; no-draft 1415 t/s, so the draft's share
+  of the prefill goes 10.2 % -> 1.4 %), 35B-A3B Q4_K_M + its DFlash2 **+14.6 %** at 6.1K (our A3B draft
+  reports all six layers windowed, so this arm engages the tail rather than staying off); greedy text and
+  draft counts byte-identical in every arm (1 and 2 slots, `-ub 512` and `-ub 2048`).  Record:
+  `archive/work/dflash-ingest-tail/`.
+* **Server prompt-cache residency** (r130, PR #210): with a unified KV cache and `--cache-idle-slots`
+  (default on) every new task saved each idle slot to the prompt cache and cleared it, so two conversations
+  taking turns on two slots copied their whole state out and back on every switch (27B: 1.6-2.7 s per switch
+  at 110K in the report).  An idle slot now keeps its context; the KV-full path saves the least recently
+  used idle slot to the cache before clearing it; a restore that fails for want of cells held by another
+  idle slot moves idle slots out one at a time with the entry being restored held out of that eviction and
+  retries; and the slot-selection save holds the entry the task is about to restore out of its own
+  eviction (`server_prompt_cache::find()` split out of `load()`).  Buffers of restored/evicted states are
+  reused for the next save, counted against `--cache-ram` with the cached states.
+  `LLAMA_SERVER_LAZY_IDLE_SLOTS=0` / `LLAMA_SERVER_CACHE_REUSE=0` restore the eager behaviour.  The
+  delivery's fix on top of the PR: `find()` skips an entry whose main state buffer was already consumed
+  (a restore that failed on the draft buffer leaves one behind, and re-matching it compared against zero
+  bytes and reported success).  `tools/server/tests/unit/test_kv_keep_only_active.py` is updated for the new
+  default and covers both arms.  Measured on gfx1201: conversation switch at 11.5K tokens 0.5 -> 0.2-0.3 s
+  (same text), the overflow case 8.3 s recompute -> 0.5 s restore with 4 tokens evaluated, 4-slot concurrent
+  storm 13/13 requests green.  Record: `archive/work/server-prompt-cache-lazy/`.
 * **The batched state save and restore** (r96, PR #189; restore r119, PR #209): `llama_io_write_host`
   queues its deferred reads as `ggml_backend_tensor_get_async` into one pinned staging buffer kept by the
   context, synchronizes each backend once, then copies to the caller's buffer.  A recurrent model's
@@ -1185,10 +1221,11 @@ had no other home.
   byte-identical copy is resident) and `gate-prefill-logits.sh` KLD 0.000000 / 100.000 %.
 
 **Knobs.**  `LLAMA_OUTPUT_PINNED`, `MTP_DRAFT_N_UBATCH`, `GGML_LF_DFLASH_DEV`, `GGML_LF_FAST_TOPK`,
-`LLAMA_STATE_GET_MERGE_GAP`, `LLAMA_STATE_ASYNC`, `LLAMA_STATE_ASYNC_MAX_MIB`,
+`LLAMA_DFLASH_INGEST_TAIL` (r130), `LLAMA_STATE_GET_MERGE_GAP`, `LLAMA_STATE_ASYNC`, `LLAMA_STATE_ASYNC_MAX_MIB`,
 `GGML_CPU_MOE_OFFLOAD_THREADS`, `GGML_CUDA_SLAB_RING_MIB`, and (r111+, POOL mode) `MOE_HOST_POOL_MIB` /
 `MOE_HOST_POOL_FRAC` / `MOE_HOST_POOL_DIO` / `MOE_HOST_POOL_VERIFY` / `LLAMA_HOST_MASTER_PINNED`, plus
-(r113) `MOE_HOST_POOL_RAM_PCT` (default **85** since r114) and (r114) `MOE_HOST_POOL_STAGE_BATCH`;
+(r113) `MOE_HOST_POOL_RAM_PCT` (default **85** since r114), (r114) `MOE_HOST_POOL_STAGE_BATCH` and
+(r130, server) `LLAMA_SERVER_LAZY_IDLE_SLOTS` / `LLAMA_SERVER_CACHE_REUSE`;
 the heat prior's MHT2 sidecar is not a knob (an `MHT1` file is read as `dec = all`).
 `MOE_HOST_POOL_BGFETCH` was removed in r113.
 

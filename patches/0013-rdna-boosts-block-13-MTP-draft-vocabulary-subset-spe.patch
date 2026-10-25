@@ -1,4 +1,4 @@
-From 99a2736fb7668d00f548c439c07314ab8c16b4d9 Mon Sep 17 00:00:00 2001
+From 531d70b2360bacd4c1edef1b3e9e9ba9d70028d1 Mon Sep 17 00:00:00 2001
 From: Stew Forster <ci@rdna-boosts.invalid>
 Date: Thu, 22 Oct 2026 05:53:08 -0500
 Subject: [PATCH 13/13] rdna-boosts: block 13: MTP draft vocabulary subset
@@ -111,10 +111,10 @@ index eef808c72..1c45ab40e 100644
      common_cpu_params cpuparams_batch;
  
 diff --git a/common/speculative.cpp b/common/speculative.cpp
-index edc125b4e..69028e25a 100644
+index 1e9ab3263..c042af715 100644
 --- a/common/speculative.cpp
 +++ b/common/speculative.cpp
-@@ -3025,7 +3025,8 @@ common_speculative_init_result::common_speculative_init_result(
+@@ -3075,7 +3075,8 @@ common_speculative_init_result::common_speculative_init_result(
      auto cparams = common_context_params_to_llama(params);
  
      if (spec_mtp) {
@@ -322,7 +322,7 @@ index c2317fe60..735380a2a 100644
  
      llm_graph_result * res;
 diff --git a/src/llama-model.cpp b/src/llama-model.cpp
-index daf42cf47..dcb6ac2a8 100644
+index 4df3788e5..e2a3861b2 100644
 --- a/src/llama-model.cpp
 +++ b/src/llama-model.cpp
 @@ -23,6 +23,7 @@

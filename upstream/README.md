@@ -2,7 +2,7 @@
 
 ## Base (2026-10-24 re-base)
 
-Every candidate here was cut against `097cf33d9`.  After the `v14-3f03b1772-r127` re-base, each
+Every candidate here was cut against `097cf33d9`, except `pr210-server-prompt-cache-lazy/`, which is cut against the current base `3f03b1772`.  After the `v14-3f03b1772-r127` re-base, each
 sub-directory's README carries a **Re-base status** line: 9 patches still apply cleanly
 (`git apply --check`) to `3f03b1772` but have not been re-validated there, and 8 need a re-cut.  None of
 this blocks a release — nothing in `upstream/` is part of the delivery.
@@ -44,6 +44,7 @@ delivery then carries only the fork-local remainder.
 | [`ggml-sched-probe/`](ggml-sched-probe/README.md) | ggml sched: probe the stored layout before the alloc-fallback's full device sync (single-device fast path) | **block 11** (qwen4exp) | single-GPU validated |
 | [`kv-cache-keys-only/`](kv-cache-keys-only/README.md) | llama: keys-only KV caches — `llama_kv_cache` gains `v_enabled` (no V tensor, no V-side op) | **block 11** (+ the plumbing in **block 08**) | verified on master: indexer KV 72.00 → 24.00 MiB at ctx 8192 |
 | [`lazy-mode-off-resident/`](lazy-mode-off-resident/README.md) | llama: make `--lazy-mode off` keep `TENSOR_READ_LAZY` tensors resident under `--load-mode mmap` (the help text promised it; the mapping won) | **block 00** (r122) | applies clean to `097cf33d9`; validated in the delivery tree |
+| [`pr210-server-prompt-cache-lazy/`](pr210-server-prompt-cache-lazy/README.md) | server: keep idle slots resident with a unified KV cache, save-before-clear on the KV-full path, make room before a failed restore, reuse prompt-cache buffers | **block 12** (r130, PR #210) | applies clean to `3f03b1772` (cut there, not on `097cf33d9`); validated on gfx1201 in the delivery tree; needs the server test update that ships with it |
 
 ## Backlog (not written up yet)
 

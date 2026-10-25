@@ -1,5 +1,105 @@
 # WORKLOG - dated delivery records
 
+## 261024.011 (r130) -- PR #210 (server prompt-cache residency) and PR #212 (DFlash ingest tail) promoted into block 12
+
+**Release:** `v14-3f03b1772-r130`.  Base `3f03b1772` (base tree `14370bd49a`), canonical tip `531d70b23`,
+tree `c4f9659fc120487a01a136a52cc0377aa385c72e`, 14 blocks.  `scripts/validate-set.sh` green (checksums,
+fresh-tarball **strict 14/14** `git am`, applied tree == recorded tree).  **No block renumbered, merged or
+split**: both changes are folds inside **block 12**, whose subject now names the server prompt cache.  The
+delta against the r128/r129 tree is **7 files, +254 / -23** across `common/speculative.cpp`,
+`src/llama-ext.h`, `src/llama-model.cpp`, `tools/server/server-context.cpp`, `tools/server/server-task.{cpp,h}`
+and the server unit test.  No kernel, no dispatch, no GGML numerics.
+
+Two contributor PRs (`overdoingism`), both filed as `wip/` patches against `v14-097cf33d9-r120`, reviewed,
+re-cut onto r129 and promoted after their own gates.  Both are **default-on with a kill switch**, per the
+default-on policy (`LLAMA_DFLASH_INGEST_TAIL=0`, `LLAMA_SERVER_LAZY_IDLE_SLOTS=0`,
+`LLAMA_SERVER_CACHE_REUSE=0`).
+
+### #212 -- a windowed DFlash draft ingests only the prompt tail
+
+Every layer of the Qwen3.8-27B DFlash2 draft attends over a 2048-position sliding window and its KV cache is
+sized for it, but `process()` fed it every prompt row: a 110K prompt was encoded row by row, all but the last
+~2048 dropped again unread, and every prompt batch waited on the target before the draft started, which also
+broke the queue of the target's prompt ubatches.  When **every** draft layer has a window the impl now takes
+the prompt end from the block-02 `set_prompt_end()` hook and skips the rows before `prompt_end - n_swa`; a
+batch left with no rows returns before the target wait, and the first generation row resets the threshold as
+the MTP impl does.  Exact because DFlash sets `LLAMA_SWA_TYPE_STANDARD` unconditionally, so the mask is
+`p1 - p0 >= n_swa` and a draft query can attend exactly a prompt's last `n_swa` positions
+(`GREEDY-PURITY.md` §53).  The window test needs the per-layer pattern, which `llama_model_meta_val_str()`
+cannot return, so a new staging query `llama_model_n_layer_swa()` sits in `src/llama-ext.h`.  The patch is
+**delivery-only** (it needs the block-02 hook), so there is no `upstream/` copy.
+
+**The reported gain is understated on r129.**  The PR measured -0.9..-2.7 % prefill on r120; on r129 (faster
+prefill, and the F1 device path turns each prompt batch's `llama_synchronize(ctx_tgt)` into a real stall) the
+same switch is **+8-12 %**: 6.1K 1556 -> 1683 t/s, 26.5K 1591 -> 1787, 88.6K **1271 -> 1395** (no-draft
+1415), i.e. the draft's share of the prefill falls from **10.2 % to 1.4 %**; 35B-A3B Q4_K_M + its DFlash2
+**+14.6 %** at 6.1K.  One PR claim does not hold for our model files: it says the Qwen3.6-35B-A3B draft has
+"5 of 6 layers windowed" so the tail stays off there, but our `Qwen3.6-35B-A3B-DFlash2-Q8_0.gguf` reports all
+six windowed and the tail **does** engage -- that arm was validated here (text and acceptance identical)
+rather than taken from the PR.  The re-cut also had to cover the F1 device path and the DFlash2/LiLiCorr
+members added since r120.
+
+### #210 -- idle slots stay resident, the KV-full path saves before it clears, a failed restore makes room
+
+With a unified KV cache and `--cache-idle-slots` (default on), every new task saved each idle slot to the
+host prompt cache and cleared it, so two conversations taking turns on two slots copied their whole state
+out and back on every switch.  An idle slot now keeps its context; `try_clear_idle_slots` saves the least
+recently used idle slot before clearing it; a restore that fails for want of cells held by another idle slot
+moves idle slots out one at a time (with the entry being restored held out of that eviction) and retries; the
+slot-selection save holds the entry the task is about to restore out of its own eviction
+(`server_prompt_cache::find()` split out of `load()`); and buffers of restored/evicted states are reused for
+the next save, counted against `--cache-ram` with the cached states.
+
+**The headline numbers reproduce** (2 slots, unified, 27B UD-Q4_K_XL, no draft, `--cache-ram 8192`): a
+conversation switch at 11.5K tokens **0.5 -> 0.2-0.3 s** with byte-identical text, and the PR's overflow
+case (the second conversation fills a 16K unified cache while the first idles) **8.3 s recompute -> 0.5 s
+restore with 4 tokens evaluated**, the restored text equal to the original.  MTP and DFlash2 drafts behave
+the same (0.4-0.5 -> 0.2 s per switch).  The output caveat is correct and already ours: a different cache
+history places a sequence's KV in other cells, which is the `--kv-unified` non-determinism of
+`GREEDY-PURITY.md` §38; every *sequential* arm measured byte-identical.
+
+**Two things were added on top of the PR.**  (1) `find()` now skips a cache entry whose main state buffer
+was already consumed: `load()` transfers the main buffer before the draft buffer, so a failed *draft* restore
+leaves an entry that re-matches, compares against zero bytes, has `llama_state_seq_set_data_ext(..., 0)`
+report success and leaves the slot's tokens on top of a failed/cleared KV.  That was a pre-existing upstream
+hazard on a later task; the new retry loop made it immediately reachable.  (2)
+`tools/server/tests/unit/test_kv_keep_only_active.py` asserted the old eager save-and-clear and failed 1/3;
+it is updated for the new default and keeps the old assertions under `LLAMA_SERVER_LAZY_IDLE_SLOTS=0`
+(3/3 green).  The change is **pure upstream code**, so it is also staged as
+`upstream/pr210-server-prompt-cache-lazy/` (cut against `3f03b1772`, with the `find()` fix).
+
+A 4-slot unified concurrent storm (12 concurrent + 1 replay, DFlash2) was 13/13 green with no asserts; a
+restore that cannot be satisfied because every other slot is *busy* correctly falls back to a recompute.
+`--no-kv-unified`, `--cache-ram 0` and a cache too small for the state are unchanged (the last recomputes).
+Peak RSS with reuse on is bounded by `--cache-ram` (6938 MiB vs 6898 with reuse off, six 13.4K saves at
+`--cache-ram 4096`).
+
+### Gates (gfx1201, ROCm 10.1.0, `~/bin/build-llama-rocm`; r129 vs r130 where it is an A/B)
+
+| gate | result |
+|---|---|
+| coherence, same-seed greedy, 6 configs (dense 4B, dense 27B, 27B MTP n3, 27B DFlash2, 35B-A3B DFlash2, 35B-A3B `-ncmoe 40` 3 GPU tensor) | text **identical in 6/6**; only the timing/log lines differ.  DFlash2 prefill 1287.7 -> 1398.5 t/s (27B) and 2751.6 -> 2994.2 (A3B) |
+| #212 A/B: 27B DFlash2, tail on vs `LLAMA_DFLASH_INGEST_TAIL=0`, 6.1K/26.5K/88.6K, `-ub 2048`; `-ub 512`; 2 slots unified; 35B-A3B DFlash2 6.1K; 3 GPU `-sm layer` 6.1K | text sha and draft counts **identical in every pair**; prefill +8/+12/+10 %, `-ub 512` 17.4 vs 19.7 s, 2 slots 7.9 vs 8.7 s, A3B +14.6 %, `-sm layer` neutral (1251 vs 1245 t/s) |
+| #210: updated `unit/test_kv_keep_only_active.py`; 2-slot unified ping-pong (plain/MTP/DFlash2); the overflow restore; `--no-kv-unified`; `--cache-ram 0`/256; 4-slot concurrent storm | 3/3 tests; 0.5/0.4 -> 0.3/0.2 s per switch, same text; 8.3 s recompute -> 0.5 s restore; unchanged / recompute / no crash; 13/13 requests |
+| upstream server suite (`test_basic`, `test_completion`, `test_slot_save`, `test_ctx_shift`, `test_speculative`) | 83 passed, 2 failed -- **both fail identically on the r129 build** (an `openai` client-version test; `test_slot_restore_checkpoints_draft_kv_type_change[q8_0]`, the r125 draft-KV-type follow).  No new failure |
+| adaptive-MTP four axes, `-n 3000`, `-c 16384`, bf16 KV, 3 GPU tensor | text identical on R/P/C/K; 79.3 / 98.6 / 106.1 / 112.9 vs 78.8 / 98.9 / 105.6 / 112.8 t/s (noise) |
+| `llama-batched-bench -npp 16 -ntg 32 -npl 1,4,8`, q8_0 KV, dense 27B (rule 5) | 42.76 / 138.69 / 240.41 vs 42.92 / 139.26 / 239.94 t/s -- no worse at B=4/B=8 |
+| prefill logits (`scripts/gate-prefill-logits.sh`) | **KLD 0.000000, same-top-p 99.980 %** |
+| per-block build (`--tip 531d70b23 --changed-from r129-tip`) | **2/2** (block 12 and the tip); the other 12 deltas are byte-identical to r129 |
+| GPU faults (`scripts/check-gpu-faults.sh --since "8 hours ago"`, 5 run logs) | clean (kernel + logs, echoed prompt lines filtered) |
+| `validate-set.sh` | green -- strict 14/14 on a fresh tarball, tree == `release.json.tree` |
+
+**Docs/config changed with it:** `ENVIRONMENT.md` (new §15 for the two server variables; the DFlash tail in
+§3), `patches/README.md` (block 12 contents, block index, knobs), `MANIFESTS.md` (two new block-12 verify
+rows), `GREEDY-PURITY.md` §53 (the tail's exactness rule), `upstream/pr210-server-prompt-cache-lazy/` (the
+upstream candidate + the `find()` fix), `archive/work/{dflash-ingest-tail,server-prompt-cache-lazy}/`, and
+`release.json` (r130 tip/tree/hashes).  Nothing was filed in `TODO.md`.
+
+**Not validated:** more than four server slots; a model swap or sleep cycle with resident idle slots;
+multimodal (M-RoPE) prompts with the DFlash tail; DSpark/draft-dspark with the tail (a DSpark draft would get
+it only if every layer were windowed -- untested, no model here; a mixed-pattern DFlash draft (some full-attention
+layers) keeps every row, which is also the untested path); non-AMD backends (out of scope).
+
 ## 261024.010 (r129) -- TODO #96 fixed (the band clamp runs on the live arena), #97 and #99 retired
 
 **Release:** `v14-3f03b1772-r129`.  Base `3f03b1772` (base tree `14370bd49a`), canonical tip `99a2736fb`,

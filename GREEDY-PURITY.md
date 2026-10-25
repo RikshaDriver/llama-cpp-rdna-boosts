@@ -1323,3 +1323,35 @@ in the delivery's text moved: dense 27B `plain == draft-mtp` sha `0cd2d424a564` 
 Record: `TODO.md` #100 (closed), `patches/README.md` block 11, `MANIFESTS.md` (per-block row 11),
 `WORKLOG.md` 261024.009.
 
+
+## 53. A draft with a window on every layer never reads the prompt rows before the window, so skipping their ingest is exact
+
+**Claim.**  A DFlash draft whose every layer attends over a sliding window of `n_swa` positions cannot
+reach a prompt row older than the last `n_swa` positions of the prompt: the attention mask is
+`is_masked_swa(n_swa, swa_type, p0, p1)` and DFlash sets `LLAMA_SWA_TYPE_STANDARD` unconditionally
+(`src/models/dflash.cpp`, both the per-layer pattern path and the DSpark DSV4 path), so a query at `p1`
+masks every key at `p1 - p0 >= n_swa`.  The first generation row sits at `p1 = prompt_end`, so its window
+starts exactly at `prompt_end - n_swa`.  The draft's KV cache is sized for the window (SWA cell mapping is
+position-modular: a row at `pos` owns cell `pos % n_swa` plus a per-sequence offset, and the `n_ubatch`
+slack), so ingesting only the tail writes the same cells the full ingest leaves behind.  A skipped row can
+therefore change no draft logit, and the target verifies every drafted token anyway.
+
+**Rule.**  Skip only the rows a *mask* proves unreachable, and prove it from the arch's own window type, not
+from `n_swa` alone: a `LLAMA_SWA_TYPE_CHUNKED` window reaches back to the chunk start (up to `2*n_swa - 1`)
+and a `SYMMETRIC` one half a window forward, so either would need a wider tail.  Require **every** layer of
+the draft to be windowed (a mixed pattern keeps full prompt ingest), and reset the per-sequence threshold
+when the first generation row is seen so a later position shift (a new prompt on the same slot, a
+checkpoint rewind) can never skip rows.  The skip must happen before the target synchronization, or the
+speed-up it exists for (not waiting on the target for a batch the draft will not consume) is not obtained.
+
+**Evidence (r130, gfx1201).**  3x R9700 `-sm tensor -mg 0`, Qwen3.8-27B UD-Q4_K_XL + DFlash2-Q4_K_M,
+`-fa on -ctk/ctv q8_0`.  Tail on vs off (`LLAMA_DFLASH_INGEST_TAIL=0`) at 6.1K / 26.5K / 88.6K tokens:
+prefill 1683/1787/1395 vs 1556/1591/1271 t/s (+8/+12/+10 %; no-draft at 88.6K is 1415 t/s, so the draft's
+share of the prefill falls from 10.2 % to 1.4 %), greedy text sha identical in every arm, draft acceptance
+identical.  35B-A3B Q4_K_M + its DFlash2-Q8_0 (+14.6 % prefill at 6.1K) and a 2-slot unified run and
+`-ub 512` arms: text and draft counts identical.  Coherence against the r129 build: 6/6 configs identical
+(dense 4B, dense 27B, 27B MTP, 27B DFlash2, 35B-A3B DFlash2, 35B-A3B `-ncmoe`), and the prefill-logit gate
+KLD 0.000000 / same-top-p 99.980 %.
+
+Record: `patches/README.md` block 12, `MANIFESTS.md` (per-block row 12), `archive/work/dflash-ingest-tail/`,
+`WORKLOG.md` 261024.011.
