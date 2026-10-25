@@ -96,6 +96,7 @@ arena" note: a slab-declined config is no longer clamped, and the decline messag
 `AGENTS.md` (the draft-length bullet), `MANIFESTS.md` (block 09's verify-band gate: a slab-declined arm must
 log **no** clamp and `n_rs_batch = 65`), `README.md`/`BASELINE.md`/`AGENTS.md`/`TODO.md` release strings.
 `TODO.md`: **#96, #97 and #99 removed** (a closed item is a WORKLOG entry, never a TODO row).
+`GREEDY-PURITY.md` §§50/51 current-state pointers updated the same way.
 
 ## 261024.009 (r128) -- TODO #100 and #101 retired: the `HC_COMBINE` oracle, and the `ml_l` rename removed
 

@@ -1255,8 +1255,8 @@ CPU-compute experts (`MOE_EXPERT_CACHE_MIB=0`): 38.5 -> 67.6 (wide) vs 52.2 clam
 local, so extra rows cost compute and the wide batch amortises the per-token overhead.  That is upstream's
 shape, and the issue-#214 reporter's update confirms it: all three of his r120 runs logged the slab decline
 and no `moe_cache_report`, i.e. his box was in the no-arena streaming class, and his decode already matched
-upstream (the remaining regression there is deep-context **prefill** depth scaling, TODO #97 — not this band
-and not a decode symptom).  On an arena config the same wide flags halve decode.  Purity is unaffected in every arm
+upstream (the remaining regression there was deep-context **prefill** depth scaling, TODO #97 — not this band
+and not a decode symptom; that closed at r129, RDNA4 in r126 and RDNA2 on the reporter's own sweep).  On an arena config the same wide flags halve decode.  Purity is unaffected in every arm
 (the clamp changes the verify *schedule*, §48): `plain` / `draft-mtp n3` / ngram hand-capped /
 ngram auto-clamped all hash `9d914f47aebb` with `ROCBLAS_USE_HIPBLASLT=0` (§44).
 
@@ -1274,7 +1274,9 @@ prefill ran the band geometry (16 warps, occupancy 1, `nbatch_K2/V2` 64, combine
 (`TODO.md` #97/#98, `WORKLOG.md` 261024.006).  Deleting the row (r126) is +36 % at d98k, +19 % at d32k and
 +3 % at d0 -- i.e. the band row was a *prefill* regression, and the delivery went from -10 % below upstream
 at depth to +20 % above it.  The W=5..8 band arm it also configured measured unchanged within noise on a
-MoE-bound decode, which is why no separate instantiation was cut (`TODO.md` #99).
+MoE-bound decode, and r129 re-measured the premise for a separate band instantiation and declined it
+(`TODO.md` #99 retired: the shipping 256-thread row beat the existing two-tile 16-warp arm 110.1/110.2 vs
+108.9/107.6 t/s on the W=8 arm, text byte-identical — no decode-bound head-256/GQA-8 workload exists here).
 
 **Rule.**  A config row that exists for the decode/verify band must be reachable **only** from the band: key
 it on a compile-time band flag (or on a distinct instantiation), never on `ncols`, `n_kv` or `n_q` at
@@ -1284,7 +1286,8 @@ instantiation.  **A row that reaches prefill owes `scripts/gate-prefill-logits.s
 changes the KV-row split and combine order -- the family-switch class of §34/§46), plus the band arm's own
 decode/verify A/B so the band's measured gain is not silently traded away.
 
-Record: `TODO.md` #97/#98/#99, `patches/README.md` block 05, `WORKLOG.md` 261024.006 / 261024.007.
+Record: `TODO.md` #97/#98/#99 (all three closed), `patches/README.md` block 05, `WORKLOG.md` 261024.006 /
+261024.007 / 261024.010.
 
 ## 52. An op with no test case has no oracle — and a default-on fusion needs the pair covered, not just the op
 
