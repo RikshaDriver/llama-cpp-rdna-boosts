@@ -40,7 +40,7 @@ only as a rough shape.
 | 02 | `0002-…-block-02-adaptive-MTP-draft-depth` | adaptive MTP draft depth | +1186 / −54 | 24 |
 | 03 | `0003-…-block-03-chunked-gated-delta-net-prefill` | chunked GDN prefill + rollback tracker | +3182 / −15 | 22 |
 | 04 | `0004-…-block-04-BF16-KV-cache-and-native-BF16-f` | BF16 KV cache + native-BF16 FA | +630 / −214 | 8 |
-| 05 | `0005-…-block-05-flash-attention-band-native-qua` | FA band / native quantized K-V / derived kq mask | +5032 / −609 | 289 |
+| 05 | `0005-…-block-05-flash-attention-band-native-qua` | FA band / native quantized K-V / derived kq mask (+ the three kq-mask fills that lacked their sibling's buffer guard, r131) | +5047 / −612 | 289 |
 | 06 | `0006-…-block-06-MMB-quantized-prefill-GEMM` | MMB quantized prefill GEMM | +2877 / −3 | 7 |
 | 07 | `0007-…-block-07-k-quant-boosts-mmvq-VDR-Q6_K-MM` | k-quant boosts (VDR, Q6_K MMQ, Q1_0, grid pad) | +879 / −137 | 9 |
 | 08 | `0008-…-block-08-fused-kernels-old-08-fusions-ol` | fused kernels + fused MoE | +5424 / −440 | 35 |
@@ -311,7 +311,10 @@ almost all of them `template-instances/*.cu`.
   (`GREEDY-PURITY.md` §20-22).
 * **The derived kq mask (V3)**: per-token bounds + one per-cell position replace the packed mask; the FA
   kernel computes visibility on the fly.  Implemented in **both** the MMA and the tile kernels, and only
-  for prefill-shaped batches (`n_tokens > 8`), so decode/verify are untouched.
+  for prefill-shaped batches (`n_tokens > 8`), so decode/verify are untouched.  The mask tensor is still
+  created; a graph that never consumes it leaves it **unallocated**, so every fill site is guarded on
+  `tensor && tensor->buffer` (r131 closed the last three — the hybrid-K one aborted `-np 1` on
+  `bailingmoe3`; see Purity below).
 * **q8_0 fetch-ahead variant (r98, PR #195)**: with q8_0 K and V read in place (decode/verify, `n_q <= 8`,
   head 256) the band launches a second kernel, `flash_attn_ext_f16<..., band_fetch_ahead = true>`, that
   fetches the raw q8_0 bytes of the next K/V batches into registers ahead of use and converts each batch
@@ -360,6 +363,33 @@ A **family switch** (the r102 RDNA3_0 head-512 row set, §46) is judged with
 `scripts/gate-prefill-logits.sh --family-switch`: it passes the same absolute limits at a point inside the
 gate's calibrated domain (0.001778 / 98.967 % at base PPL 2.65) and is reported against a same-kernel
 ubatch control measured on the spot.
+
+**The three kq-mask fills that lacked the guard (r131, PR #222 / issue #221).**  Reported, root-caused and
+validated by @RikshaDriver (RX 7600 `gfx1102`, ROCm 10.1, `bailingmoe3` / `Ling-3.0-tiny-IQ4_NL`, on
+`v14-3f03b1772-r128`).  Only a **single-sequence** context enables the derived form
+(`multi_stream = n_seqs > 1 && (!kv_unified || arch == DEEPSEEK4)` disables it at 2+ slots), so at `-np 1`
+the packed mask in `llm_graph_input_mem_hybrid_k` has no consumer; the allocator gives an unconsumed input
+no buffer, and the unguarded fill hit `llama_kv_cache::set_input_kq_mask`'s `GGML_ASSERT(ggml_backend_buffer_is_host(dst->buffer))`
+— a startup abort before the first token, at every ctx size.  **Ten of the thirteen** fill sites in
+`src/llama-graph.cpp` already carried the guard (`if (mask && mask->buffer)`, the idiom
+[`attn-k-null-mask-guard`](../upstream/attn-k-null-mask-guard/README.md) introduced); three did not:
+`llm_graph_input_mem_hybrid_k` (the one a `bailingmoe3` graph reaches — its sibling
+`llm_graph_input_mem_hybrid` guards the identical call) and `llm_graph_input_attn_k_dsa` (`mla` and `lid`
+mask).  All three now carry it.  `can_reuse` needs nothing: `can_reuse_kq_mask()` reads `ne[]`, never
+`buffer`.  The `attn_k_dsa` pair is **hardening** — that builder passes `allow_derived = false`
+(`build_attn_inp_kq_mask(mctx_cur->get_mla(), …, false)`), so no delivery path leaves those two masks
+unallocated today; `mem_hybrid_k` builds `attn_k` through `build_attn_inp_k_impl()`, which passes `true`,
+which is why it was reachable.  Reproduced here on gfx1201 (r130 tree, `-np 1`, `-c 32768`):
+`GGML_ASSERT(buffer)` at `ggml-backend.cpp:579` with the reported stack
+(`llm_graph_input_mem_hybrid_k::set_input` -> `llama_kv_cache::set_input_kq_mask` -> `ggml_backend_buffer_is_host`),
+rc 134; `-np 2` and `-np 4` unaffected in both builds.  Measured after the guard: `-np 1/2/4` greedy text
+byte-identical (same md5), `test-llama-archs -a bailingmoe3` 2/2, the same-seed text identical to
+`LLAMA_KQ_MASK_DERIVED=0`, `gate-prefill-logits.sh` on the Ling model **0.000000 / 100.000 %** derived vs
+packed (40 chunks), and every previously-working arm of the r130 build byte-identical
+(dense 4B 1 GPU + 3 GPU tensor, 27B UD-Q4_K_XL, 35B-A3B `-ncmoe 40`).  Without the guard
+`LLAMA_KQ_MASK_DERIVED=0` is the work-around.  Rule: `GREEDY-PURITY.md` §54.  The remaining unguarded fills of the same class
+(`set_input_k_idxs`, the pointer-only `s_copy`/`k_rot` checks) are **upstream's own** and unreachable, since
+a `k_idxs`/`s_copy`/`k_rot` tensor is always consumed by the node that needed it — left as upstream.
 
 **Upstream candidates.**  `fa-kv-split-width` (block 00), `fa-decode-verify-kernel-family`,
 `fa-512-rdna-head-cap`, `attn-k-null-mask-guard` — see [`../upstream/`](../upstream/README.md).

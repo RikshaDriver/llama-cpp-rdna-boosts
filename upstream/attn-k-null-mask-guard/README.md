@@ -4,6 +4,18 @@
 > (`git apply --check`) to the current fork point `3f03b1772`, but it was **not re-validated**
 > there.  Not part of the delivery.
 
+> **Reached in the delivery (r131, PR #222 / issue #221; reported 2026-10-25 on r128):** the null-mask graph
+> this note says does not exist upstream is what block 05's derived kq mask builds at one slot, and
+> `llm_graph_input_mem_hybrid_k` filled the absent mask: `GGML_ASSERT(buffer)` (ggml-backend.cpp:571 on the
+> reporter's r128 tree, :579 on r130) before the first token on `bailingmoe3`, RX 7600 `gfx1102`, ROCm
+> 10.1, reported, root-caused and validated by @RikshaDriver.  `attn_k` itself already ships guarded (block
+> 05), so the abort was in the three sites this candidate does **not** cover: `mem_hybrid_k` (reachable —
+> `build_attn_inp_k_impl` passes `allow_derived = true`) and `attn_k_dsa`'s `mla`/`lid` masks (hardening —
+> that builder passes `false`).  The delivery guards all three since r131, in this file's form.  Measured:
+> `-np 1` abort -> 88.7 / 88.6 t/s on the reporter's card, `-np 2` / `-np 4` unchanged; on gfx1201 the
+> derived-vs-packed prefill logits are bit-identical (0.000000 / 100.000 %).  The candidate's own scope is
+> unchanged and still unfiled: upstream has no derived form, so upstream has no unreachable-mask path.
+
 > **Upstream candidate** · status: prepared 2026-09-10; verified on unadulterated master `9cf3bf256` (CPU). **Hardening only** — no reachable null-mask path upstream today · not filed.
 > Delivery: **block 05** (part of the old block-15 *W2* QSA derived-bias/visibility work) · patch: [`UPSTREAM-PR-attn-k-null-mask-guard.patch`](UPSTREAM-PR-attn-k-null-mask-guard.patch) (this directory).
 

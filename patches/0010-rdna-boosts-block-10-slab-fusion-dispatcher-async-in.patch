@@ -1,4 +1,4 @@
-From 0d502e88148a9ecf4197c34ee200c8d9b3c938b2 Mon Sep 17 00:00:00 2001
+From 76d6305785ba67278e277c34f8638e27b9a49c9d Mon Sep 17 00:00:00 2001
 From: Stew Forster <ci@rdna-boosts.invalid>
 Date: Thu, 22 Oct 2026 07:24:38 -0500
 Subject: [PATCH 10/13] rdna-boosts: block 10: slab, fusion dispatcher, async
@@ -19804,10 +19804,10 @@ index 76b21e631..77471bc25 100644
  
  //
 diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
-index 659b09d40..21f4c2578 100644
+index a40b84dbc..e426abd4d 100644
 --- a/src/llama-graph.cpp
 +++ b/src/llama-graph.cpp
-@@ -3609,16 +3609,17 @@ ggml_tensor * llm_graph_context::build_attn(
+@@ -3621,16 +3621,17 @@ ggml_tensor * llm_graph_context::build_attn(
  
      // these nodes are added to the graph together so that they are not reordered
      // by doing so, the number of splits in the graph is reduced
@@ -19829,7 +19829,7 @@ index 659b09d40..21f4c2578 100644
      const auto * mctx_iswa = inp->mctx;
  
      const auto * mctx_cur = is_swa ? mctx_iswa->get_swa() : mctx_iswa->get_base();
-@@ -4025,6 +4026,9 @@ static std::unique_ptr<llm_graph_input_rs> build_rs_inp_impl(
+@@ -4037,6 +4038,9 @@ static std::unique_ptr<llm_graph_input_rs> build_rs_inp_impl(
  
      inp->s_copy = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_rs);
      ggml_set_input(inp->s_copy);

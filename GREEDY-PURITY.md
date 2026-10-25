@@ -1355,3 +1355,37 @@ KLD 0.000000 / same-top-p 99.980 %.
 
 Record: `patches/README.md` block 12, `MANIFESTS.md` (per-block row 12), `archive/work/dflash-ingest-tail/`,
 `WORKLOG.md` 261024.011.
+
+## 54. A fill of an input the graph may not consume is guarded on `buffer`, never on the pointer
+
+**Claim.**  ggml-alloc allocates no buffer for an input tensor the executed graph never consumes, and
+`llama_kv_cache::set_input_kq_mask` (and its siblings `set_input_k_idxs` / `set_input_v_idxs` /
+`set_input_k_rot` / `set_input_v_rot`) open with
+`GGML_ASSERT(ggml_backend_buffer_is_host(dst->buffer))`.  So a *fill* of an unconsumed input is a hard
+abort before the first token, not a no-op: `if (tensor) fill(tensor)` is the wrong test, and
+`if (tensor && tensor->buffer) fill(tensor)` is the right one.  Block 05's derived kq form is exactly a
+producer of unconsumed masks — it is registered with `allow_derived = true`, and at one KV stream its
+per-cell/per-query inputs *replace* the packed `n_kv x n_q` mask, which is still created but has no
+consumer.  `bailingmoe3` (18 KDA + 6 MLA layers) at `-np 1` aborted in
+`llm_graph_input_mem_hybrid_k::set_input` because of it.
+
+**Rule.**  Every fill of a graph-input tensor goes through the `tensor && tensor->buffer` guard, in the
+idiom `llm_graph_input_attn_kv` established (and `llm_graph_input_kq_derived` applies to all three of its
+tensors).  A new `allow_derived = true` builder or a new hybrid/DSA input class inherits the requirement;
+`can_reuse` does **not** need one (`can_reuse_kq_mask()` reads `ne[]` only).  Do not "fix" the abort by
+dropping the mask from the graph or by making the setter tolerant: the guard states the invariant, and the
+packed mask still has to be filled for every batch that does consume it.
+
+**Evidence (r131, gfx1201).**  r130 tree, `bailingmoe3` / Ling-3.0-tiny IQ4_NL, `-ngl 999 -c 32768 -np 1`:
+`GGML_ASSERT(buffer)` rc 134 with the stack
+`llm_graph_input_mem_hybrid_k::set_input -> llama_kv_cache::set_input_kq_mask -> ggml_backend_buffer_is_host`;
+guarded, the same command runs and its greedy text is byte-identical to `-np 2`, to `-np 4` and to
+`LLAMA_KQ_MASK_DERIVED=0` (md5 `d5a0e389`, recall prompt, 128 tokens, seed 42).  The derived path is
+bit-identical to the packed path at the logits (`gate-prefill-logits.sh --ab "LLAMA_KQ_MASK_DERIVED=0"`
+on that model: **0.000000 / 100.000 %**, 40 chunks x 512), `test-llama-archs -a bailingmoe3` is 2/2, and
+every previously-working arm of the r130 build is byte-identical (dense 4B 1 GPU / 3 GPU tensor, 27B
+UD-Q4_K_XL, 35B-A3B `-ncmoe 40`).  The `attn_k_dsa` pair (its `mla`/`lid` masks) is hardening: that builder
+passes `allow_derived = false`, so nothing in the delivery leaves those unallocated today.
+
+Record: `patches/README.md` (block 05), `MANIFESTS.md` (per-block row 05), `AGENTS.md` (the invariant),
+`upstream/attn-k-null-mask-guard/README.md`, `WORKLOG.md` 261024.012, PR #222 / issue #221.

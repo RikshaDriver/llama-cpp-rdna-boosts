@@ -460,6 +460,16 @@ stub alive to serve them, and treat a `wip/` path in an old record as a historic
   `template-instances/*.cu` files, never left implicitly in the dispatch TU (it gates the build).
   Check with `nm -C <obj> | grep -c <case>`: the dispatch TU shows `U`, the instance TUs `T`/`W`.
   Detail: `archive/work/build-time-regression/`.
+- **Every kq-mask fill is guarded on `tensor && tensor->buffer` (r131, PR #222).**  Block 05's derived kq
+  form (`build_attn_inp_kq_mask(..., allow_derived = true)`) leaves the packed mask with **no consumer** at
+  one slot, and ggml-alloc gives an unconsumed input tensor no buffer, so an unconditional fill hits
+  `llama_kv_cache::set_input_kq_mask`'s `GGML_ASSERT(ggml_backend_buffer_is_host(dst->buffer))` and the
+  process aborts before the first token (`bailingmoe3` at `-np 1` was the live case).  The guard is the
+  file's own idiom (`llm_graph_input_attn_kv` is the origin); three sites lacked it and were fixed in
+  `llm_graph_input_mem_hybrid_k` (reachable) and `llm_graph_input_attn_k_dsa` (hardening, `allow_derived`
+  false for its `mla`/`lid` masks).  A new fill site, a new `allow_derived = true` builder or a new hybrid
+  input class must carry it; `can_reuse` needs nothing (`can_reuse_kq_mask()` reads `ne[]`, never
+  `buffer`).  `LLAMA_KQ_MASK_DERIVED=0` is the work-around and the packed reference arm.
 - **The host-resident-expert device gather's head pad must match the host path**
   (`min(expert_size, 512)`; **64 is IQ4_NL-only**), keyed on `(input_cpy buffer, expert_bytes)`. Run
   `scripts/gate-qwen4exp-quant-coherence.sh` before changing `moe_cache_gather_host` or the head zero.

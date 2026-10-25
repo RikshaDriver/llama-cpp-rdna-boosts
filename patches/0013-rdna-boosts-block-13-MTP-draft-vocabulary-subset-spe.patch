@@ -1,4 +1,4 @@
-From 531d70b2360bacd4c1edef1b3e9e9ba9d70028d1 Mon Sep 17 00:00:00 2001
+From 8a449543b228fdf8ff2c259f3719b6ee6b180570 Mon Sep 17 00:00:00 2001
 From: Stew Forster <ci@rdna-boosts.invalid>
 Date: Thu, 22 Oct 2026 05:53:08 -0500
 Subject: [PATCH 13/13] rdna-boosts: block 13: MTP draft vocabulary subset
@@ -271,10 +271,10 @@ index 4b3c7fcba..192fa9f97 100644
      float rope_freq_scale;
  
 diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
-index 21f4c2578..643e2f56d 100644
+index e426abd4d..e36ed79ad 100644
 --- a/src/llama-graph.cpp
 +++ b/src/llama-graph.cpp
-@@ -1658,6 +1658,7 @@ llm_graph_context::llm_graph_context(const llm_graph_params & params) :
+@@ -1670,6 +1670,7 @@ llm_graph_context::llm_graph_context(const llm_graph_params & params) :
      prec_policy      (params.prec_policy),
      hdmd             (params.hdmd),
      samplers         (params.samplers),

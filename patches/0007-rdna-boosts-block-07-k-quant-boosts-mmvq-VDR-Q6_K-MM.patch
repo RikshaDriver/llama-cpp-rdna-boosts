@@ -1,4 +1,4 @@
-From e84e9102933f35f048b274ab9290a9ae34aaf282 Mon Sep 17 00:00:00 2001
+From 0b2e97949cfcf956fe5f324fe334706f632e9aad Mon Sep 17 00:00:00 2001
 From: Stew Forster <ci@rdna-boosts.invalid>
 Date: Wed, 21 Oct 2026 10:40:31 -0500
 Subject: [PATCH 07/13] rdna-boosts: block 07: k-quant boosts (mmvq VDR, Q6_K

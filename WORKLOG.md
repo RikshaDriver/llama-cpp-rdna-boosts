@@ -1,5 +1,92 @@
 # WORKLOG - dated delivery records
 
+## 261024.012 (r131) -- PR #222: the three kq-mask fills that lacked their sibling's buffer guard (block 05)
+
+**Release:** `v14-3f03b1772-r131`.  Base `3f03b1772` (base tree `14370bd49a`), canonical tip `8a449543b`,
+tree `5946a27a53697d2a8ed5154d4b64ed459c1e7f44`, 14 blocks.  `scripts/validate-set.sh` green (checksums,
+fresh-tarball **strict 14/14** `git am`, applied tree == recorded tree).  **No block renumbered, merged or
+split**; the change is a fold inside **block 05**, every patch re-cut (the `From <sha>` lines change on any
+rebuild).  The delta against the r130 tree is **1 file, +15 / -3**, all of it in `src/llama-graph.cpp`.  No
+kernel, no dispatch, no GGML numerics, no default changed.
+
+Contributor PR: **#222** (issue **#221**) by **@RikshaDriver** (Asim Siddiqui), a first-time contributor —
+reviewed, reproduced independently here, and promoted with a `Co-authored-by` trailer on the release commit
+and an entry in `README.md` -> *Community Acknowledgements*.
+
+### The defect
+
+A **single-sequence** context on a hybrid-memory model died before the first token:
+
+```
+GGML_ASSERT(buffer) failed at ggml-backend.cpp:579        (571 on the reporter's r128 build)
+  ggml_backend_buffer_is_host()      -> llama_kv_cache::set_input_kq_mask     src/llama-kv-cache.cpp
+  llm_graph_input_mem_hybrid_k::set_input                                     src/llama-graph.cpp:1302
+  llm_graph_result::set_inputs      -> llama_context::process_ubatch -> decode
+```
+
+Reproduced here on gfx1201 with the reporter's model and prompt (`bailingmoe3` /
+`Ling-3.0-tiny-IQ4_NL`, `-ngl 999 -c 32768 -np 1`, r130 tree): rc 134, 2/2 runs, at `-c 8192` / `32768`
+(their 4096 / 131072 also abort).  `-np 2` and `-np 4` are unaffected in both builds.
+
+### The cause
+
+Block 05's derived kq form is registered by `build_attn_inp_kq_mask(..., allow_derived = true)`, and the
+runtime gate `multi_stream = n_seqs > 1 && (!cparams.kv_unified || arch == LLM_ARCH_DEEPSEEK4)` keeps it
+**enabled only at one slot**.  With the derived form on, the packed `n_kv x n_q` mask has no consumer, and
+the allocator gives an unconsumed input tensor **no buffer** — the documented behaviour the sibling classes
+rely on.  `llm_graph_input_mem_hybrid_k::set_input` then filled it unconditionally, and
+`llama_kv_cache::set_input_kq_mask` opens with `GGML_ASSERT(ggml_backend_buffer_is_host(dst->buffer))`.
+
+**Ten of the thirteen** `set_input_kq_mask` sites in `src/llama-graph.cpp` already guarded the fill with
+`if (tensor && tensor->buffer)` — the idiom the `attn-k-null-mask-guard` upstream candidate introduced
+(`llm_graph_input_attn_kv` is the origin, and `llm_graph_input_mem_hybrid` guards the *identical* call two
+hundred lines above the broken one).  Three did not: `llm_graph_input_mem_hybrid_k` and
+`llm_graph_input_attn_k_dsa`'s `mla` and `lid` masks.
+
+* `mem_hybrid_k` was **reachable**: its input is built by `build_attn_inp_k_impl()`, which passes
+  `allow_derived = true`.
+* the `attn_k_dsa` pair is **hardening**: `build_attn_inp_kq_mask(mctx_cur->get_mla()/get_lid(), ..., false)`
+  passes `false`, so no delivery path leaves those two masks unallocated today.  The reporter's own note was
+  "the gate is a property of the gate, not of the mask" — accurate, and the guard costs nothing.
+
+`can_reuse` needs nothing: `can_reuse_kq_mask()` reads `ne[]` only, never `buffer`.
+
+### What changed
+
+Three guarded fills, in the file's existing idiom; the contributor's patch is taken as-is apart from
+dropping the one stray blank line each hunk left behind (cosmetic).  Block 05's commit body carries the
+report and the credit.
+
+**Other unguarded fills of the same class were surveyed and deliberately left alone.**  `set_input_k_idxs`
+(`attn_k`, `attn_k_dsa`, `mem_hybrid{,_k}`) and the pointer-only `s_copy` / `k_rot` checks are unguarded in
+upstream master too, and none is reachable: a `k_idxs` / `s_copy` / `k_rot` tensor is always consumed by the
+node that needed it, so it always has a buffer.  Guarding them would be dead code on a path nothing tests;
+the invariant is recorded in `AGENTS.md` instead so a new fill site (or a new `allow_derived = true`
+builder) carries the guard.
+
+### Gates (gfx1201, ROCm 10.1.0, `~/bin/build-llama-rocm`; the r130 build as the A/B reference)
+
+| gate | result |
+|---|---|
+| the reported arm | `-np 1` **abort -> works**; greedy text = the `-np 2`/`-np 4` text = the `LLAMA_KQ_MASK_DERIVED=0` (packed) text (recall prompt, 128 tokens, seed 42: all md5 `d5a0e389`) |
+| `test-llama-archs -a bailingmoe3` | **2/2** (this is the block-05 row's repeatable check — it needs no GGUF) |
+| prefill-logit gate, Ling model (`--model … --ab "LLAMA_KQ_MASK_DERIVED=0"`) | **PASS 0.000000 / 100.000 %** — the derived path is bit-identical to the packed path at the logits (40 chunks x 512, base PPL 13.0461) |
+| prefill-logit gate, standard point (27B Q8_0) | **PASS 0.000000 / 99.980 %** (base not re-recorded; no kernel touched) |
+| coherence vs the r130 build (r130 lib vs r131 lib, same args) | **byte-identical in 5/5 working arms** — dense 4B 1 GPU and 3 GPU `-sm tensor`, 27B UD-Q4_K_XL 3 GPU tensor, 35B-A3B `-ncmoe 40`, Ling `-np 2`; the only diff is Ling `-np 1` (abort -> works) |
+| adaptive-MTP four axes (Protocol A, 27B UD-Q4_K_XL 1 GPU, `-n 3000`, `--spec-draft-n-max 3`) | t/s and **acceptance identical** to the r130 build in all 8 arms (R 59.3 / P 72.8 / C 79.3 / K 85.1 t/s; acc 0.59714 / 0.82593 / 0.91079 / 0.99200); purity `none == draft-mtp`, prose 6478 chars sha `0a2b78dd1720`, code 12637 chars sha `8d590f5f228a` |
+| `test-backend-ops -o FLASH_ATTN_EXT` | **6402/6402** (block 05's kernel matrix; no kernel line changed, run for completeness) |
+| `test-logits-width-probe` (4B dense, prose) | **PASS**, worst maxdiff 0 across `W = 1..8` |
+| per-block build (`--changed-from 531d70b23`, fresh dir per commit) | **2/2 built, 0 failed** (block 05 and the tip; the other 12 deltas are byte-identical to the chain that built 14/14 in r127) |
+| `check-gpu-faults.sh` (journal + every gate log) | clean |
+| `validate-set.sh` | green — strict 14/14 on a fresh tarball, tree == `release.json.tree` |
+
+Docs: `patches/README.md` (block-05 row and Purity note), `MANIFESTS.md` (block-05 verification row),
+`ENVIRONMENT.md` (`LLAMA_KQ_MASK_DERIVED` promoted out of the QSA grab-bag to its own kill-switch row —
+it is default-**on** and it is the packed reference arm), `AGENTS.md` (the guard invariant),
+`upstream/attn-k-null-mask-guard/README.md` (the candidate's "no reachable null-mask path upstream" note
+now records that the delivery does reach one), `GREEDY-PURITY.md` §54 (the new rule), `README.md`
+(contributor), `TODO.md` / `BASELINE.md` (current-release references).  No `TODO.md` item: the fix is closed by this entry.
+
 ## 261024.011 (r130) -- PR #210 (server prompt-cache residency) and PR #212 (DFlash ingest tail) promoted into block 12
 
 **Release:** `v14-3f03b1772-r130`.  Base `3f03b1772` (base tree `14370bd49a`), canonical tip `531d70b23`,
