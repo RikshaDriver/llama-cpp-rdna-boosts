@@ -1,5 +1,54 @@
 # WORKLOG - dated delivery records
 
+## 261025.002 (no release) -- build cost: a release arm must not get its own source path (ccache keys on it), plus `scripts/scratch-tree.sh` and per-block build timing
+
+**No delivery change**: `patches/`, `release.json` and the release tag are untouched (`release.json` still
+names `v14-3f03b1772-r132`).  Tooling and docs only, recorded because it changes how a release is built.
+
+### The measurement
+
+The r132 release (two PRs assessed, folded, gated) spent roughly 60-90 minutes compiling for ~20 minutes of
+actual work.  It was not the per-block gate that was expensive, and it was not the build-dir wipe:
+
+| what | wall | ccache |
+|---|---|---|
+| same r132 content, **new source path** (`/tmp/pt-same`, and again at `~/ccache-test`, both at tip `6950f7ad1`) | **5m56s / 85 CPU-min** | 722 **misses**, everything recompiled |
+| same r132 content, **same source path**, **fresh build dir** (`/tmp/mb-all`) | **8.6s** | 343 TUs, all direct **hits** |
+| one `.cu` delta at an established path | 15-30s | the one TU + link |
+| `common.cuh` (or any widely included header) delta | 3-5 min | ~100 dependents |
+| per-block gate, 7 block states at an established path | 640s total (block 06 alone: **34s**) | the per-block deltas |
+
+**ccache's key includes the absolute source paths in the compiler command line**, so a worktree at a new
+path is a full cold build no matter how identical the tree is.  r132 used four paths (a per-PR worktree for
+each PR, the folded tree, and the canonical checkout), i.e. four cold builds.  `CCACHE_BASEDIR=$HOME` does
+**not** fix it here (tested: still 5m55s / 724 misses).
+
+### What changed
+
+* **`scripts/scratch-tree.sh`** (new): one long-lived worktree + build dir, switched between states inside
+  it — `init`, `state REV`, `blocks [BASE]` (apply-all), `arm PATCH...` (`git am -3` on the release tip, the
+  PR/beta flow), `tip`, `keep TAG` (copy `build/bin` aside so a later state can be A/B'd against it),
+  `gate [args]` (runs the per-block gate with `--repo` pointing here), `show`.  It configures with the same
+  flags `~/bin/build-llama-rocm` and the gate use (so the three share cache entries) and prints every
+  build's wall time.  `--fast` builds the five binaries + `test-backend-ops` for a tight edit loop (`all`
+  costs ~0 extra on a warm cache, so it is not the default).
+* **`scripts/gate-per-block-build.sh`**: prints each commit's build time and the run's total, and its header
+  now records the cost model above (why `--repo` must be the long-lived path, and that a first block taking
+  minutes on an unchanged tree means the path was new).  The per-block method itself is unchanged and
+  deliberately still a **wiped build dir + `all` build** per commit: the wipe is free (8.6s measured) and
+  `all` is what the r2 lesson requires.
+* **Docs**: `AGENTS.md` (*Build the fork*: the rule with the numbers, and the honest per-delta budget),
+  `scripts/README.md` (a "Release work" flow block + the script's row), `MANIFESTS.md` (release gate 4: run
+  it against the long-lived checkout, and read the timing output).
+
+### r132 gate cost, measured at the canonical path
+
+Re-running the gate at `~/llama.cpp` for blocks 00-06 (7 states, all of them content that path had never
+built) took **640s**; block 06 by itself, whose tree is r131 content plus its own two amended files, took
+**34s**.  By contrast the same 14-block walk at a fresh path costs ~6 min per block.  The r132 release gate
+(5 selected blocks) at the canonical path is therefore a few minutes, and the fixed cost of a future release
+is one build of the new tree plus the per-block deltas, not N full builds.
+
 ## 261025.001 (r132) -- PR #218 (MMB per-device arch dispatch, Q8_1 cache view-offset + range guard) and PR #213 (split-state hit copy) promoted into blocks 06/08/09/10
 
 **Release:** `v14-3f03b1772-r132`.  Base `3f03b1772` (base tree `14370bd49a`), canonical tip `6950f7ad1`,

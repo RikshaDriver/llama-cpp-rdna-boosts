@@ -15,6 +15,18 @@
 #   per-block list (the r2 lesson: the reused cache kept the tip's
 #   GGML_CUDA_FA_QUANTS and made blocks 00-07 look like configure failures).  A
 #   fresh `rm -rf "$BUILD_DIR"` + configure + `all` build per commit is the only
+#
+# COST, AND THE ONE RULE THAT DECIDES IT (measured 2026-10-25, gfx1201, ROCm 10.1.0, ccache 30 GiB):
+#   The wipe itself is free.  The SAME content rebuilt at the SAME source path in a fresh build dir
+#   takes 8.6s (343 TUs, all ccache direct hits); the same content in a NEW source path takes 5m56s
+#   and 85 CPU-min (722 misses), because ccache's key includes the absolute source paths that reach
+#   the compiler command line.  So the gate's cost is (a) the genuine content delta of each selected
+#   block, plus (b) a FULL COLD BUILD OF THE FIRST BLOCK whenever --repo points at a path ccache has
+#   never seen.  A block state is mostly a previous release's content (the files later blocks own are
+#   unchanged in it), so the same --repo path across releases turns (b) into hits and leaves only (a):
+#   one .cu ~15-30s, a widely included header (common.cuh, ggml-impl.h) ~3-5 min, an all-new
+#   tree ~5-6 min.  Keep --repo on the long-lived checkout (the default ~/llama.cpp, or the one scratch
+#   tree scripts/scratch-tree.sh maintains) and never give a release arm its own worktree path.
 #   reliable method.  ccache makes it fast (only the per-block delta recompiles).
 #
 # Usage:
@@ -159,9 +171,9 @@ if [ "$LIST_ONLY" = 1 ]; then
     exit 0
 fi
 
-total=0; ok=0; failed=0; declare -a fail_list=()
+total=0; ok=0; failed=0; t_gate0="$(date +%s)"; declare -a fail_list=()
 for c in "${selected[@]}"; do
-    total=$((total+1))
+    total=$((total+1)); t_blk0="$(date +%s)"
     subj="$(git -C "$REPO" log -1 --format=%s "$c")"
     printf '==> [%2d] %s %s\n' "$total" "${c:0:9}" "$subj"
     git -C "$REPO" checkout -q "$c" || { echo "    CHECKOUT FAILED"; failed=$((failed+1)); fail_list+=("$c checkout"); [ "$KEEP_GOING" = 0 ] && break; continue; }
@@ -194,7 +206,7 @@ for c in "${selected[@]}"; do
     fi
     if cmake --build "$REPO/$BUILD_DIR" --target all -j "$JOBS" -- -k \
             > "$LOG_DIR/${total}.build.log" 2>&1; then
-        echo "    BUILD OK"
+        echo "    BUILD OK ($(( $(date +%s) - t_blk0 ))s)"
         ok=$((ok+1))
     else
         echo "    BUILD FAILED (log: $LOG_DIR/${total}.build.log)"
@@ -208,7 +220,9 @@ done
 git -C "$REPO" checkout -q "$ORIG_REF" 2>/dev/null || true
 
 echo
-echo "==> result: $ok/$total built, $failed failed"
+echo "==> result: $ok/$total built, $failed failed in $(( $(date +%s) - t_gate0 ))s (build dir wiped per commit)"
+echo "    (a first block that took minutes on an otherwise unchanged tree means ccache has never seen"
+echo "     this --repo path: rerun on the long-lived checkout, see the COST note in this script)"
 if [ "$failed" -ne 0 ]; then
     printf '    failed: %s\n' "${fail_list[*]}"
     echo "    full logs kept in $LOG_DIR"

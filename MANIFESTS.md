@@ -88,7 +88,11 @@ in CI.  The model-level gates are manual:
    the model's own prefill shape) is the second, deterministic leg of a family-switch judgement.
 4. **Per-block build** — `scripts/gate-per-block-build.sh` on a clean `all` build per commit (bisection and
    review walk the blocks individually, so every block must build on its own).  Use `--changed-from` to
-   rebuild only the blocks a release changed.
+   rebuild only the blocks a release changed.  **Run it against the long-lived checkout** (its default
+   `--repo`, or `scripts/scratch-tree.sh gate`): ccache keys on the source path, so a per-arm worktree makes
+   the first block a full cold build (measured: 5m56s / 85 CPU-min at a new path vs 8.6s for the same
+   content at the established one).  The gate prints each commit's build time and the run's total; a first
+   block that takes minutes on an otherwise unchanged tree means the path was new.
 5. **GPU faults** — `scripts/check-gpu-faults.sh` on the run's journal + log (never grep a log by hand).
 
 Run the GPU gates **alone**: two concurrent GPU jobs change the arena/band layout and invent failures.

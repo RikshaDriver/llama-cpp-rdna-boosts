@@ -748,6 +748,18 @@ sets: `scripts/gate-per-block-build.sh` then misses on nearly every FA translati
 entries the next block needs (measured 2026-10-21: block 05 went from ~45 min at 5 GiB to ~7 min after
 `ccache --max-size=30G`).  Set it once per box.
 
+- **Never give an arm its own source path: ccache keys on it (measured 2026-10-25).**  The same r132
+  content rebuilt in a **new** worktree path costs **5m56s wall / 85 CPU-min, all misses**; the same
+  content rebuilt at the **same** path in a **fresh build dir** costs **8.6s, all hits**.  A wiped build
+  dir is free, a new source path is a full cold build, so a release that assesses two PRs and folds them
+  must not use four worktrees (that is what turned ~20 min of work into ~1-2 h of compiling in r132).
+  Use ONE long-lived checkout for every arm: `scripts/scratch-tree.sh` switches states inside it
+  (`state <rev>`, `blocks`, `arm <patch>...`, `tip`, `keep <tag>` for an A/B, `gate` to run the per-block
+  gate there), and `~/llama.cpp` stays the canonical path so the gate's default `--repo` shares the cache.
+  The honest budget with that rule: one `.cu` delta 15-30 s, a widely included header (`common.cuh`,
+  `ggml-impl.h`) 3-5 min for its dependents, a whole new tree 5-6 min, and a per-block gate run is the
+  sum of the selected blocks' own deltas (r132, at the long-lived path: block 06 took 34 s).
+
 **`~/bin/build-llama-rocm` (ROCm 10.1.0, `/opt/rocm-10.1.0-gfx120X`) is the canonical build tree.**
 `~/bin/build-llama-rocm-714` is the older ROCm 7.14 tree (its own `BUILD_DIR`, `build-rocm-714`); it is
 still valid for a 7.14-specific check, but do not present it as the default. **Do not pass
