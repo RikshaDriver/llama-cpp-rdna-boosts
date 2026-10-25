@@ -41,11 +41,11 @@ only as a rough shape.
 | 03 | `0003-…-block-03-chunked-gated-delta-net-prefill` | chunked GDN prefill + rollback tracker | +3182 / −15 | 22 |
 | 04 | `0004-…-block-04-BF16-KV-cache-and-native-BF16-f` | BF16 KV cache + native-BF16 FA | +630 / −214 | 8 |
 | 05 | `0005-…-block-05-flash-attention-band-native-qua` | FA band / native quantized K-V / derived kq mask (+ the three kq-mask fills that lacked their sibling's buffer guard, r131) | +5047 / −612 | 289 |
-| 06 | `0006-…-block-06-MMB-quantized-prefill-GEMM` | MMB quantized prefill GEMM | +2877 / −3 | 7 |
+| 06 | `0006-…-block-06-MMB-quantized-prefill-GEMM` | MMB quantized prefill GEMM (+ r132: the per-arch dispatch keys on the running device, not the primary) | +2903 / −3 | 7 |
 | 07 | `0007-…-block-07-k-quant-boosts-mmvq-VDR-Q6_K-MM` | k-quant boosts (VDR, Q6_K MMQ, Q1_0, grid pad) | +879 / −137 | 9 |
-| 08 | `0008-…-block-08-fused-kernels-old-08-fusions-ol` | fused kernels + fused MoE | +5424 / −440 | 35 |
-| 09 | `0009-…-block-09-host-resident-MoE-iface-schedul` | host-resident MoE: iface, scheduler, cache, slab hooks (+ r120: the second draft scheduler's slot is per arch, DFlash2 fix) | +14889 / −518 | 65 |
-| 10 | `0010-…-block-10-slab-fusion-dispatcher-async-in` | slab + fusion dispatcher + async input ring (infrastructure) | +12058 / −4870 | 75 |
+| 08 | `0008-…-block-08-fused-kernels-old-08-fusions-ol` | fused kernels + fused MoE (+ r132: the Q8_1 cache's view-offset keying and source-range guard) | +5500 / −440 | 35 |
+| 09 | `0009-…-block-09-host-resident-MoE-iface-schedul` | host-resident MoE: iface, scheduler, cache, slab hooks (+ r120: the second draft scheduler's slot is per arch, DFlash2 fix; + r132: the split-state cache hit returns instead of copying) | +14911 / −524 | 65 |
+| 10 | `0010-…-block-10-slab-fusion-dispatcher-async-in` | slab + fusion dispatcher + async input ring (infrastructure) (+ r132: its two gated-q8_1 launch arms take the same guard; graph_optimize selects its own device) | +12083 / −4873 | 75 |
 | 11 | `0011-…-block-11-qwen4exp-model-hyper-connection` | qwen4exp model/QSA/HC/lazy reader/indexer cache | +11776 / −433 | 46 |
 | 12 | `0012-…-block-12-campaign-remainder-CPU-wins-bac` | campaign remainder (+ r106: Meta `ALL_GATHER`, DFlash2 `-sm tensor`, slab narrow-2; + r111/r112: `--host-experts pool` drops the pinned master; FRAC 80 + O_DIRECT defaults; + r119: batched state restore; + r130: DFlash ingest tail, server prompt-cache residency) | +3223 / −747 | 38 |
 | 13 | `0013-…-block-13-MTP-draft-vocabulary-subset-spe` | MTP draft vocabulary subset (`--spec-draft-mtp-vocab N`, opt-in) | +569 / −6 | 19 |
@@ -435,6 +435,17 @@ measured with.
 `GGML_CUDA_MMF32` (kill switch, `=0`), `GGML_CUDA_MMF32_LOG` (diagnostic).  Everything is default-on and
 documented in `ENVIRONMENT.md` §§10/10.1.
 
+**Per-device arch dispatch (r132).**  Every per-arch decision in `mmb.cu` (`mmb_enabled`, `mmb_cfg`,
+`mmb_cfg_dump_once`, `mmb_dense_flag`, `mmb_wtype_mask`, `mmb_dense_tmask`) keys on
+`ggml_cuda_info().devices[ggml_cuda_get_device()].cc` — the device the kernel runs on — not on `devices[0]`.
+MMB is designed off on RDNA2 (no WMMA), so on a mixed-arch box (gfx1100 primary + gfx1030 secondary) the old
+primary-keyed policy let the RDNA2 card run RDNA3-tuned MMB kernels: byte-exact zero output-projection
+logits (PPL == vocab) or garbled tail layers, depending on where the output projection sat.
+`ggml_backend_cuda_graph_optimize()` selects its own context's device first, because the MMB marking half
+consults the same predicates and under the Meta backend the pass is forwarded per child from meta
+`graph_compute` (where the current device is still the previously computed one).  On a single-arch box this
+is bit-for-bit the previous behaviour; `GREEDY-PURITY.md` §56.
+
 **Purity.**  Both kernels change prefill arithmetic, not decode: run the **prefill-logit gate** on any tuning
 change, and the width probe when a fusion/dispatch predicate moves.  For `mmf32` the gate is the
 *`--family-switch`* mode at a confident point (`prompts/kld-corpus-35b-in-domain.txt`), with the same-kernel
@@ -479,6 +490,18 @@ must be **bit-identical** to what it replaces at the widths it serves.
 * `moe-weighted-reduction.cu`: the MoE weighted-down reduction (+ column-blocked band epilogue).
 * `norm.cu` / `quantize.cu` / `unary.cu`: `rms_norm`→Q8_1 folds, the verify-band q8_1 cache, scale-unary,
   norm-rows, the conv1d/PLE fusions and the shared-expert down gate.
+* **The Q8_1 quantize cache's identity and its source guard (r132).**  The cache is keyed by the **root**
+  tensor's identity but the arena is filled from the (possibly offset) **view** pointer, so an offset view
+  stored its rows under the root identity and a later op with the same root and the same canonical row
+  layout could take them.  Every key walk that reaches the cache now stops at the **first pointer change**
+  (this block: the four `mmvq` sites and the unary `mul_q8_1` site; block 10 adds its own GLU site), so
+  offset-free views keep the shared root entry and an offset view gets its own entry.  `q8_1_src_range_ok()`
+  (block 08's `common.cuh`) validates the source read range against the root buffer's allocation before
+  every `quantize_row_q8_1_cuda` / fused gated-Q8_1 launch: a compute buffer reallocated under a
+  still-matching cache entry used to fault (`HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION`) or silently read
+  reused memory, and now aborts loudly with the layout logged.  No knob; `GREEDY-PURITY.md` §55.  Not
+  reachable on the maintainer's model set (0 offset-view keys in 14336-60416 key walks per config across
+  seven configs on gfx1201), so it is a correctness fix for configurations the delivery does not run.
 * `topk_moe`: the fused MoE router, made bit-identical to the softmax→argsort→get_rows→norm chain
   (`GREEDY-PURITY.md` §31) with a sorted-key argmax and a stable tie-break.
 * The **RDNA3_5 single-token-only fusion skip** (the dense GLU and the weighted-down tail are not
@@ -634,6 +657,14 @@ whatever VRAM is left.
   in the same order and computes the same states (proven with `GGML_META_SS_VERIFY=1`, which recomputes
   every outer hit), and an exhausted arena falls back to the upstream allocator, so nothing is capped.
   `GGML_META_SS_SCRATCH=0` restores the heap containers (A/B and bisection only).
+* **The split-state cache hit returns the entry's state instead of copying it** (r132, PR #213).  The hit
+  path used to build the state in a named local (`split_state_entry::get()`) and copy it into the return
+  slot, which is a ~2 KiB copy in a function that runs for every tensor of every graph allocation under
+  `-sm tensor`.  It now returns `entry.get()`, a prvalue of the return type, so the state is built once in
+  the caller's object.  Same values and the same assertions.  On this tree it is codegen-neutral — clang 24
+  and clang 23 at `-O3` already build the entry directly in the return slot (identical function size, one
+  instruction's worth of difference in the whole function) — so it is taken as an explicit-intent change,
+  not for the speedup the PR measured on its own build.
 * **The HIP graph cache key is the first node's `data` pointer, not its tensor object** (r115, TODO
   #51).  `ggml_cuda_graph_get_key()` was `{ nodes[0], n_tokens }`, and under the Meta backend every
   per-device subgraph is built from *simple tensors* that `ggml_backend_meta_graph_compute` re-creates
@@ -838,6 +869,15 @@ block's own symbols (QSA/HC matchers, the indexer relu-sum, the HC_BLK16/RES16 m
 * **The slab** (`ggml-cuda-slab.cu`, `ggml-cuda-arena.cu`): one VMM reserve per device split by a movable
   boundary — compute below, MoE arena above, no HIP call at runtime.  Plus the narrow-band learning, the
   wide-phase auxiliary region, pool-wide routing, and the slab transient absorption.
+* **The block-10 arms of the Q8_1 cache fix** (r132, with block 08): the fused GLU -> Q8_1 site's key walk
+  stops at the first pointer change (the fused write is keyed by the matmul's `src1`), and both of this
+  block's gated-q8_1 launch arms — the fused norm+gate kernel and the GLU write — validate their sources
+  with `q8_1_src_range_ok()` before launching.  `GREEDY-PURITY.md` §55.
+* **`ggml_backend_cuda_graph_optimize` selects its own context's device** (r132): the MMB predicates the
+  marking pass consults (`mmb_enabled()`/`mmb_cfg()`, per-device since block 06's r132 amendment) read the
+  *current* HIP device, and under the Meta backend the pass is forwarded per child from meta
+  `graph_compute`, where the current device is still the previously computed one.  `ggml_cuda_set_device()`
+  is a no-op when the device already matches, so a single-device run is unchanged.
 * **The slab's peer-access grants are per device and best effort, and a cross-device copy must ask before it**
   (r121, found validating TODO #94).  `ggml_cuda_vmm_map_phys` used to grant READWRITE for the owner and every peer in ONE
   `cuMemSetAccess` call and, on failure, silently retried with the owner only.  With three ~29 GiB slabs that

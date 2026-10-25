@@ -12,7 +12,7 @@ whether it is a kill-switch (default-on, set to disable), an opt-in, a tuning va
 
 It ships as **14 patches** (block 00 + blocks 01-13) for a clean llama.cpp checkout at the fork point
 **`3f03b1772`** (upstream master).  Each block is one `git am` commit, and the series is linear (a block
-assumes its predecessors), so the set is applied whole.  The current release is **`v14-3f03b1772-r131`**: the release
+assumes its predecessors), so the set is applied whole.  The current release is **`v14-3f03b1772-r132`**: the release
 identity (fork point, canonical tip/tree, block count and per-artifact sha256) is
 [`release.json`](release.json), and the release note for it -- and for every earlier `rN` -- is the top of
 [`WORKLOG.md`](WORKLOG.md) (newest first; it is the only dated record).  This README describes the set,
@@ -39,7 +39,7 @@ bash <path-to-this-repo>/scripts/apply-all.sh --include-beta .   # 14 blocks + b
 ## Releases
 
 Frozen deliveries are published as GitHub Releases and tagged in this repo
-(the tag is the release identity: `v14-<fork-point>-r<N>`, e.g. **`v14-3f03b1772-r131`**; the `v16-*`
+(the tag is the release identity: `v14-<fork-point>-r<N>`, e.g. **`v14-3f03b1772-r132`**; the `v16-*`
 tags are the historical 16-block set.  `r1` is the
 re-base of the set onto that fork point and every later `rN` is a dated change recorded in
 [`WORKLOG.md`](WORKLOG.md), newest first).
@@ -532,10 +532,11 @@ following users for the assistance in finding issues and offering solutions!
 
 - https://github.com/1337hero
 - https://github.com/bakon11
-- https://github.com/briansp2020  (block-13 moe_weighted_reduction float4 remainder fix + block-14 MUL_MAT_ID pair-fusion layout gate, issues #19 and #18)
+- https://github.com/briansp2020  (block-13 moe_weighted_reduction float4 remainder fix + block-14 MUL_MAT_ID pair-fusion layout gate, issues #19 and #18; PR #213: the split-state cache hit returns instead of copying the state, folded into block 09 in r132)
 - https://github.com/eoprede
 - https://github.com/overdoingism  (issue #45: the RDNA4 head-256 GQA-6 decode/verify flash-attention band, reported with the diagnosis, op-level data, the round-robin KV split idea and a working opt-in patch; the r4 block-15 band is built on that submission)
 - https://github.com/pwilkin  (the `strix-halo` fork at https://github.com/pwilkin/llama.cpp/commits/strix-halo/, heavily adapted for the MMB bf16-WMMA dequant-weight GEMM work, now folded into the delivery — formerly `archive/work/mmb-general/`)
+- https://github.com/slavap  (the gfx1030 / Radeon Pro V620 bring-up: the block 00-04 add-on set (PR #165) and the FA follow-ups (PR #181, #198); PR #218: MMB's per-arch dispatch keyed to the running device (a mixed-arch box ran RDNA3 kernels on the RDNA2 card and zeroed its output projection) and the Q8_1 cache's view-offset identity + source-range guard — folded into blocks 06/08/10 in r132)
 - https://github.com/RikshaDriver  (issue #221 / PR #222: the three kq-mask fill sites that lacked their sibling's buffer guard — a hard startup abort at `-np 1` on `bailingmoe3`, root-caused and validated on gfx1102; folded into block 05 in r131)
 - https://github.com/tungel
 - https://github.com/DanoPTT  (block-08 mul_mat+add through-view shape guard, PR #15; and issue #45 follow-up: the f16 verify-width diagnosis / the f16 + bf16 band coverage folded into block 15 in r5/r6, measured on their R9700)

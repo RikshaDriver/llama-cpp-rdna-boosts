@@ -1389,3 +1389,65 @@ passes `allow_derived = false`, so nothing in the delivery leaves those unalloca
 
 Record: `patches/README.md` (block 05), `MANIFESTS.md` (per-block row 05), `AGENTS.md` (the invariant),
 `upstream/attn-k-null-mask-guard/README.md`, `WORKLOG.md` 261024.012, PR #222 / issue #221.
+
+---
+
+## 55. A quantize cache keyed on a root tensor must match the pointer it fills from, and validate its read range
+
+**Claim.**  The verify-band Q8_1 cache (`ggml_backend_cuda_context::q8_1_cache_get`) is keyed by the
+**root** tensor's identity, but its arena is filled from the caller's (possibly offset) **view** pointer, and
+the entry records the key tensor's `data`.  Walking a view chain to the root without checking the pointer
+therefore lets an offset view store its quantized rows under the root's identity: a later op with the same
+root and the same canonical row layout (`q8_1_rows_canon`) hits them and computes with another tensor's
+activation.  It also leaves the entry's stored pointer valid after the view's compute buffer has been
+reallocated (graph replay / pool reuse), so the quantize kernel can read a stale pointer — a GPU fault
+(`HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION` on the reporter's RDNA2 decode) or silent stale reads.
+
+**Rule.**  A key walk that crosses a view stops at the **first pointer change**:
+`while (key->view_src && src->data == key->data) key = key->view_src;`.  Offset-free views keep sharing the
+root's entry (the common case, unchanged); an offset view gets its own entry.  Before every
+`quantize_row_q8_1_cuda` / fused gated-Q8_1 launch, `q8_1_src_range_ok()` checks the source's read extent
+against the root buffer's allocation and **aborts with the layout logged** rather than launching: a source
+that has moved inside its buffer is a stale-pointer defect, not a tuning matter.  A new site that fills the
+cache (or a new fused writer that fills it for a matmul) carries both halves.
+
+**Evidence (r132, gfx1201).**  Grafted from PR #218 (@slavap), whose V620 reproduced the fault on decode.
+Not reachable on the maintainer's model set: a probe at the four `mmvq` sites counted **0 offset-view keys**
+in 14336-60416 key walks per config across seven configs (dense 4B 1/3 GPU tensor, 27B UD-Q4_K_XL 3 GPU
+tensor, 27B IQ3_S 3 GPU tensor, 35B-A3B `-ncmoe 40` and `-ncmoe 10`, Flash-Next GSQ 2 GPU tensor with MTP,
+Flash-Next `-sm layer`, Ling IQ4_NL) — so every same-seed arm is byte-identical (12/12) and MTP acceptance is
+identical on the four axes (1859/3416, 1420/1710, 2171/2483, 372/375); prefill-logit KLD 0.000000 on both
+recorded points.  `test-backend-ops -o MUL_MAT` 2445/2445 and `-o MUL_MAT_ID` 931/931 with
+`LLAMA_TEST_SEED` fixed (a random-data marginal `q4_1`/`q5_0` tolerance case fails identically on the base
+build at seed 41 — ERR 0.000511759 on all four builds — which is why the seeded form is the comparison).
+
+Record: `patches/README.md` (blocks 08/10), `MANIFESTS.md` (per-block rows 08/10), `archive/work/pr213-pr218-r132/`,
+`WORKLOG.md` 261025.001, PR #218.
+
+---
+
+## 56. A per-arch dispatch decision keys on the running device, and the pass that consults it selects its own
+
+**Claim.**  MMB's policy predicates (`mmb_enabled`, `mmb_cfg`, `mmb_cfg_dump_once`, `mmb_dense_flag`,
+`mmb_wtype_mask`, `mmb_dense_tmask`) read `ggml_cuda_info().devices[0].cc` — the **primary's** cc.  On a
+mixed-arch box that freezes one architecture's policy for every device, so a gfx1030 (RDNA2, no WMMA)
+secondary behind a gfx1100 primary ran RDNA3-tuned MMB kernels: byte-exact zero output-projection logits
+(PPL == vocab size) or garbled tail-layer GEMMs, depending on which device held the output projection.
+
+**Rule.**  A per-arch decision keys on the device the kernel runs on —
+`ggml_cuda_info().devices[ggml_cuda_get_device()].cc`, the idiom `mmq`/`mmvq`/`fattn` already use — and a
+per-arch table is cached per architecture **class**, not once per process.  A pass that consults such a
+predicate without launching (the `graph_optimize` marking half) selects its own context's device first:
+under the Meta backend the pass is forwarded per child from meta `graph_compute`, so the current device is
+still the previously computed one, and a marking decision made on the wrong arch can elide an F32 output
+that the launch path then never fills.
+
+**Evidence (r132, gfx1201).**  Grafted from PR #218 (@slavap), who measured the V620 arm at PPL 248320 ->
+2.9844 and the XTX-primary/output-on-XTX garble (917.54) -> 2.9842 on a 2x XTX + V620 box.  Bit-for-bit
+identical on a single-arch box by construction (the current device's cc *is* `devices[0].cc`), validated
+here: 12/12 same-seed configs byte-identical, prefill-logit KLD 0.000000 on both recorded points, no GPU
+faults.  The gfx1030 arm itself is **not** validated on this fleet (no RDNA2 hardware; the reporter's
+numbers are the only mixed-arch measurements).
+
+Record: `patches/README.md` (block 06), `MANIFESTS.md` (per-block row 06), `archive/work/pr213-pr218-r132/`,
+`WORKLOG.md` 261025.001, PR #218.

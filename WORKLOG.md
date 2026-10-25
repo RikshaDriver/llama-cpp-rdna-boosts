@@ -1,5 +1,113 @@
 # WORKLOG - dated delivery records
 
+## 261025.001 (r132) -- PR #218 (MMB per-device arch dispatch, Q8_1 cache view-offset + range guard) and PR #213 (split-state hit copy) promoted into blocks 06/08/09/10
+
+**Release:** `v14-3f03b1772-r132`.  Base `3f03b1772` (base tree `14370bd49a`), canonical tip `6950f7ad1`,
+tree `7368926758ba53bb505b63ffffd7408122656665`, 14 blocks.  `scripts/validate-set.sh` green (checksums,
+fresh-tarball **strict 14/14** `git am`, applied tree == recorded tree).  **No block renumbered, merged or
+split**; the changes are folds inside **block 06**, **block 08**, **block 09** and **block 10**, every patch
+re-cut (the `From <sha>` lines change on any rebuild).  The delta against the r131 tree is **6 files,
++155 / -36** (`ggml-backend-meta.cpp`, `ggml-cuda/{common.cuh,ggml-cuda.cu,mmb.cu,mmvq.cu,unary.cu}`).  No
+kernel's arithmetic changed, no default changed, no new environment variable.
+
+Two contributor PRs, both filed as add-on patch sets against r120/r126 and both re-cut onto r131 and
+reviewed claim by claim.  **The headline of each one does not reproduce on this tree, and the record below
+says why** — the changes were taken because they are correct and cheap, not because they measured here.
+Evidence, probes and commands: `archive/work/pr213-pr218-r132/` (`README.md`, `EVIDENCE.md`).
+
+### #218 part 1 -- MMB's per-arch dispatch keyed on the primary (block 06)
+
+Every per-arch decision in `mmb.cu` (`mmb_enabled`, `mmb_cfg`, `mmb_cfg_dump_once`, `mmb_dense_flag`,
+`mmb_wtype_mask`, `mmb_dense_tmask`) read `ggml_cuda_info().devices[0].cc`.  MMB is designed off on RDNA2
+(no WMMA), so on a **mixed-arch** box (gfx1100 primary + gfx1030 secondary) the policy froze at the
+primary's and the RDNA2 card ran RDNA3-tuned MMB kernels: the reporter's V620 produced byte-exact zero
+output-projection logits (PPL == vocab, 248320) or garbled tail-layer GEMMs (PPL ~917), depending on which
+device held the output projection.  All six sites now read the **running** device's cc — the idiom
+`mmq`/`mmvq`/`fattn` already use — and `mmb_cfg()` takes one magic static per architecture **class**, which
+is exactly per-arch because `mmb_arch_defaults()` discriminates only RDNA4 and RDNA3_0 (documented in the
+code so a future RDNA3_5 row does not silently share the fallback).
+
+**Added on top of the PR:** `ggml_backend_cuda_graph_optimize()` now calls
+`ggml_cuda_set_device(cuda_ctx->device)` first.  The MMB *marking* half consults the same predicates, and
+under the Meta backend that pass is forwarded per child from meta `graph_compute`, where the current device
+is still the previously computed one — without the line, `get_device()` would be truthful for launches and
+stale for marks, and `GGML_CUDA_MMB_DOWN16`/blk16/res16 marks can elide an F32 output.  It is a no-op when
+the device already matches, so a single-device run is unchanged.
+
+**Not reproduced here (no RDNA2 hardware).**  On a uniform box the current device's cc *is* `devices[0].cc`,
+so the change is bit-for-bit by construction, and that is what was validated: 12/12 same-seed configs
+byte-identical, prefill-logit KLD 0.000000 on both recorded points, no GPU faults.  The reporter's
+mixed-arch matrix is the only mixed-arch measurement.
+
+### #218 part 2 -- the Q8_1 quantize cache's identity and its source guard (blocks 08 and 10)
+
+The cache is keyed by the **root** tensor's identity but its arena is filled from the caller's (possibly
+offset) **view** pointer (and the entry records the key's `data`), so an offset view that walked to the root
+stored its quantized rows under the root's identity; a later op with the same root and canonical row layout
+could take them, and after a compute-buffer reuse the stored pointer was stale — the reporter's V620 decode
+faulted with `HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION`.  Every key walk that reaches the cache now stops
+at the **first pointer change** (`while (key->view_src && src->data == key->data)`), so offset-free views
+keep the shared root entry and an offset view gets its own; `q8_1_src_range_ok()` additionally validates the
+source read extent against the root buffer's allocation before every `quantize_row_q8_1_cuda` / fused
+gated-Q8_1 launch and **aborts with the layout logged** instead of launching into a stale pointer.
+
+**Placed where the sites are:** block 08 owns the cache, `common.cuh`'s guard, the four `mmvq` sites and the
+unary `mul_q8_1` site; block 10 owns the fused GLU -> Q8_1 site and its two launch arms, which the PR (cut
+against an older tree) could not have patched.  The PR's one cosmetic slip (two statements on one line in
+`ggml_cuda_op_shexp_down_gate`, our own block-08 code) is fixed while the line is touched.
+
+**Not reachable here.**  A temporary probe at the four `mmvq` sites counted **0 offset-view keys** in
+14336-60416 walks per config across seven configs (dense 4B 1/3 GPU tensor, 27B UD-Q4_K_XL 3 GPU tensor,
+27B UD-IQ3_S 3 GPU tensor, 35B-A3B `-ncmoe 40` and `-ncmoe 10`, Flash-Next GSQ 2 GPU tensor with MTP,
+Flash-Next `-sm layer`, Ling IQ4_NL), so no arm of ours could have hit either defect and the identity arms
+are the whole validation: 12/12 configs byte-identical, four-axis MTP acceptance identical, prefill-logit
+KLD 0.000000.  The guard itself never fired in any run (grep for `q8_1 source out of range` is empty).
+
+### #213 -- the split-state cache hit returns instead of copying (block 09)
+
+`ggml_backend_meta_get_split_state()`'s hit path built the ~2 KiB state in a named local
+(`split_state_entry::get()`) and copied it into the return slot; it now returns `entry.get()` so the state is
+built once in the caller's object.  Same values, same assertions.  The PR measured that copy as ~half of the
+function's self time on its build (2 `rep movsq` -> 1).
+
+**It is codegen-neutral on this tree, and that is the finding.**  With both ROCm trees in use here (clang 24
+in 10.1.0, clang 23 in 7.14.1) at `-O3`, the function is the *same size* before and after (one instruction's
+worth of difference in the whole 1272-instruction body; no `rep movs` in either), i.e. the NRVO elision the
+PR makes explicit is already happening.  `perf record` over short follow-up turns puts the function at
+1.63-1.92 % of all process samples before and 1.56-1.60 % after — noise — and wall-clock prompt/turn times
+are identical within noise on three alternating server pairs.  Taken anyway (it states the intent at the
+source level and removes a dependency on an optional elision, provably value-identical) and recorded in the
+block-09 body **as neutral**, so nobody re-reads it as a speedup.
+
+### Gates (gfx1201, ROCm 10.1.0, `~/bin/build-llama-rocm`; r131 vs r132 where it is an A/B)
+
+| gate | result |
+|---|---|
+| coherence, same-seed greedy, 12 configs (dense 4B 1 GPU and 3 GPU tensor, 27B UD-Q4_K_XL, 35B-A3B `-ncmoe 40` and `-ncmoe 10`, 27B IQ3_S, Flash-Next GSQ + MTP tensor and `-sm layer`, Ling IQ4_NL, Gemma4 E4B, 35B-A3B + adaptive MTP n7, 27B + adaptive MTP n7) | text **identical in 12/12** for base, the two per-PR builds and the folded delivery build |
+| adaptive-MTP four axes (Protocol A, 27B UD-Q4_K_XL, 1 GPU, `-n 3000`, draft-mtp n3) | t/s and **acceptance identical** (R 53.9 / P 70.5 / C 73.4 / K 80.5; acc 0.54420 / 0.83041 / 0.87435 / 0.99200); the P axis without `-v 4` is byte-identical (5975 chars, `2928e6d6ea55`) |
+| prefill-logit gate, 27B Q8_0 and Ling IQ4_NL | **PASS 0.000000 / 99.980 %** and **0.000000 / 100.000 %** |
+| `GGML_META_SS_VERIFY=1` on the folded build (`-sm tensor` configs c and g above: every outermost split-state cache hit recomputed and compared) | no stale entry, no abort, text identical |
+| `llama-batched-bench -npp 16 -ntg 32 -npl 1,4,8`, 27B q8_0 KV, 3 GPU tensor, two interleaved rounds | TG within noise of base at B=1/4/8 (44.99/145-146/244.4 vs 44.5-45.0/145-146/244.2-244.5) |
+| `test-backend-ops -o MUL_MAT` / `-o MUL_MAT_ID`, `LLAMA_TEST_SEED` fixed | 2445/2445 and 931/931, both builds, seeds 1-3 |
+| `test-backend-ops` unseeded (rate check) | base 16/16 clean, fold 13/15 clean: the failures are **marginal-tolerance cases on random data** (`q4_1`/`q5_0`, ERR ~0.00066 vs the 0.000500 limit) and `LLAMA_TEST_SEED=41` reproduces the identical ERR **0.000511759 on base, pt213, pt218 and fold** — the flake is the harness's random data, not the change |
+| per-block build (`--changed-from 8a449543b`) | **5/5 built, 0 failed** (blocks 06, 08, 09, 10 and the tip; the other nine deltas are byte-identical to the chain that built 14/14 in r127) |
+| GPU faults (`scripts/check-gpu-faults.sh`, journal + 6 gate logs) | clean |
+| `validate-set.sh` | green -- strict 14/14 on a fresh tarball, tree == `release.json.tree` |
+
+Docs: `patches/README.md` (block index sizes/annotations; a per-device-dispatch paragraph in block 06; the
+Q8_1 identity + guard entry in block 08; the split-state hit path in block 09; the block-10 arms and the
+`graph_optimize` device select), `MANIFESTS.md` (four new per-block verification rows), `GREEDY-PURITY.md`
+**§55** (the Q8_1 cache identity + read-range rule) and **§56** (per-device arch dispatch, and the pass that
+consults it selects its own), `ENVIRONMENT.md` (the MMB per-device note; the Q8_1 guard is explicitly "not a
+knob"), `AGENTS.md` (both as critical facts; the release pointer), `README.md` (contributor credits),
+`archive/work/pr213-pr218-r132/` (the campaign record + evidence), `TODO.md` / `BASELINE.md` (current
+release).  No `TODO.md` item: nothing is left open by either PR.
+
+**Not validated:** the gfx1030 arm of #218 part 1 (no RDNA2 hardware in the fleet; the reporter's box is
+the only mixed-arch measurement), gfx1101/gfx1102 and gfx1151 for the same reason (the change is a no-op
+there, but the *mixed-arch* arms are RDNA3_0-vs-RDNA2 by construction), and any configuration that actually
+reaches the Q8_1 offset-view path.
+
 ## 261024.012 (r131) -- PR #222: the three kq-mask fills that lacked their sibling's buffer guard (block 05)
 
 **Release:** `v14-3f03b1772-r131`.  Base `3f03b1772` (base tree `14370bd49a`), canonical tip `8a449543b`,

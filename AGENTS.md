@@ -165,7 +165,7 @@ stub alive to serve them, and treat a `wip/` path in an old record as a historic
 - **Apply method:** all 14 blocks with **`git am`**; `scripts/apply-all.sh` is the tested path. Plain
   `git apply` of the concatenated series **silently drops hunks**. Every block is a normal commit.
 - **Naming (V2.1):** the current set is **14 blocks, 00-13** (release `release.json .release` —
-  `v14-3f03b1772-r129` at the 2026-10-24 re-base).  Every `block NN`
+  `v14-3f03b1772-r132` at the 2026-10-24 re-base; the value lives in `release.json`, never here).  Every `block NN`
   reference elsewhere in this file that is not one of the V2.1 numbers below is the **pre-V2.1 16-block
   numbering** and is kept as a historical handle.  The V2.1 map: **01** all-reduce, **02** adaptive MTP,
   **03** chunked GDN, **04** BF16 KV, **05** FA band/native/derived, **06** MMB, **07** k-quant,
@@ -470,6 +470,27 @@ stub alive to serve them, and treat a `wip/` path in an old record as a historic
   false for its `mla`/`lid` masks).  A new fill site, a new `allow_derived = true` builder or a new hybrid
   input class must carry it; `can_reuse` needs nothing (`can_reuse_kq_mask()` reads `ne[]`, never
   `buffer`).  `LLAMA_KQ_MASK_DERIVED=0` is the work-around and the packed reference arm.
+- **A Q8_1 quantize-cache key walk stops at the first pointer change, and every fill validates its read
+  range (r132, PR #218).**  The cache is keyed on the **root** tensor but the arena is filled from the
+  caller's (possibly offset) **view** pointer, so an offset view that walked to the root stored its rows
+  under the root's identity and a later op with the same canonical row layout could take them; a stale
+  pointer after a compute-buffer reuse then faulted (`MEMORY_APERTURE_VIOLATION`) or read reused memory.
+  Every walk is `while (key->view_src && src->data == key->data) key = key->view_src;` (offset-free views
+  keep the shared entry — that is the common case and unchanged), and `q8_1_src_range_ok()` (block 08's
+  `common.cuh`) aborts with the layout logged if a source's extent leaves its root buffer.  A new cache
+  site or a new fused writer that fills the cache for a matmul carries both; there is no knob.  Not
+  reachable on the maintainer's configs (0 offset-view keys across seven configs), so its validation is
+  code review + the identity gates, not a repro.  `GREEDY-PURITY.md` §55.
+- **A per-arch kernel-policy predicate keys on the device it runs on, never on `devices[0].cc` (r132).**
+  MMB's `mmb_enabled`/`mmb_cfg`/`mmb_dense_flag`/`mmb_wtype_mask`/`mmb_dense_tmask` read
+  `ggml_cuda_info().devices[ggml_cuda_get_device()].cc`; the primary-keyed form froze one arch's policy for
+  every device, so a gfx1030 secondary behind a gfx1100 primary ran RDNA3-tuned MMB kernels and zeroed its
+  output-projection logits (PPL == vocab).  A table that is per-arch is cached per architecture *class*
+  (`mmb_arch_defaults()` discriminates only RDNA4/RDNA3_0, so the fallback table is cc-independent — add a
+  branch if that changes).  A pass that consults such a predicate without launching selects its own
+  context's device first: `ggml_backend_cuda_graph_optimize` does, because the Meta backend forwards its
+  marking half per child and the current device is then still the previously computed one.  On a
+  single-arch box the change is a no-op.  `GREEDY-PURITY.md` §56.
 - **The host-resident-expert device gather's head pad must match the host path**
   (`min(expert_size, 512)`; **64 is IQ4_NL-only**), keyed on `(input_cpy buffer, expert_bytes)`. Run
   `scripts/gate-qwen4exp-quant-coherence.sh` before changing `moe_cache_gather_host` or the head zero.

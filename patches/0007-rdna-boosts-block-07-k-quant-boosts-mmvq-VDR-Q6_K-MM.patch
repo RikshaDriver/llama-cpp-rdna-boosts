@@ -1,4 +1,4 @@
-From 0b2e97949cfcf956fe5f324fe334706f632e9aad Mon Sep 17 00:00:00 2001
+From cdd6811e1abc4501e0c68890bf236c1d15c05781 Mon Sep 17 00:00:00 2001
 From: Stew Forster <ci@rdna-boosts.invalid>
 Date: Wed, 21 Oct 2026 10:40:31 -0500
 Subject: [PATCH 07/13] rdna-boosts: block 07: k-quant boosts (mmvq VDR, Q6_K
@@ -66,7 +66,7 @@ index cb5d89baf..b63d5efc3 100644
  int ggml_cuda_get_device();
  
 diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
-index 057dc35ee..57403fdb3 100644
+index e630e7795..e06967d11 100644
 --- a/ggml/src/ggml-cuda/ggml-cuda.cu
 +++ b/ggml/src/ggml-cuda/ggml-cuda.cu
 @@ -5475,13 +5475,16 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend,
